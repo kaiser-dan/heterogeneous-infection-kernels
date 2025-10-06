@@ -1,0 +1,159 @@
+---
+# Metadata
+title: "Testing inidividual kernel forward sampling"
+date: "2025-09-25"
+
+# Formatting
+format: 
+    html:
+        self-contained: true  # don't allow reavealjs for this document
+---
+
+# Introduction
+
+I'm working on implementing a forward sampling of Jean-Gabriel's initial kernel model
+$$
+\textrm{Logit } c_i{\nu} = \mu(\nu) + \varepsilon_i(\nu)
+$$
+
+That is, I want to get the Stan model written up[^stan] so that I can sample a selection of $c_i$.
+
+# Stan code
+
+I have implemented a first crack at the Stan code in `src/model.stan`; below is the content of the file
+
+```{.stan code-line-numbers="true"}
+/* Input data from user */
+data {
+	/* Population constants */
+		// Number of individuals in the population
+		int<lower=2> N;
+	
+		// Maximum number of neighbors (and hence number of infected neighbors)
+		int<lower=1, upper=N> kmax;
+}
+
+/* Sampled from specified sampling distributions */
+generated quantities {
+	// Population average kernel
+	array[kmax] real<lower=0, upper=1> mu;
+	for (nu in 1:kmax) {
+		mu[nu] = uniform_rng(0,1); // NOTE: Debugging prior
+	}
+	
+	// Individual deviations
+	array[N, kmax] real epsilon;
+	for (i in 1:N) {
+		for (nu in 1:kmax) {
+			epsilon[i][nu] = normal_rng(0, 10); // NOTE: Debugging prior
+		}
+	}
+	
+	// Individual kernels
+	array[N, kmax] real kernel;
+	for (i in 1:N) {
+		for (nu in 1:kmax) {
+			kernel[i][nu] = inv_logit(mu[nu] + epsilon[i][nu]);
+		}
+	}
+}
+```
+
+Notably, lines 27-33 of the code are where the creation of the individual kernels are done.
+Since it is within a `generated quantities` block, we have to sample the $\mu$ and $\varepsilon_i$ first.
+
+# Sampling kernels
+```{python}
+#| label: setup.environment
+#| output: false
+
+# PROJECT SETUP
+# set DRAFT = False for final output; DRAFT = True is faster
+DRAFT = True
+
+import itertools
+import logging
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.filterwarnings( "ignore", module = "plotnine\..*" )
+
+import cmdstanpy as csp
+csp.utils.get_logger().setLevel(logging.ERROR)
+
+import numpy as np
+import statistics as stat
+import pandas as pd
+import plotnine as pn
+import time
+
+class StopWatch:
+    def __init__(self):
+        self.start()
+    def start(self):
+        self.start_time = time.time()
+    def elapsed(self):
+        return time.time() - self.start_time
+timer = StopWatch()
+
+```
+
+In order to sample kernels from the model, we need to specify the information in the `data` block, namely, the number of individuals in the population ($N$) and the maximum number of infected neighbors possible ($kmax$).
+
+```{python}
+#| label: sampling.data
+#| echo: true
+
+
+# Declare constants
+data = {
+    'N': 5,
+    'kmax': 2
+}
+```
+
+```{python}
+#| label: sampling.load_model
+
+
+# Load STAN model
+model = csp.CmdStanModel(stan_file = '../../../src/model.stan')
+```
+
+Then, after loading the model into memory (and compiling it if necessary), we can sample from the model with the `sample` method.
+
+```{python}
+#| label: sampling.sample
+#| echo: true
+
+# Sample from model, yippeeeee
+sample = model.sample(
+    data=data,
+    seed=37,
+    chains = 1, iter_sampling=10,
+    iter_warmup=20,
+    show_progress=False, show_console=False
+)
+```
+
+## Examining output
+
+With $N=5$ and a $kmax=2$, we expect a single sample from the model to be a $5 \times 2$ matrix, $C$, where $C_ij$ is the kernel value $c_i(j)$; that is, the probability that $i$ becomes infected with $j$ many infected neighbors.
+Since we set `iter_sampling` to 10, we sample 10 such matrices.
+
+```{python}
+#| label: sampling.show_output
+#| echo: true
+#| output: true
+
+kernel = sample.stan_variable('kernel')
+
+print(type(kernel))
+print(kernel.shape)
+print(kernel[0])
+
+```
+
+
+<!-- --------------------------------------------------------- -->
+
+[^stan]: Well, enough of the Stan code written to sample $c_i(\nu)$; the full model will include, in the same source code, the inferential capabilities as well.

@@ -1,0 +1,32 @@
+# Project hyperconfig
+project:
+  type: default
+  title: "Heterogenous infection kernels"
+
+# Formatting config
+format:
+  html:
+    code-fold: true
+    code-tools: true
+    grid:
+      margin-width: 2in
+    self-contained: false
+  revealjs:
+    incremental: false
+  
+
+# Execution config
+jupyter: hetker
+execute:
+  eval: true
+  echo: false
+
+# Global config
+toc: true
+bibliography: "references.bib"
+bibliographystyle: "american-physics-society"
+reference-location: margin
+citation-location: margin
+
+# Global metadata
+author: "Daniel Kaiser"
