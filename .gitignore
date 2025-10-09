@@ -9,3 +9,7 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Compiled Stan models (machine dependent)
+src/model
+src/sampling
