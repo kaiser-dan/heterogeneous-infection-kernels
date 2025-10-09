@@ -1,0 +1,216 @@
+---
+# Metadata
+title: "Minimal working validation experiment"
+date: "2025-10-09"
+
+# Formatting
+format: 
+    html:  # no revealjs for this document
+        self-contained: false  # turn on when sharing
+        fig-align: center
+        code-fold: show
+
+execute:
+    output: true
+    echo: true
+---
+
+```{python}
+#| label: setup.environment
+#| output: false
+#| echo: false
+
+import os
+import random
+import sys
+
+import cmdstanpy as csp
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Add project source to path
+sys.path.append(
+    os.path.join(
+        '..',  # logs -> notes
+        '..',  # notes -> docs
+        '..',  # docs -> project root
+    )
+)
+
+import src
+```
+
+# Introduction
+
+BLAH
+
+# Data
+
+## Contact network
+
+We first need to sample a network topology on which we will run our dynamics.
+For some reasons[^1], in some future work we expect to correlate structural positions with infection kernel mixtures. 
+To save some time, we will operate on some block models from the start.
+A simple two-block planeted partition model will suffice.
+
+[^1]: I don't know if I fully understood those reasons, should read throough X paper again - and take better notes this time.
+
+First, let's set up our global population parameters, e.g. number of individuals and so forth.
+
+```{python}
+#| label: data.set_globals.population
+
+# Population globals
+NUM_PEOPLE: int = 100
+AVG_DEGREE: int = 5
+```
+
+With a small population to begin with, let's sample a fairly strong two-block network for their contacts.
+
+```{python}
+#| label: data.sample_network
+
+# Set block mixing parameters
+EPSILON: float = 0.9  # proportion of total edges placed within blocks
+
+# Sample model
+A = src.sbm(NUM_PEOPLE, AVG_DEGREE, EPSILON, seed=37)
+```
+
+The adjacency matrix is visualized in @fig-adjacency.
+
+```{python}
+#| label: fig-adjacency
+#| fig-cap: "Contact network topology"
+#| echo: false
+
+# Show adjacency
+plt.spy(A)
+```
+
+We will also need the maximum degree for the inference later, as this provides our support for $\nu$. 
+We will compute it now.
+
+```{python}
+#| label: data.set_globals.population.kmax
+#| echo: false
+
+KMAX: int = max(np.sum(A, axis=0))
+
+print(f"Maximum degree is {KMAX}")
+```
+
+## Infection kernels
+
+With the contact network in hand, we must now sample an infection kernel for each individual.
+This sampling, in full generality, should respect the network structure as well; that is, the groups and kernel mixtures should be correlated.
+There is currently only support for one kernel, however, so we don't need to worry about this in the current sampling _per se_.
+
+We will consider two scenarios here:
+
+1. A simple kernel sampled "by hand"
+2. A non-parametric kernel sampled from our model
+
+Note that the inference mechanism works with non-parametric kernels in general. 
+In the first scenario, I am just enforcing that $c_i(\nu)$ looks like $1-(1-\beta)^{\nu}$ for some $\beta$.
+
+We first set some contagions parameters that are constant across both scenarios, namely, the recovery rate and the seed nodes.
+
+```{python}
+#| label: data.set_globals.contagion
+
+# Shared contagion parameters
+GAMMA: float = 0.01 # recovery rate
+NUM_SEEDS: int = 3  # number of initially infected persons
+
+# Sample seed nodes
+_seeds = set(random.sample(range(NUM_PEOPLE), k=NUM_SEEDS))
+x0 = [int(idx in _seeds) for idx in range(NUM_PEOPLE)]
+```
+
+
+### Simple contagion
+
+Let's begin with sampling a simple kernel.
+We set some $\beta$ and sample the seed nodes and a kernel for each individual.
+In this scenario, the kernel is constant as a function of $i$ and given as $c_i(\nu) = 1 - (1-\beta)^{\nu} \equiv c(\nu)$.
+
+```{python}
+#| label: data.sample_kernels.simple
+
+# Contagion parameters
+BETA: float = 0.04  # infection rate
+
+# Sample simple kernel from given beta 
+c_simple = np.array([
+    [1-np.power(1-BETA, nu) for nu in range(1, KMAX+1)]
+    for _ in range(NUM_PEOPLE)
+])
+```
+
+
+### Our model
+
+In our own model we are considering
+
+$$
+\text{logit } c_i(\nu) \sim \alpha_i(\nu)
+$$ {#eq-kernel}
+
+where furthermore
+$$
+\alpha_i(\nu) \sim \mathcal{N}(\mu_{\alpha}(\nu), \sigma_{\alpha})
+$$
+
+and BLAH.
+
+So, to sample from this model we then need to specify the following parameters:
+
+```{python}
+#| label: data.sample_kernels.model.parameters
+
+# Our model hyperpriors
+AVERAGE_SCALE: float = 2.0    # mu dirichlet location scaling
+DEVIATION_SCALE: float = 4.0  # sigma exponential scale
+```
+
+And then we can sample the non-parametric infection kernels according to @eq-kernel from the Stan code via the `CmdStanPy` interface.
+```{python}
+#| label: data.sample_kernels.model
+
+# Declare constants
+data = {
+    # Population constants
+    'V': NUM_PEOPLE,
+    'kmax': KMAX,
+    # Hyperparameters
+    'AVERAGE_SCALE': AVERAGE_SCALE,
+    'DEVIATION_SCALE': DEVIATION_SCALE,
+}
+
+# Load STAN model
+model = csp.CmdStanModel(
+    # stan_file = '../src/sampling.stan',
+    exe_file='../../../src/sampling'
+)
+
+# Sample kernels from model
+sample = model.sample(
+    data          = data,
+    seed          = 37,
+    chains        = 1,
+    iter_sampling = 1,
+    iter_warmup   = 200,
+    show_progress = False,
+    show_console  = False
+)
+
+# Extract sampled kernels from chain output
+c_model = sample.stan_variable('c')[0]
+```
+
+# Experiment
+
+## Simulate contagion
+
+## Infer kernels
