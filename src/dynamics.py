@@ -1,5 +1,10 @@
+import sys
+
 import numpy as np
 from numpy import ndarray
+
+from ._logger import logger
+logger.add(sys.stderr, level="DEBUG")
 
 __all__ = ["heterogeneous_contagion_process", "get_activations"]
 
@@ -67,4 +72,35 @@ def heterogeneous_contagion_process(
             )
     return x
 
-def get_activations(states):
+def get_activations(states: ndarray, adjacency: ndarray, kmax: int):
+    # Unpack number of individuals and epidemic time scale
+    N, T = states.shape
+
+    # Get number of infected neighbors at each timestep
+    nu = np.array(adjacency @ states, dtype=int)
+
+    # Retrieve timesteps where infection events are possible
+    possible_infection_events = [
+        np.where(1-states[i, :])  # 1 minus because we want when succeptible
+        for i in range(N)
+    ]
+
+    # Compute infection events
+    infection_events = np.zeros((N, kmax))
+    noninfection_events = np.zeros((N, kmax))
+    for i in range(N):
+        tmp = possible_infection_events[i][0]
+        logger.debug(f"Possible infections timesteps for node {i}: {tmp}")
+        for t in tmp:
+            if t+1 in tmp:  # if S at t and t+1, did not get infected at time t
+                nu_i_t = nu[i][t]-1  # 0-indexed, so first column is 1 neighbor
+                if nu_i_t > 0:
+                    noninfection_events[i][nu_i_t] += 1
+            else:  # if S at t but not t+1, did get infected at time t
+                if t+1 == T:
+                    continue
+                nu_i_t = nu[i][t]-1  # 0-indexed, so first column is 1 neighbor
+                infection_events[i][nu_i_t] += 1
+                logger.debug(f"Infection event for node {i} at time {t} with {nu_i_t} neighbors")
+
+    return infection_events, noninfection_events
