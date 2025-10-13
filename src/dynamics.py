@@ -103,4 +103,8 @@ def get_activations(states: ndarray, adjacency: ndarray, kmax: int):
                 infection_events[i][nu_i_t] += 1
                 logger.debug(f"Infection event for node {i} at time {t} with {nu_i_t} neighbors")
 
+    # Ensure integer type
+    infection_events = np.array(infection_events, dtype=int)
+    noninfection_events = np.array(noninfection_events, dtype=int)
+
     return infection_events, noninfection_events
