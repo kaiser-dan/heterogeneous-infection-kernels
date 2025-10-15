@@ -4,7 +4,6 @@ import numpy as np
 from numpy import ndarray
 
 from ._logger import logger
-logger.add(sys.stderr, level="DEBUG")
 
 __all__ = ["heterogeneous_contagion_process", "get_activations"]
 
@@ -56,8 +55,8 @@ def heterogeneous_contagion_process(
         np.random.seed(random_seed)
 
     n, m = np.shape(A)
-    if n != m:
-        raise Exception("Matrix must be square!")
+    # if n != m:
+    #     raise Exception("Matrix must be square!")
 
     T = int((tmax - tmin) / dt)
     x = np.zeros((T, n), dtype=int)
@@ -67,9 +66,16 @@ def heterogeneous_contagion_process(
         u = np.random.random(n)
         nu = A @ x[t]
         for i in range(n):
-            x[t + 1, i] = (1 - x[t, i]) * (u[i] <= c[i, nu[i]] * dt) + x[t, i] * (
-                u[i] > gamma * dt
-            )
+            if nu[i] > 0:
+                _a = (1 - x[t, i]) * (u[i] <= c[i, nu[i]-1] * dt) 
+                _b = x[t, i] * (u[i] > gamma * dt)
+            else:
+                _a, _b = 0, 0    
+            x[t + 1, i] = _a + _b
+
+            # x[t + 1, i] = (1 - x[t, i]) * (u[i] <= c[i, nu[i]] * dt) + x[t, i] * (
+            #     u[i] > gamma * dt
+            # )
     return x
 
 def get_activations(states: ndarray, adjacency: ndarray, kmax: int):
@@ -90,7 +96,6 @@ def get_activations(states: ndarray, adjacency: ndarray, kmax: int):
     noninfection_events = np.zeros((N, kmax))
     for i in range(N):
         tmp = possible_infection_events[i][0]
-        logger.debug(f"Possible infections timesteps for node {i}: {tmp}")
         for t in tmp:
             if t+1 in tmp:  # if S at t and t+1, did not get infected at time t
                 nu_i_t = nu[i][t]-1  # 0-indexed, so first column is 1 neighbor
@@ -101,7 +106,7 @@ def get_activations(states: ndarray, adjacency: ndarray, kmax: int):
                     continue
                 nu_i_t = nu[i][t]-1  # 0-indexed, so first column is 1 neighbor
                 infection_events[i][nu_i_t] += 1
-                logger.debug(f"Infection event for node {i} at time {t} with {nu_i_t} neighbors")
+                logger.trace(f"Infection event for node {i} at time {t} with {nu_i_t} neighbors")
 
     # Ensure integer type
     infection_events = np.array(infection_events, dtype=int)
