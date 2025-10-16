@@ -23,9 +23,6 @@ data {
 
         // Kernel deviation exponential distribution scale
         vector<lower=0>[K] DEVIATION_SCALE;
-
-        // Kernel mixture strength
-        // array[K] simplex[kmax] MIXTURE_STRENGTHS;
 }
 
 /* Model parameters we wish to infer */
@@ -37,10 +34,10 @@ parameters {
 	array[K] real<lower=0> sigma;
 	
 	// Kernel modes
-	array[K] matrix<lower=0, upper=1>[V, kmax] alpha_k;
+	matrix<lower=0, upper=1>[K, kmax] alpha_k;
 
     // Kernel mode mixtures (for each individual)
-    array[V] simplex[K] pi;
+    array[V] simplex[K] pi; // NOTE: K is not first index in pi
 }
 transformed parameters {
 	// Individual kernel intercepts
@@ -48,39 +45,32 @@ transformed parameters {
     for (i in 1:V) {
         for (nu in 1:kmax) {
             alpha[i][nu] = 0;
-            // >>> DEBUG >>>
-            print(">>>");
-            print("i ", i, " nu ", nu);
-            // <<< DEBUG <<<
-
             // Mixing kernel modes with weight vector pi[i]
+            // NOTE: Can swap some indices/transpose and compute as a dot product
             for (k in 1:K) {
-                // >>> DEBUG >>>
-                print("k ", k);
-                print("pi[i][k] ", pi[i][k]);
-                print("alpha_k[k][i][nu] ", alpha_k[k][i][nu]);
-                // <<< DEBUG <<<
-                alpha[i][nu] += pi[i][k] * alpha_k[k][i][nu];
+                alpha[i][nu] += pi[i][k] * alpha_k[k][nu];
             }
-            print("alpha[i][nu] ", alpha[i][nu]);
-            // >>> DEBUG >>>
-            print("<<<");
-            // <<< DEBUG <<<
         }
     }
 
     // Individual kernels
-	matrix<lower=0, upper=1>[V, kmax] c;
-    for (i in 1:V) {
-        for (nu in 1:kmax) {
-            c[i][nu] = inv_logit(alpha[i][nu]);
-        }
-    }
+	matrix<lower=0, upper=1>[V, kmax] c = inv_logit(alpha);
+    // for (i in 1:V) {
+    //     for (nu in 1:kmax) {
+    //         c[i][i] = inv_logit(alpha[i][nu]); // + REGRESSION;
+    //     }
+    // }
 }
 
 /* Building posterior distribution */
 model {
     /* Parameter priors */
+        // Kernel mixing
+        for (i in 1:V) {
+            pi[i] ~ dirichlet(rep_vector(1, K));  // NOTE: Should this be exported to its own hyperprior?
+        }
+
+        // Kernel modes
         for (k in 1:K) {
             // Kernel average
             vector[kmax] dirichlet_position_vec;
@@ -91,6 +81,9 @@ model {
             where mu is a partial sum of a Dirichlet r.v.
             That formulation would force mu[kmax] = 1;
             instead, the below form only forces mu[k] > mu[k'] when k' < k.
+            Technically this is only in expectation,
+            but the mass becomes overwhelmingly concentrated into a convex regime
+            for even moderate values of AVERAGE_SCALE
             */
             for (nu in 1:kmax) {
                 dirichlet_position_vec[nu] = AVERAGE_SCALE[k]*nu;
@@ -101,17 +94,9 @@ model {
             sigma[k] ~ exponential(DEVIATION_SCALE[k]); 
         
             // Kernel modes
-            for (i in 1:V) {
-                for (nu in 1:kmax) {
-                    alpha_k[k][i][nu] ~ normal(mu[k][nu], sigma[k]);
-                }
-            }
+            alpha_k[k] ~ normal(mu[k], sigma[k]);
         }
 
-        // Kernel mixing
-        for (i in 1:V) {
-            pi[i] ~ dirichlet(rep_vector(1, K));  // NOTE: Should this be exported to its own hyperprior?
-        }
 
     /* Likelihood given data */
         // (log) likelihood contributions from infection events
