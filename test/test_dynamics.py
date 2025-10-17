@@ -119,5 +119,5 @@ class TestActivations:
         logger.debug(f"Infection events:\n {actual_infections}")
         logger.debug(f"Non-infection events:\n {actual_noninfections}")
 
-        # assert np.equal(actual_infections, expected_infections).all()
+        assert np.equal(actual_infections, expected_infections).all()
         assert np.equal(actual_noninfections, expected_noninfections).all()
