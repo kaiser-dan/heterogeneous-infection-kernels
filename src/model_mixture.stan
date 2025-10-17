@@ -19,7 +19,7 @@ data {
 
     /* Hyperparameters */
         // Kernel average dirichlet distribution location scaling
-        vector<lower=1>[K] AVERAGE_SCALE;
+        vector<lower=0>[K] AVERAGE_SCALE;
 
         // Kernel deviation exponential distribution scale
         vector<lower=0>[K] DEVIATION_SCALE;
@@ -67,7 +67,7 @@ model {
     /* Parameter priors */
         // Kernel mixing
         for (i in 1:V) {
-            pi[i] ~ dirichlet(rep_vector(1, K));  // NOTE: Should this be exported to its own hyperprior?
+            pi[i] ~ dirichlet(rep_vector(0.5, K));  // NOTE: Should this be exported to its own hyperprior?
         }
 
         // Kernel modes
