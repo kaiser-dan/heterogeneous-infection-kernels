@@ -80,14 +80,14 @@ def heterogeneous_contagion_process(
 
 def get_activations(states: ndarray, adjacency: ndarray, kmax: int):
     # Unpack number of individuals and epidemic time scale
-    N, T = states.shape
+    N, _ = states.shape
 
     # Get number of infected neighbors at each timestep
     nu = np.array(adjacency @ states, dtype=int)
 
     # Retrieve timesteps where infection events are possible
     possible_infection_events = [
-        np.where(1-states[i, :])  # 1 minus because we want when succeptible
+        np.where(1-states[i, :])  # 1 minus because we want when succeptibility
         for i in range(N)
     ]
 
@@ -95,16 +95,25 @@ def get_activations(states: ndarray, adjacency: ndarray, kmax: int):
     infection_events = np.zeros((N, kmax))
     noninfection_events = np.zeros((N, kmax))
     for i in range(N):
-        tmp = possible_infection_events[i][0]
-        for t in tmp:
-            if t+1 in tmp:  # if S at t and t+1, did not get infected at time t
-                nu_i_t = nu[i][t]-1  # 0-indexed, so first column is 1 neighbor
-                if nu_i_t > 0:
-                    noninfection_events[i][nu_i_t] += 1
-            else:  # if S at t but not t+1, did get infected at time t
-                if t+1 == T:
-                    continue
-                nu_i_t = nu[i][t]-1  # 0-indexed, so first column is 1 neighbor
+        # Unpack times when this individual (i) is succeptible
+        possible_infection_events_individual = set(possible_infection_events[i][0])
+
+        # Count what happens at each time this node is succeptible (infection event or not)
+        for t in possible_infection_events_individual:
+            # Adjust for 0-indexing, i.e., first column (index 0) represents 1 infected neighbor
+            nu_i_t = nu[i][t]-1
+            
+            # If no infected neighbors, index adjustment becomes negative and we have no update to event counts
+            if nu_i_t < 0:
+                continue
+
+            # Infection DOES NOT occur if S at t and at t+1
+            if t+1 in possible_infection_events_individual:  
+                noninfection_events[i][nu_i_t] += 1
+                logger.trace(f"Failed iInfection event for node {i} at time {t} with {nu_i_t} neighbors")
+
+            # Infection DOES occur if S at t but not at t+1
+            else:
                 infection_events[i][nu_i_t] += 1
                 logger.trace(f"Infection event for node {i} at time {t} with {nu_i_t} neighbors")
 
