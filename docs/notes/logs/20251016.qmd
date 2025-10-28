@@ -1,0 +1,545 @@
+---
+# Metadata
+title: "Diagnosing Stan model problems"
+date: "2025-10-16"
+
+# Formatting
+format: 
+    html:  # no revealjs for this document
+        self-contained: false  # turn on when sharing
+        fig-align: center
+        code-fold: show
+
+execute:
+    output: true
+    echo: true
+---
+
+```{python}
+#| label: setup.environment
+#| output: false
+#| echo: false
+
+import os
+import random
+import sys
+
+import arviz as az
+import cmdstanpy as csp
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+from netgraph import Graph
+import networkx as nx
+import numpy as np
+
+# Add project source to path
+sys.path.append(
+    os.path.join(
+        '..',  # logs -> notes
+        '..',  # notes -> docs
+        '..',  # docs -> project root
+    )
+)
+
+import src
+```
+
+```{python}
+#| label: setup.reproducibility
+#| echo: false
+
+random.seed(37)
+
+DEBUG: bool = True
+```
+
+# Introduction
+
+o_o
+
+# Data
+
+## Contact network
+
+We first need to sample a network topology on which we will run our dynamics.
+For some reasons[^1], in some future work we expect to correlate structural positions with infection kernel mixtures. 
+To save some time, we will operate on some block models from the start.
+A simple two-block planeted partition model will suffice.
+
+[^1]: I don't know if I fully understood those reasons, should read through the papers again - and take better notes this time.
+
+First, let's set up our global population parameters, e.g. number of individuals and so forth.
+
+```{python}
+#| label: data.set_globals.population
+
+# Population globals
+NUM_PEOPLE: int = 100
+AVG_DEGREE: int = 10
+```
+
+With a small population to begin with, let's sample a fairly strong two-block network for their contacts.
+
+```{python}
+#| label: data.sample_network
+
+# Set block mixing parameters
+EPSILON: float = 0.9  # proportion of total edges placed within blocks
+
+# Sample model
+A = src.sbm(NUM_PEOPLE, AVG_DEGREE, EPSILON, seed=37)
+```
+
+The adjacency matrix is visualized in @fig-adjacency.
+
+```{python}
+#| label: fig-adjacency
+#| fig-cap: "Contact network topology"
+#| echo: false
+
+# Show adjacency
+plt.spy(A)
+```
+
+We will also need the maximum degree for the inference later, as this provides our support for $\nu$. 
+We will compute it now.
+
+```{python}
+#| label: data.set_globals.population.kmax
+#| echo: false
+
+KMAX: int = max(np.sum(A, axis=0))
+
+print(f"Maximum degree is {KMAX}")
+```
+
+## Infection kernels
+
+With the contact network in hand, we must now sample an infection kernel for each individual.
+This sampling, in full generality, should respect the network structure as well; that is, the groups and kernel mixtures should be correlated.
+
+We will consider one scenario here, namely, simple contagion kernel(s).
+That is, I am just enforcing that $c_i(\nu)$ looks like $1-(1-\beta)^{\nu}$ for some $\beta$.
+In full generality, there will be $K$-many $\beta$, one for each kernel mode.
+
+We first set some contagions parameters that are constant across both scenarios, namely, the recovery rate and the seed nodes.
+
+```{python}
+#| label: data.set_globals.contagion
+
+# Shared contagion parameters
+GAMMA: float = 0.1 # recovery rate
+NUM_SEEDS: int = 10  # number of initially infected persons
+
+# Sample seed nodes
+_seeds_block1 = set(random.sample(range(int(NUM_PEOPLE/2)), k=int(NUM_SEEDS/2)))
+_seeds_block2 = set(random.sample(range(int(NUM_PEOPLE/2)+1, NUM_PEOPLE), k=int(NUM_SEEDS/2)))
+_seeds = _seeds_block1 | _seeds_block2
+x0 = [int(idx in _seeds) for idx in range(NUM_PEOPLE)]
+```
+
+
+### Simple contagion
+
+Let's begin with sampling a simple kernel.
+We set some $\beta$ and sample the seed nodes and a kernel for each individual.
+In this scenario, the kernel is constant as a function of $i$ and given as $c_i(\nu) = 1 - (1-\beta)^{\nu} \equiv c(\nu)$.
+
+```{python}
+#| label: data.sample_kernels.simple.set_rates
+#| fig-cap: "Infection kernels for each block"
+#| echo: false
+
+# Contagion parameters
+REP1: float = 1.01  # moderate(ish) reproduction number
+REP2: float = 4.00  # moderate(ish) reproduction number
+BETA1: float = REP1 * GAMMA / AVG_DEGREE  # infection rate
+BETA2: float = REP2 * GAMMA / AVG_DEGREE  # infection rate
+
+plt.figure(figsize=(5,5))
+plt.plot(
+    range(1, KMAX+1),
+    [1-np.power(1-BETA1, nu) for nu in range(1, KMAX+1)],
+    marker="o",
+    label=f"{BETA1:.04f}",
+)
+plt.plot(
+    range(1, KMAX+1),
+    [1-np.power(1-BETA2, nu) for nu in range(1, KMAX+1)],
+    marker="s",
+    label=f"{BETA2:.04f}",
+)
+plt.ylim(0,1)
+plt.xlabel(r"$\nu$")
+plt.ylabel(r"$c_k(\nu)$")
+plt.title("Sampled simple contagion kernels")
+plt.legend(title=r"$\beta$")
+```
+
+
+```{python}
+#| label: data.sample_kernels.simple
+
+# Sample simple kernel from given beta 
+c_simple1 = np.array([
+    [1-np.power(1-BETA1, nu) for nu in range(1, KMAX+1)]
+    # for _ in range(int(NUM_PEOPLE))
+    for _ in range(int(NUM_PEOPLE/2))
+])
+c_simple2 = np.array([
+    [np.power(1-BETA2, nu) for nu in range(1, KMAX+1)]
+    for _ in range(NUM_PEOPLE-len(c_simple1))
+])
+c_simple = list(c_simple1.copy())
+c_simple.extend(c_simple2)
+c_simple = np.array(c_simple)
+```
+
+```{python}
+#| label: DEBUG.fig-sampled-kernels
+#| output: false
+#| echo: false
+#| eval: false
+
+if DEBUG:
+    plt.figure(figsize=(5,5))
+    plt.scatter(
+        range(1, KMAX+1),
+        c_simple[0],
+        marker="o",
+    )
+    plt.scatter(
+        range(1, KMAX+1),
+        c_simple[-1],
+        marker="s",
+    )
+
+    # Baseline
+    plt.plot(
+        range(1, KMAX+1),
+        [1-np.power(1-BETA1, nu) for nu in range(1, KMAX+1)],
+        color="gray",
+        linestyle="dashed",
+        alpha=0.5
+    )
+    plt.plot(
+        range(1, KMAX+1),
+        [1-np.power(1-BETA2, nu) for nu in range(1, KMAX+1)],
+        color="gray",
+        linestyle="dashed",
+        alpha=0.5
+    )
+
+    plt.ylim(0,1)
+    plt.xlabel(r"$\nu$")
+    plt.ylabel(r"$\mu_k(\nu)$")
+    plt.title("Sampled simple contagion kernels")
+
+```
+
+# Experiment
+
+## Simulate contagion
+
+We run some contagion experiments on the sampled topology and see if we can infer the known kernel (mixtures).
+
+```{python}
+#| label: experiment.simulate_contagion.simple
+
+T = 10_000
+states = np.transpose(src.heterogeneous_contagion_process(
+    A, GAMMA,
+    c_simple, x0,
+    tmin=0, tmax=T, dt=1,
+    random_seed=37
+))
+```
+
+The states are visualized in @fig-states where each row indicates the infection status for a given node and each column represents an individual timestep.
+```{python}
+#| label: fig-states
+#| fig-cap: "Node states in simulated contagion"
+#| echo: false
+
+# Show adjacency
+plt.spy(states)
+```
+
+We compute the $M, N$ matrices from these states and show them in @fig-events.
+```{python}
+#| label: fig-events
+#| echo: false
+#| fig-cap: "Infection opportunities with respect to number of infected neighbors"
+#| fig-subcap: 
+#|   - "Successful infection events"
+#|   - "Failed infection events"
+#| layout-ncol: 2
+
+M, N = src.get_activations(states, A, KMAX)
+
+plt.spy(M)
+plt.show()
+
+plt.spy(N)
+plt.show()
+```
+
+```{python}
+#| label: DEBUG.experiment.simulate_contagion.simple
+#| eval: false
+#| echo: false
+#| output: false
+
+if DEBUG:
+    print(f"Number of seeds: {sum(x0)}")
+    print(f"Number of infected nodes after a single time step: {sum(states[:, 1])}")
+```
+
+## Infer kernels
+
+Now for the main event, let's see if we can infer these kernels back (and the mixtures of each individual into each kernel mode).
+In our model we are considering
+
+$$
+\text{logit } c_i(\nu) \sim \alpha_i(\nu)
+$$ {#eq-kernel}
+
+where furthermore
+$$
+\alpha_i(\nu) \sim \mathcal{N}(\mu_{\alpha}(\nu), \sigma_{\alpha})
+$$
+
+and BLAH.
+
+To infer according this model we then need to specify the following parameters:
+
+```{python}
+#| label: inference.set_hyperpriors
+
+# Our model hyperpriors
+AVERAGE_SCALE: float = 1.0    # mu dirichlet location scaling
+DEVIATION_SCALE: float = 1.0  # sigma exponential scale
+```
+
+```{python}
+#| label: inference.infer_kernels
+#| output: false
+
+# Declare constants
+K = 2
+data = {
+    # Population constants
+    'V': NUM_PEOPLE,
+    'kmax': KMAX,
+    'K': K,
+    # Node states
+    'M': M,
+    'N': N,
+    # Hyperparameters
+    'AVERAGE_SCALE': [AVERAGE_SCALE, 2*AVERAGE_SCALE],
+    'DEVIATION_SCALE': [DEVIATION_SCALE]*K,
+}
+
+
+# Load STAN model
+model = csp.CmdStanModel(
+    stan_file = '../../../src/model_mixture.stan',
+)
+
+# Sample kernels from model
+NUM_SAMPLES = 1000
+sample = model.sample(
+    data          = data,
+    seed          = 37,
+    chains        = 1,
+    iter_sampling = NUM_SAMPLES,
+    iter_warmup   = 5000,
+    show_progress = True,
+    show_console  = False
+)
+```
+
+
+```{python}
+#| label: inference.infer_kernels.variables
+#| eval: false
+#| echo: false
+#| output: false
+
+if DEBUG:
+    print(sample.diagnose())
+    # print(sample.stan_variables())
+```
+
+We will introspect both the inferred kernel modes and the mixture of the modes among the nodes.
+We will actually begin with the inferred mixtures, shown in @fig-network-mixtures.
+Note that the kernel *labels* are only identified up to permutation, i.e., kernel 1 and 2 is an arbitrary choice for which is 1 and which is 2.
+Consequently, we don't label the colormap for which hue extreme is which kernel, instead relying on relative hues and saturations to differentiate the inferred mixing.
+
+```{python}
+#| label: fig-network-mixtures
+#| fig-cap: "Network topology with nodes colored according to their inferred kernel mixtures"
+#| echo: false
+
+#### Help from https://netgraph.readthedocs.io/en/latest/sphinx_gallery_output/plot_10_community_layout.html#sphx-glr-sphinx-gallery-output-plot-10-community-layout-py
+
+# Create networkx Graph object from adjacency
+G = nx.Graph(A)
+
+# Configure drawing aesthetics
+PRETTY = 0
+
+pos = nx.spring_layout(G)
+
+# create a dictionary that maps nodes to the community they belong to
+node_to_community = dict()
+node = 0
+partition_sizes = [int(NUM_PEOPLE/2), int(NUM_PEOPLE/2)]
+for community_id, size in enumerate(partition_sizes):
+    for _ in range(size):
+        node_to_community[node] = community_id
+        node += 1
+
+cmap = mpl.colormaps['RdYlBu']
+if not PRETTY:
+    node_color = [
+        cmap(np.mean([
+                max(
+                    sample.stan_variable('pi')[x][i][0],
+                    1-sample.stan_variable('pi')[x][i][0]
+                ) if i < NUM_PEOPLE/2 else
+                min(
+                    sample.stan_variable('pi')[x][i][0],
+                    1-sample.stan_variable('pi')[x][i][0]
+                )
+            for x in range(NUM_SAMPLES)
+        ]))
+        for i in range(NUM_PEOPLE)
+    ]
+else:
+    node_color = {
+        i: cmap(
+            np.mean([
+                max(
+                    sample.stan_variable('pi')[x][i][0],
+                    1-sample.stan_variable('pi')[x][i][0]
+                ) if i < NUM_PEOPLE/2 else
+                min(
+                    sample.stan_variable('pi')[x][i][0],
+                    1-sample.stan_variable('pi')[x][i][0]
+                )
+            for x in range(NUM_SAMPLES)
+        ])
+        )
+        # cmap(sample.stan_variable('pi')[0][i][0])
+        for i in range(NUM_PEOPLE)
+    }
+
+
+
+# Draw network
+if not PRETTY:
+    nx.draw_networkx(G, pos=pos, node_color=node_color, vmin=0, vmax=1, with_labels=False)
+else:
+
+    Graph(G,
+        node_color=node_color, node_edge_width=0, edge_alpha=0.1,
+        node_layout='community', node_layout_kwargs=dict(node_to_community=node_to_community),
+        edge_layout='bundled', edge_layout_kwargs=dict(k=2000),
+    );
+```
+
+At first glance in @fig-network-mixtures, the inference is able to pick apart the kernel mixtures pretty quickly (in terms of the chain hyperparameters)!
+That is exciting.
+
+We will now look at the inferred kernel modes themselves in @fig-kernel-averages.
+We will only show the average of the averages across the chains, and the true kernel modes in dashed gray.
+
+
+```{python}
+#| label: fig-kernel-averages
+#| fig-cap: "Inferred kernel averages"
+#| echo: false
+
+plt.figure(figsize=(5,5))
+plt.plot(
+    range(1, KMAX+1),
+    np.mean([sample.stan_variable('mu')[x][0] for x in range(NUM_SAMPLES)], axis=0),
+    marker="o",
+)
+plt.plot(
+    range(1, KMAX+1),
+    np.mean([sample.stan_variable('mu')[x][1] for x in range(NUM_SAMPLES)], axis=0),
+    marker="s",
+)
+
+# Baseline
+plt.plot(
+    range(1, KMAX+1),
+    [1-np.power(1-BETA1, nu) for nu in range(1, KMAX+1)],
+    color="gray",
+    linestyle="dashed",
+    alpha=0.5
+)
+plt.plot(
+    range(1, KMAX+1),
+    [1-np.power(1-BETA2, nu) for nu in range(1, KMAX+1)],
+    color="gray",
+    linestyle="dashed",
+    alpha=0.5
+)
+
+plt.ylim(0,1)
+plt.xlabel(r"$\nu$")
+plt.ylabel(r"$\mu_k(\nu)$")
+plt.title("Sampled simple contagion kernels")
+# plt.legend(title=r"k")
+```
+
+Ah, @fig-kernel-averages shows a more sobering picture than @fig-network-mixtures.
+The chains are far from "correct" convergence with the currently chosen hyperparameters.
+I suspect the hyperpriors are too far afield for the limited time I gave the MCMC.
+
+## Model checks
+
+### Posteriors
+
+```{python}
+
+az.plot_posterior(sample, var_names=["mu", "sigma"])
+
+```
+
+```{python}
+
+az.plot_posterior(sample, var_names=["pi"])
+
+```
+
+### Traces
+
+```{python}
+
+az.plot_trace(sample, var_names=["mu", "sigma"])
+
+```
+
+```{python}
+
+az.plot_trace(sample, var_names=["pi"])
+
+```
+
+### Convergence and autocorrelations
+
+```{python}
+
+az.plot_ess(sample, var_names=["mu", "sigma"], kind="evolution")
+
+```
+
+```{python}
+
+az.plot_autocorr(sample, var_names=["mu", "sigma"])
+
+```
