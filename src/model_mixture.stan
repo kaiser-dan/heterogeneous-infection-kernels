@@ -42,30 +42,19 @@ parameters {
         // Variances (constant w.r.t. nu)
         array[K] real<lower=0> sigma;
         
+        // Means
+        array[K] simplex[kmax] mu;
+        
         // Modes
         matrix[K, kmax] alpha_k;
-        // alpha_k ~ mu(nu) + f(k);
-        // alpha ~ mu(nu) + pi_1*f(1) + (1-pi_1)*f(2);
 
 	/* Hyperparameters */
         // Kernel averages
-        simplex[kmax] delta; 
+        // simplex[kmax] delta; 
 }
 transformed parameters {
     /* Kernel parameters */
-        // Averages
-        matrix[K, kmax] mu;
-        for (k in 1:K) {
-            for (nu in 1:kmax) {
-                mu[k][nu] = 0;
-                for (idx in 1:nu) {
-                    mu[k][nu] += delta[idx];
-                }
-                mu[k][nu] = logit(mu[k][nu]);
-            }
-        }
-
-        // Individual kernel intercepts
+        // Intercepts
         matrix[V, kmax] alpha;
         for (i in 1:V) {
             for (nu in 1:kmax) {
@@ -92,7 +81,7 @@ transformed parameters {
 model {
     /* Hyperparameter priors */
         // Kernel averages
-        delta ~ dirichlet(rep_vector(1.0, kmax));
+        // delta ~ dirichlet(rep_vector(1.0, kmax));
 
     /* Parameter priors */
         // Kernel mixing
@@ -105,9 +94,10 @@ model {
         for (k in 1:K) {
             // Kernel variance
             sigma[k] ~ exponential(DEVIATION_SCALE[k]); 
+            mu[k] ~ dirichlet(rep_vector(1.0, kmax));
         
             // Kernel modes
-            alpha_k[k] ~ normal(mu[k], sigma[k]);
+            alpha_k[k] ~ normal(logit(mu[k]), sigma[k]);
         }
 
     /* Likelihood given data */
