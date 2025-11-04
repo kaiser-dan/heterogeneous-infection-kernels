@@ -1,0 +1,423 @@
+---
+# Metadata
+title: "Testing non-logit model"
+date: "2025-10-30"
+
+# Formatting
+format: 
+    html:  # no revealjs for this document
+        self-contained: false  # turn on when sharing
+        fig-align: center
+        code-fold: show
+
+execute:
+    output: true
+    echo: true
+    eval: false  # turn off when debugging markdown/formatting
+---
+
+```{python}
+#| label: setup.environment
+#| output: false
+#| echo: false
+
+import os
+import random
+import sys
+
+import arviz as az
+import cmdstanpy as csp
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+from netgraph import Graph
+import networkx as nx
+import numpy as np
+import seaborn as sns
+from scipy.stats import mode
+from scipy.special import logit
+from sklearn.metrics import root_mean_squared_error
+from tqdm import tqdm
+import pandas as pd
+
+# Add project source to path
+sys.path.append(
+    os.path.join(
+        '..',  # logs -> notes
+        '..',  # notes -> docs
+        '..',  # docs -> project root
+    )
+)
+
+import src
+```
+
+```{python}
+#| label: setup.reproducibility
+#| echo: false
+
+random.seed(37)
+
+DEBUG: bool = True
+```
+
+# Summary
+
+I test the ability of our model inference to distinguish two strongly differentiated kernels in a block model of varying block separability and node-kernel associations.
+I find suspiciously strong capability and end with a confusion on the possibility of such a low error on the inference. 
+
+# Introduction
+
+The goal of this preliminary experiment is to look for some capability of the mixture model inference to find the underlying kernels in a 2-block model when the association of kernels to blocks is noisy.
+This is meant to closely follow the figure in [Nick's repository](https://github.com/nwlandry/heterogeneous-complex-network-reconstruction/blob/main/Figures/omega_vs_epsilon.pdf), shown below in @fig-prior-nick as well.
+
+![Preliminary results from Nick's repository](../assets/fig_prior-work_nick.png){#fig-prior-nick}
+
+# Setup (09:53)
+
+## Network structure 
+
+The main goal of this preliminary experiment is to assess the model inference capabilities;
+as long as the network structure on which the contagion occurs is sufficiently large to promote mixing, we do not care much about the effect of the network size currently, so it will remain fixed at some manageable size.
+
+```{python}
+#| label: setup.structure.size_degree
+
+# Population globals
+NUM_PEOPLE: int = 256
+AVG_DEGREE: int = 18
+```
+
+Our block mixing is controlled by $\varepsilon$ and has support[^1] $[0, 1)$.
+This is just a preliminary crack at testing the model inference capabilities, we can start with a coarse sampling.
+
+```{python}
+#| label: setup.structure.epsilons
+
+EPSILONS = np.linspace(
+    start=0.05, stop=0.95,
+    num=10
+)
+```
+
+## Contagion parameters
+
+Likewise, some aspects of the contagion are beyond the scope of the current experiment and will be fixed;
+namely, the recovery rates and the seed nodes.
+
+We want a scenario that is known to be separable (with respect to the individual kernel modes), so we will fixed relatively strongly differentiated $R_0$'s of 2 and 4.
+The recovery rate throughout will be 0.1.
+
+```{python}
+#| label: setup.contagion.rates
+
+# Shared contagion parameters
+REP1: float = 2.00  # moderate(ish) reproduction number
+REP2: float = 4.00  # moderate(ish) reproduction number
+GAMMA: float = 0.1  # recovery rate
+BETA1: float = REP1 * GAMMA / AVG_DEGREE  # infection rate
+BETA2: float = REP2 * GAMMA / AVG_DEGREE  # infection rate
+```
+
+```{python}
+#| label: setup.contagion.seed_nodes
+
+# Sample seed nodes
+NUM_SEEDS: int = 32  # number of initially infected persons
+_seeds_block1 = set(random.sample(range(int(NUM_PEOPLE/2)), k=int(NUM_SEEDS/2)))
+_seeds_block2 = set(random.sample(range(int(NUM_PEOPLE/2)+1, NUM_PEOPLE), k=int(NUM_SEEDS/2)))
+_seeds = _seeds_block1 | _seeds_block2
+x0 = [int(idx in _seeds) for idx in range(NUM_PEOPLE)]
+```
+
+```{python}
+#| label: setup.contagion.kernel_modes
+
+# Pure kernel modes
+contagion_function = lambda nu, b: 1 - (1 - b) ** nu
+c1 = contagion_function(np.arange(1, NUM_PEOPLE+1), BETA1)
+c2 = contagion_function(np.arange(1, NUM_PEOPLE+1), BETA2)
+```
+
+The assignment of kernels to blocks is a parameter of experimental interest.
+Specifically, we create two pure kernel states according to the above $\beta_1, \beta_2$.
+In a setup without any noise in kernel assignment, the first $N/2$ nodes (all within the first block) are assigned the first pure kernel, and similarly for the remaining nodes and the second kernel.
+Upon adding noise[^2], for each node in each block, with probability $\omega$ we assign that node the kernel of the *opposite* block.
+That is, $\omega = 0$ corresponds to a lack of kernel assignment noise, and $\omega = \frac{1}{2}$ is a random assignment of kernels between the two blocks.
+
+Similarly to $\varepsilon$, we will start with a rather coarse sampling over $\omega$.
+
+```{python}
+#| label: setup.contagion.omegas
+
+OMEGAS = np.linspace(
+    start=0.0, stop=0.5,
+    num=10
+)
+```
+
+```{python}
+#| label: setup.contagion.mixing_kernels
+# https://github.com/nwlandry/heterogeneous-complex-network-reconstruction/blob/main/run_dynamical_inference.ipynb
+def mix_kernels(n, k, omega, c1, c2):
+    c = np.zeros((n, k))
+    for i in range(n):
+        u = random.random()
+        if i < n / 2:
+            c[i] = (u < omega) * c1 + (u >= omega) * c2
+        else:
+            c[i] = (u >= omega) * c1 + (u < omega) * c2
+
+    return c
+```
+
+And lastly, we set some hyperparameters related to the hyperprior parameters and contagion time.
+
+```{python}
+#| label: setup.contagion.hyperparameters
+
+# Our model hyperpriors
+AVERAGE_SCALE: float = 1.0    # mu dirichlet location scaling
+DEVIATION_SCALE: float = 1.0  # sigma exponential scale
+K = 2
+
+# Experiment scaling
+T = 1_000
+NUM_SAMPLES = 100
+
+# Declare constants
+data = {
+    # Population constants
+    'V': NUM_PEOPLE,
+    'K': K,
+    # Hyperparameters
+    # 'AVERAGE_SCALE': [AVERAGE_SCALE, 2*AVERAGE_SCALE],
+    # 'DEVIATION_SCALE': [DEVIATION_SCALE]*K,
+}
+```
+
+# Sweeping $\varepsilon$ (10:08)
+
+We'll begin by sweeping just $\varepsilon$ and fixing $\omega=0.0$, that is, keeping the kernel modes strictly within the network blocks, but making the blocks themselves more difficult to distinguish.
+
+```{python}
+#| label: experiment.vary_epsilon.get_networks
+
+networks = []
+for EPSILON in EPSILONS:
+    A = src.sbm(NUM_PEOPLE, AVG_DEGREE, EPSILON, seed=37)
+    kmax = max(np.sum(A, axis=0))
+
+    networks.append((A, kmax))
+```
+
+
+```{python}
+#| label: experiment.vary_epsilon.get_kernels
+
+OMEGA = 0.0
+kernels = [
+    mix_kernels(NUM_PEOPLE, kmax, OMEGA, c1[:kmax], c2[:kmax])
+    for (_, kmax) in networks
+]
+```
+
+```{python}
+#| label: experiment.vary_epsilon.simulate_contagions
+
+states = [
+    np.transpose(src.heterogeneous_contagion_process(
+        networks[idx][0], GAMMA,
+        kernels[idx], x0,
+        tmin=0, tmax=T, dt=1,
+        random_seed=37
+    ))
+    for idx in range(len(EPSILONS))
+]
+```
+
+Okie now that we have some contagions simulated, let's infer the parameters for them according to our model.
+```{python}
+#| label: experiment.vary_epsilon.inference
+#| output: false
+
+
+
+# Load STAN model
+model = csp.CmdStanModel(
+    stan_file = '../../../src/model_nonlogit.stan',
+)
+
+# Sample kernels from model
+fits = []
+for idx in tqdm(range(len(EPSILONS))):
+    # Unpack according to experiment parameters
+    states_ = states[idx]
+    adj, kmax = networks[idx]    
+
+    M, N = src.get_activations(states_, adj, kmax)
+    data.update({
+        'kmax': kmax,
+        'M': M,
+        'N': N,
+    })
+
+    fit = model.sample(
+        data          = data,
+        seed          = 37,
+        chains        = 1,
+        iter_sampling = NUM_SAMPLES,
+        iter_warmup   = 5*NUM_SAMPLES,
+        show_progress = False,
+        show_console  = False
+    )
+
+    fits.append(fit)
+```
+
+
+```{python}
+#| label: fig-vary-epsilon-kernels
+#| fig-cap: "Inferred kernels"
+#| echo: false
+
+# Inferred kernels
+fig, axs = plt.subplots(
+    nrows=2, ncols=5,
+    sharex=True, sharey=True,
+    figsize=(9,4)
+)
+plt.subplots_adjust(hspace=0.35,)
+for idx, fit in enumerate(fits):
+    kmax = networks[idx][1]
+
+    ix = int(idx >= 5)
+    iy = idx % 5
+
+    axs[ix][iy].set_title(f"{EPSILONS[idx]:.02f}")
+
+    axs[ix][iy].plot(
+        range(1, kmax+1),
+        np.mean([fit.stan_variable('c')[x][0] for x in range(NUM_SAMPLES)], axis=0),
+        # color="cyan",
+        alpha=0.5,
+        marker="o",
+    )
+    axs[ix][iy].plot(
+        range(1, kmax+1),
+        np.mean([fit.stan_variable('c')[x][-1] for x in range(NUM_SAMPLES)], axis=0),
+        # color="orange",
+        alpha=0.5,
+        marker="s",
+    )
+
+    # Baseline
+    axs[ix][iy].plot(
+        range(NUM_PEOPLE),
+        c1,
+        color="gray",
+        linestyle="dashed",
+        alpha=0.5,
+        label=r"$c_1(\nu)$"
+    )
+    axs[ix][iy].plot(
+        range(NUM_PEOPLE),
+        c2,
+        color="gray",
+        linestyle="dashed",
+        alpha=0.5,
+        label=r"$c_2(\nu)$"
+    )
+
+_PADDING = 0.01
+plt.xlim(0-_PADDING, kmax+_PADDING)
+plt.ylim(0-_PADDING, 1+_PADDING)
+
+_ticks =np.linspace(
+    start=0, stop=kmax,
+    num=4,
+    dtype=int
+)
+axs[0][0].set_xticks(_ticks)
+
+fig.supxlabel(r"$\nu$")
+fig.supylabel(r"$c(\nu)$")
+fig.suptitle(r"$\varepsilon$")
+
+# plt.legend(loc="right", bbox_to_anchor=(2.25, 0.5))
+```
+
+
+```{python}
+KMAX = kmax
+fig, axs = plt.subplots(
+    ncols=2,
+    sharex=True, sharey=True,
+    figsize=(6,4)
+)
+
+for ax in axs:
+    # Baseline
+    ax.plot(
+        range(NUM_PEOPLE),
+        c1,
+        color="gray",
+        linestyle="dashed",
+        alpha=0.5,
+        # label=r"$c_1(\nu)$"
+    )
+    ax.plot(
+        range(NUM_PEOPLE),
+        c2,
+        color="gray",
+        linestyle="dashed",
+        alpha=0.5,
+        # label=r"$c_2(\nu)$"
+    )
+
+for i in range(NUM_PEOPLE):
+    if i < NUM_PEOPLE / 2:
+        ax = axs[0]
+    else:
+        ax = axs[1]
+
+    ax.plot(
+        range(1, KMAX+1),
+        np.mean([fits[-1].stan_variable('c')[x][i] for x in range(NUM_SAMPLES)], axis=0),
+        color="blue" if i < NUM_PEOPLE/2 else "orange",
+        marker="s" if i < NUM_PEOPLE/2 else "o",
+        alpha=0.1,
+        linewidth=0.5,
+        markersize=1
+    )
+
+R = M / (M + N)
+records = []
+
+# plt.figure(figsize=(6,6))
+for nu in range(KMAX):
+    plt.scatter(
+        np.repeat(nu, int(NUM_PEOPLE/2)),
+        R[:int(NUM_PEOPLE/2), nu],
+        color="blue",
+        alpha=0.5,
+        s=5,
+        label=f"true beta = {BETA1:.04f}" if nu == 0 else ""
+    )
+    plt.scatter(
+        np.repeat(nu, int(NUM_PEOPLE/2)),
+        R[int(NUM_PEOPLE/2):, nu],
+        color="red",
+        alpha=0.5,
+        s=5,
+        label=f"true beta = {BETA2:.04f}" if nu == 0 else ""
+    )
+plt.xticks(range(KMAX), labels=range(1, KMAX+1))
+plt.xlabel("Number of infected neighbors")
+plt.ylabel("Empirical infection rate")
+plt.legend()
+plt.xlim(0, KMAX+1)
+
+fig.supxlabel(r"$\nu$")
+fig.supylabel(r"$c(\nu)$")
+fig.suptitle(r"$\omega = 0.5$")
+```
