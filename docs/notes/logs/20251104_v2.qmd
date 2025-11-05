@@ -1,0 +1,466 @@
+---
+# Metadata
+title: "Posterior predictive checks on logit model"
+date: "2025-11-04"
+
+# Formatting
+format: 
+    html:  # no revealjs for this document
+        self-contained: false  # turn on when sharing
+        fig-align: center
+        code-fold: show
+
+execute:
+    output: true
+    echo: true
+    eval: false  # turn off when debugging markdown/formatting
+    cache: true
+---
+
+```{python}
+#| label: setup.environment
+#| output: false
+#| echo: false
+
+from itertools import product
+import os
+import random
+import sys
+
+import arviz as az
+import cmdstanpy as csp
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+import numpy as np
+import seaborn as sns
+from scipy.stats import mode
+from scipy.special import logit, expit
+from sklearn.metrics import root_mean_squared_error
+from tqdm import tqdm
+import pandas as pd
+
+# Add project source to path
+sys.path.append(
+    os.path.join(
+        '..',  # logs -> notes
+        '..',  # notes -> docs
+        '..',  # docs -> project root
+    )
+)
+
+import src
+```
+
+```{python}
+#| label: setup.reproducibility
+#| echo: false
+
+random.seed(37)
+
+DEBUG: bool = True
+```
+
+# Summary
+
+
+# Introduction
+
+I found in today's log version 1 that the time scale of the epidemic is a far stronger hyperparameter than I originally thought. 
+I did a bad job with the notes in that log though, so before I make use of that insight, I wanted a fresh document.
+
+The main goal of this document is to introspect the fit of the logit model more and conduct some checks on the posterior distribution and the posterior predictive distribution.
+Since the discovery of $T$'s significant effect, I will also briefly reproduce the sweep over $\varepsilon, \omega$.
+
+# Setup (12:27)
+
+## Network structure 
+
+The main goal of this preliminary experiment is to assess the model inference capabilities;
+as long as the network structure on which the contagion occurs is sufficiently large to promote mixing, we do not care much about the effect of the network size currently, so it will remain fixed at some manageable size.
+
+```{python}
+#| label: setup.structure.size_degree
+
+# Population globals
+NUM_PEOPLE: int = 256
+AVG_DEGREE: int = 18
+```
+
+Our block mixing is controlled by $\varepsilon$ and has support[^1] $[0, 1)$.
+We will take a coarse sampling, $\varepsilon \in [0.05, 0.15, \ldots, 0.95]$.
+
+```{python}
+#| label: setup.structure.epsilon
+
+EPSILONS = np.linspace(0.05, 0.95, num=10)
+```
+
+## Contagion parameters
+
+Likewise, some aspects of the contagion are beyond the scope of the current experiment and will be fixed;
+namely, the recovery rates and the seed nodes.
+
+We want a scenario that is known to be separable (with respect to the individual kernel modes), so we will fixed relatively strongly differentiated $R_0$'s of 2 and 4.
+The recovery rate throughout will be 0.1.
+
+```{python}
+#| label: setup.contagion.rates
+
+# Shared contagion parameters
+REP1: float = 2.00  # moderate(ish) reproduction number
+REP2: float = 4.00  # moderate(ish) reproduction number
+GAMMA: float = 0.1  # recovery rate
+BETA1: float = REP1 * GAMMA / AVG_DEGREE  # infection rate
+BETA2: float = REP2 * GAMMA / AVG_DEGREE  # infection rate
+```
+
+```{python}
+#| label: setup.contagion.seed_nodes
+
+# Sample seed nodes
+NUM_SEEDS: int = 32  # number of initially infected persons
+_seeds_block1 = set(random.sample(range(int(NUM_PEOPLE/2)), k=int(NUM_SEEDS/2)))
+_seeds_block2 = set(random.sample(range(int(NUM_PEOPLE/2)+1, NUM_PEOPLE), k=int(NUM_SEEDS/2)))
+_seeds = _seeds_block1 | _seeds_block2
+x0 = [int(idx in _seeds) for idx in range(NUM_PEOPLE)]
+```
+
+```{python}
+#| label: setup.contagion.kernel_modes
+
+# Pure kernel modes
+contagion_function = lambda nu, b: 1 - (1 - b) ** nu
+c1 = contagion_function(np.arange(1, NUM_PEOPLE+1), BETA1)
+c2 = contagion_function(np.arange(1, NUM_PEOPLE+1), BETA2)
+```
+
+The assignment of kernels to blocks is a parameter of experimental interest.
+Specifically, we create two pure kernel states according to the above $\beta_1, \beta_2$.
+In a setup without any noise in kernel assignment, the first $N/2$ nodes (all within the first block) are assigned the first pure kernel, and similarly for the remaining nodes and the second kernel.
+Upon adding noise[^2], for each node in each block, with probability $\omega$ we assign that node the kernel of the *opposite* block.
+That is, $\omega = 0$ corresponds to a lack of kernel assignment noise, and $\omega = \frac{1}{2}$ is a random assignment of kernels between the two blocks.
+
+Similarly to $\varepsilon$, we will use a coarse sampling for $\omega, \omega \in [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]$.
+
+```{python}
+#| label: setup.contagion.omegas
+
+OMEGAS = np.linspace(0.0, 0.5, 6)
+```
+
+```{python}
+#| label: setup.contagion.mixing_kernels
+# https://github.com/nwlandry/heterogeneous-complex-network-reconstruction/blob/main/run_dynamical_inference.ipynb
+def mix_kernels(n, k, omega, c1, c2):
+    c = np.zeros((n, k))
+    for i in range(n):
+        u = random.random()
+        if i < n / 2:
+            c[i] = (u < omega) * c1 + (u >= omega) * c2
+        else:
+            c[i] = (u >= omega) * c1 + (u < omega) * c2
+
+    return c
+```
+
+And lastly, we set some hyperparameters related to the hyperprior parameters and contagion time.
+Note that we set $T=2N$, given the insights found in v1 of today's log.
+
+```{python}
+#| label: setup.contagion.hyperparameters
+
+# Our model hyperpriors
+AVERAGE_SCALE: float = 1.0    # mu dirichlet location scaling
+DEVIATION_SCALE: float = 1.0  # sigma exponential scale
+REPLICATES: int = 1000 
+K = 2
+
+# Experiment scaling
+T = 2*NUM_PEOPLE
+# T = 128
+NUM_SAMPLES = 100
+
+# Declare constants
+data = {
+    # Population constants
+    'V': NUM_PEOPLE,
+    'K': K,
+    # Hyperparameters
+    'DEVIATION_SCALE': [DEVIATION_SCALE]*K,
+    'REPLICATES': REPLICATES
+}
+```
+
+# Sweeping $\varepsilon, \omega$ (12:30)
+
+We will also clean up the structure of the Python objects some and use one (admittedly large) dict to organize our data.
+I should get the Snakemake written soon...
+
+```{python}
+#| label: experiment.setup
+#| output: false
+
+exp = []
+for epsilon, omega in tqdm(
+    product(EPSILONS, OMEGAS),
+    desc="Simulating contagions"
+):
+    # Sample network topology
+    adj = src.sbm(NUM_PEOPLE, AVG_DEGREE, epsilon, seed=37)
+    kmax = max(np.sum(adj, axis=0))
+
+    # Sample kernels
+    kernel = mix_kernels(NUM_PEOPLE, kmax, omega, c1[:kmax], c2[:kmax])
+
+    # Simulate contagion
+    states = np.transpose(src.heterogeneous_contagion_process(
+        adj, GAMMA,
+        kernel, x0,
+        tmin=0, tmax=T, dt=1,
+        random_seed=37
+    ))
+
+    exp.append({
+        "epsilon": epsilon,
+        "omega": omega,
+        "adj": adj,
+        "kmax": kmax,
+        "kernel": kernel,
+        "states": states
+    })
+```
+
+Okie now that we have our networks sampled and contagions simulated, let's infer the parameters according to our non-logit model.
+
+```{python}
+#| label: experiment.inference
+#| output: false
+
+NUM_SAMPLES: int = 100
+
+# Load STAN model
+model = csp.CmdStanModel(
+    stan_file = '../../../src/model_mixture.stan',
+)
+
+for idx, _data in enumerate(exp):
+    # Sample kernels from model
+    M, N = src.get_activations(_data["states"], _data["adj"], _data["kmax"])
+    data.update({
+        'kmax': _data["kmax"],
+        'M': M,
+        'N': N,
+    })
+
+    fit = model.sample(
+        data          = data,
+        seed          = 37,
+        # adapt_delta   = 0.90,
+        chains        = 1,
+        iter_sampling = NUM_SAMPLES,
+        iter_warmup   = 5*NUM_SAMPLES,
+        show_progress = False,
+        show_console  = False
+    )
+    _data["fit"] = fit
+
+    exp[idx] = _data
+```
+
+# Posterior checks (12:55)
+
+Now we want to examine the fit of these inferences.
+I have not done much before in the way of posterior checks, so I apologize to any experts reading this.
+
+## Subpopulation kernels
+
+First, I examine the inferred subpopulation kernels, $\alpha^{(k)}(\nu)$. 
+Note these are functions of $k, \nu$, not $i$; the replicates we see are from multiple samples from the posterior[^1].
+
+[^1]: NUM_SAMPLES = 100
+
+```{python}
+#| label: fig-mrmses
+#| fig-cap: "Average RMSE of inferred individual kernels to ground truth kernel assignment."
+
+mrmse = []
+for _data in exp:
+    fit = _data['fit']
+    kmax = _data['kmax']
+
+    # Compute RMSE for each individual
+    gt1 = c1[:kmax]
+    gt2 = c2[:kmax]
+    rmses = []
+    for node in range(int(NUM_PEOPLE/2)):
+        pred = np.mean([fit.stan_variable('c')[x][node][:kmax] for x in range(NUM_SAMPLES)], axis=0)
+        # pred = mode([fit.stan_variable('c')[x][node][:kmax] for x in range(NUM_SAMPLES)], axis=0)[0]
+        rmse = min(
+            root_mean_squared_error(gt1, pred),
+            root_mean_squared_error(gt2, pred),
+        )
+
+        rmses.append(rmse)
+
+    mrmse.append({
+        "epsilon": float(f"{_data['epsilon']:.02f}"),
+        "omega": float(f"{_data['omega']:.02f}"),
+        "MRMSE": np.mean(rmses)
+    })
+
+df_mrmse = pd.DataFrame.from_records(mrmse)
+
+plt.figure(figsize=(8,8))
+sns.heatmap(df_mrmse.pivot(index="omega", columns="epsilon", values="MRMSE"))
+plt.xlabel(r"$\varepsilon$")
+plt.ylabel(r"$\omega$")
+plt.title("Average RMSE\n"+r"$\nu \in [1, \langle k \rangle +1$]")
+```
+
+Okie well @fig-mrmses seems to suggest still that the network modularity and the block-to-kernel assortativity are not particularly effecting the performance of the kernel inference.
+The absolute scaling of the colormap seems distressingly small; 
+furthermore, there appears to be no consistent gradient along either axis.
+
+Let's instead look at the average posterior kernel modes being inferred instead.
+
+```{python}
+#| label: fig-mode-posterior-fit
+#| fig-cap: "Sampled posterior distribution for kernel modes compared to ground truth."
+
+_EPSILONS = EPSILONS[::2]
+fig, axs = plt.subplots(
+    nrows=len(OMEGAS), ncols=len(_EPSILONS),
+    sharex=True, sharey=True,
+    figsize=(12,12)
+)
+for col, eps in enumerate(_EPSILONS):
+    axs[0][col].title.set_text(f"{eps:.02f}")
+    for row, omega in enumerate(OMEGAS):
+        axs[row][0].set_ylabel(f"{omega:.02f}")
+        for _data in exp:
+            if (_data["epsilon"] != eps) or (_data["omega"] != omega):
+                continue
+
+            kmax = _data["kmax"]
+            fit = _data["fit"]
+
+            # Plot baseline
+            axs[row][col].plot(
+                range(kmax),
+                [
+                    logit(x)
+                    for x in c1[:kmax]
+                ],
+                color="cyan",
+                linestyle="dashed"
+            )
+            axs[row][col].plot(
+                range(kmax),
+                [
+                    logit(x)
+                    for x in c2[:kmax]
+                ],
+                color="orange",
+                linestyle="dashed"
+            )
+
+            for ugh in range(10):
+                axs[row][col].scatter(
+                    range(kmax),
+                    fit.stan_variable('alpha_k')[ugh, 0, :],
+                    # np.mean(fit.stan_variable('alpha_k')[:, 0, :], axis=0),
+                    color="blue",
+                    alpha=0.1,
+                    s=3
+                )
+                axs[row][col].scatter(
+                    range(kmax),
+                    fit.stan_variable('alpha_k')[ugh, 1, :],
+                    # np.mean(fit.stan_variable('alpha_k')[:, 1, :], axis=0),
+                    color="red",
+                    alpha=0.1,
+                    s=3
+                )
+                    
+# g.set_titles("Sampled posterior ({col_var} = {col_name})")
+# g.set_xlabels(r"$\nu$")
+# g.set_ylabels(r"$\alpha^{(k)}$")
+```
+
+@fig-mode-posterior-fit seems to suggest that the kernel modes are being inferred correctly irregardless[^2] of $\varepsilon, \omega$.
+
+[^2]: Up to a value of $\nu$ with little support, i.e., very few infected neighbors or too many. By eye, for this network these seem to be $\nu \leq 3, \nu \geq 18$.
+
+This has the same qualitative behavior as the log from October 28th;
+I will briefly look at the inferred $\pi_i$, but I suspect this $T$ is *still* too strong. 
+
+## Kernel mixings
+
+In @fig-mixing-posterior-fit we examine the average individual $\pi$ as a function of their true assigned kernel;
+that is, we expect all of the blue $\pi$'s to be tightly clustered and at the opposite end of $(0,1)$ as the orange $\pi$'s, if the inference is strong.
+Indeed, again regardless of $\varepsilon, \omega$ we see a strong separability with respect to the kernel mode mixing being inferred.
+
+```{python}
+#| label: fig-mixing-posterior-fit
+#| fig-cap: "Sampled posterior distribution for subpopulation kernel mixing."
+
+_EPSILONS = EPSILONS[::2]
+fig, axs = plt.subplots(
+    nrows=len(OMEGAS), ncols=len(_EPSILONS),
+    sharex=True, sharey=True,
+    figsize=(12,12)
+)
+for col, eps in enumerate(_EPSILONS):
+    axs[0][col].title.set_text(f"{eps:.02f}")
+    for row, omega in enumerate(OMEGAS):
+        axs[row][0].set_ylabel(f"{omega:.02f}")
+        for _data in exp:
+            if (_data["epsilon"] != eps) or (_data["omega"] != omega):
+                continue
+
+            kmax = _data["kmax"]
+            fit = _data["fit"]
+
+            kernel_choices = {
+                i: 0 if _data["kernel"][i][0] < BETA2 else 1
+                for i in range(NUM_PEOPLE)
+            }
+
+            axs[row][col].hist(
+                np.mean(fit.stan_variable('pi')[:, [i for i, k in kernel_choices.items() if k == 0], 0], axis=0),
+                # fit.stan_variable('pi')[37, [i for i, k in kernel_choices.items() if k == 0], 0],
+                color="blue",
+                alpha=0.8,
+                label="0",
+                bins=np.linspace(0,1)
+            )
+            axs[row][col].hist(
+                np.mean(fit.stan_variable('pi')[:, [i for i, k in kernel_choices.items() if k == 1], 0], axis=0),
+                # fit.stan_variable('pi')[37, [i for i, k in kernel_choices.items() if k == 1], 0],
+                color="orange",
+                alpha=0.8,
+                label="1",
+                bins=np.linspace(0,1)
+            )
+
+            # plt.legend(title="Assigned kernel mode")
+            # plt.xlabel(r"$\pi_i$")
+            # plt.ylabel("Count")
+            # plt.title(r"$\omega = $"+f"{OMEGA}")
+
+```
+
+# Effect of epidemic time scale ()
+
+From the v1 log, I know that $T=100$ yields, with $\varepsilon = 0.9, \omega=0.5$, overlapping and uniform histograms in the analogue to @fig-mixing-posterior-fit.
+I think its time to sweep over $T, \omega$ for a fixed $\varepsilon$ and clarify the performance effect.
+
+SWEEP HERE.
+
+PLOT HERE.
+
+Let's define a univariate measure of separability for convenience - though, we should be careful about trusting such a compression of the separability signal, something that is intrinsically many dimensions.
+
+DEFINE MEASURE
+CALCULATE MEASURE
+PLOT MEASUREMENTS
