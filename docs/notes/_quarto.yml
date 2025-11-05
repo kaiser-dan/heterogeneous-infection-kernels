@@ -20,6 +20,7 @@ jupyter: hetker
 execute:
   eval: true
   echo: false
+  cache: false  # turn on when operating iteratively on whole project
 
 # Global config
 toc: true
