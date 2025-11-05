@@ -98,6 +98,6 @@ model {
         target += to_matrix(N) .* log(1-to_matrix(c));
 }
 
-generated quantities {
-   array[REPLICATES] real
-}
+// generated quantities {
+//    array[REPLICATES] real
+// }
