@@ -1,10 +1,3 @@
-/* Helper functions */
-// functions {
-//     real<lower=0, upper=1> psum(vector v, int pos) {
-//         return 
-//     }
-// }
-
 /* Input data from user */
 data {
 	/* Population constants */
@@ -26,10 +19,12 @@ data {
 
     /* Hyperparameters */
         // Kernel average dirichlet distribution location scaling
-        vector<lower=0>[K] AVERAGE_SCALE;
+        // vector<lower=0>[K] AVERAGE_SCALE;
 
         // Kernel deviation exponential distribution scale
         vector<lower=0>[K] DEVIATION_SCALE;
+
+        int REPLICATES;
 }
 
 /* Model parameters we wish to infer */
@@ -60,8 +55,8 @@ transformed parameters {
             for (nu in 1:kmax) {
                 alpha[i][nu] = 0;
                 // Mixing kernel modes with weight vector pi[i]
-                // NOTE: Can swap some indices/transpose and compute as a dot product
                 for (k in 1:K) {
+                    // NOTE: Could swap some indices/transpose and compute as a dot product?
                     alpha[i][nu] += pi[i][k] * alpha_k[k][nu];
                 }
             }
@@ -106,4 +101,22 @@ model {
 
         // (log) likelihood contributions from failed infection events
         target += to_matrix(N) .* log(1-c);
+}
+
+generated quantities {
+    // alpha_k replicated, mu and sigma not
+    array[K, kmax, REPLICATES] real alpha_k_rep;
+    for (k in 1:K) {
+        for (nu in 1:kmax) {
+            alpha_k_rep[k][nu] = normal_rng(rep_vector(logit(mu[k][nu]), REPLICATES), sigma[k]);
+        }
+    }
+
+    // c_i replicated, pi_i not
+    // array[K, kmax, REPLICATES] real<lower=0, upper=1> c_rep; 
+    // for (k in 1:K) {
+    //     for (nu in 1:kmax) {
+    //         c_rep[k][nu] = 
+    //     }
+    // }
 }
