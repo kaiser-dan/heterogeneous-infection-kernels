@@ -17,6 +17,7 @@ class Model(Enum):
 
 def fit_model(
     data: dict,
+    stanmodel: Union[None, csp.CmdStanModel] = None,
     model: Model = Model.JGY_mod,
     num_chains: int = 1,
     num_samples: int = 100,
@@ -34,7 +35,7 @@ def fit_model(
     # Dispatch Stan model
     if model == Model.JGY:
         # Set filepaths
-        stan_filepath  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "model_JGYstan")
+        stan_filepath  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "model_JGY.stan")
         model_filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "model_JGY")
 
         # Validate model-specific (hyper)parameters
@@ -67,11 +68,12 @@ def fit_model(
         raise ValueError("Model must be an instance of the 'Model' enum!")
 
     # Instantiate CmdStanPy model object
-    stanmodel = csp.CmdStanModel(
-        stan_file = stan_filepath,
-        exe_file  = model_filepath,
-        force_compile=False
-    )
+    if stanmodel is None:
+        stanmodel = csp.CmdStanModel(
+            stan_file = stan_filepath,
+            exe_file  = model_filepath,
+            force_compile=True
+        )
 
     # Fit model
     fit = stanmodel.sample(
