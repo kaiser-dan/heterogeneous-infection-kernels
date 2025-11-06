@@ -12,3 +12,6 @@ wheels/
 
 # Compiled Stan models (machine dependent)
 build/
+
+# Pytest
+.pytest_cache
