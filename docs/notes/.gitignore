@@ -1,2 +1,3 @@
 /.quarto/
 logs/*_files/
+logs/.jupyter_cache

@@ -11,6 +11,4 @@ wheels/
 .venv
 
 # Compiled Stan models (machine dependent)
-src/model
-src/sampling
-docs/notes/logs/.jupyter_cache
+build/
