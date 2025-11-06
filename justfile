@@ -21,6 +21,10 @@ installmin:
 test:
     uv run pytest
 
+# Compile all Stan models
+[group('setup')]
+compile:
+    uv run bin/compile_models.py
 
 # ----- Research -----
 # Render all Quarto documents
