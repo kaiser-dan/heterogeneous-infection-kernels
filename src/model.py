@@ -34,7 +34,8 @@ def fit_model(
     # Dispatch Stan model
     if model == Model.JGY:
         # Set filepaths
-        raise NotImplementedError()
+        stan_filepath  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "model_JGYstan")
+        model_filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "model_JGY")
 
         # Validate model-specific (hyper)parameters
         assert "DEVIATION_SCALE" in data

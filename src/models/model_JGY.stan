@@ -18,9 +18,6 @@ data {
         array[V, kmax] int<lower=0> N;
 
     /* Hyperparameters */
-        // Kernel average dirichlet distribution location scaling
-        vector<lower=0>[K] AVERAGE_SCALE;
-
         // Kernel deviation exponential distribution scale
         vector<lower=0>[K] DEVIATION_SCALE;
 }
@@ -35,19 +32,16 @@ parameters {
         // Variances (constant w.r.t. nu)
         array[K] real<lower=0> sigma;
         
-        // Means
-        array[K] simplex[kmax] mu;
-        
         // Modes
         matrix[K, kmax] alpha_k;
 
 	/* Hyperparameters */
-        // Kernel averages
-        // simplex[kmax] delta; 
+        // Kernel averages (before sum)
+        array[K] simplex[kmax] delta; 
 }
 transformed parameters {
     /* Kernel parameters */
-        // Intercepts
+        // Mix kernel modes
         matrix[V, kmax] alpha;
         for (i in 1:V) {
             for (nu in 1:kmax) {
@@ -57,6 +51,15 @@ transformed parameters {
                     // NOTE: Could swap some indices/transpose and compute as a dot product?
                     alpha[i][nu] += pi[i][k] * alpha_k[k][nu];
                 }
+            }
+        }
+            
+        // Calculate kernel means as function of nu
+        matrix[K, kmax] mu;
+        for (k in 1:K) {
+            mu[k] = rep_row_vector(0.0, kmax);
+            for (nu in 1:kmax) {
+                mu[k][nu] = sum(head(delta[k], nu));
             }
         }
 
@@ -74,20 +77,16 @@ transformed parameters {
 model {
     /* Hyperparameter priors */
         // Kernel averages
-        // delta ~ dirichlet(rep_vector(1.0, kmax));
+        delta ~ dirichlet(rep_vector(1.0, kmax));
 
     /* Parameter priors */
         // Kernel mixing
-        for (i in 1:V) {
-            pi[i] ~ dirichlet(rep_vector(1.0, K));  // NOTE: Should this be exported to its own hyperprior?
-        }
-        // Multinomial to force more separability?
+        pi ~ dirichlet(rep_vector(1.0, K));  // NOTE: Should this be exported to its own hyperprior?
 
         // Kernel modes
         for (k in 1:K) {
             // Kernel variance
             sigma[k] ~ exponential(DEVIATION_SCALE[k]); 
-            mu[k] ~ dirichlet(rep_vector(1.0, kmax));
         
             // Kernel modes
             alpha_k[k] ~ normal(logit(mu[k]), sigma[k]);
@@ -100,7 +99,3 @@ model {
         // (log) likelihood contributions from failed infection events
         target += to_matrix(N) .* log(1-c);
 }
-
-// generated quantities {
-//    array[REPLICATES]
-// }
