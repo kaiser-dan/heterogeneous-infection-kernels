@@ -60,6 +60,7 @@ transformed parameters {
             mu[k] = rep_row_vector(0.0, kmax);
             for (nu in 1:kmax) {
                 mu[k][nu] = sum(head(delta[k], nu));
+                mu[k][nu] = fmin(fmax(mu[k][nu], 1e-12), 1 - 1e-12);  // Finite cutoff to avoid logit(1)
             }
         }
 
