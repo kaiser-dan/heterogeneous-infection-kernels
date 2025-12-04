@@ -1,0 +1,674 @@
+---
+title: "Stan Inference Demo with Capped and Uncapped Exposures"
+format: html
+---
+
+This notebook demonstrates running a Stan inference model on both simulated and real-world contagion data. We compare the results of using two different types of exposure matrices:
+1.  **Uncapped**: The raw counts of successful (`M`) and failed (`N`) exposure events.
+2.  **Capped**: The number of exposure bins is capped at a maximum value (`max_k`), with all subsequent bins aggregated. This tests the model's sensitivity to high-degree exposures.
+
+## Setup and Imports
+
+```{python}
+#| label: setup
+import sys
+import os
+from pathlib import Path
+
+# Relative project root (notebook lives in notebooks/will)
+notebook_dir = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
+project_root = notebook_dir.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
+
+import pandas as pd
+import numpy as np
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+import cmdstanpy as csp
+import seaborn as sns
+from scipy.special import logit, expit
+import matplotlib.pyplot as plt
+import networkx as nx
+
+from src.data_processing.ORM import ContagionMetadata
+from src.data_processing.database_utils import get_timeseries, get_adjacency_matrix
+from src.data_processing.operation_outbreak import compute_exposure_counts_from_timeseries
+from src.dynamics import heterogeneous_contagion_process, get_activations
+
+# --- Helper Functions ---
+
+def cap_exposure_bins(M, N, max_k):
+    """
+    Truncate exposure matrices to keep only the first `max_k` columns; any bins
+    beyond `max_k` are dropped (no pooling into a final bin).
+    """
+    if max_k is None or max_k <= 0:
+        return M, N
+
+    def _cap(arr):
+        if arr is None:
+            return None
+        arr = np.asarray(arr)
+        # If already at or below cap, leave unchanged; otherwise drop extra columns.
+        return arr[:, :max_k] if arr.shape[1] > max_k else arr
+
+    return _cap(M), _cap(N)
+
+def plot_kernels(fit, ground_truth, kmax, title, ax):
+    """Plots the inferred kernel, CI, and optional ground truth."""
+    alpha_k_samples = fit.stan_variable('alpha_k')
+    c_k_mean = expit(np.mean(alpha_k_samples, axis=0)[0])
+    c_k_lower = expit(np.percentile(alpha_k_samples, 2.5, axis=0)[0])
+    c_k_upper = expit(np.percentile(alpha_k_samples, 97.5, axis=0)[0])
+    kmax_available = c_k_mean.shape[0]
+    kmax_plot = min(kmax if kmax is not None else kmax_available, kmax_available)
+    
+    x_axis = range(kmax_plot)
+    ax.plot(x_axis, c_k_mean[:kmax_plot], label='Inferred Kernel (MAP)', color='blue')
+    ax.fill_between(x_axis, c_k_lower[:kmax_plot], c_k_upper[:kmax_plot], color='blue', alpha=0.2, label='95% CI')
+    
+    if ground_truth is not None:
+        ax.plot(x_axis, ground_truth[:kmax_plot], label='Ground Truth', color='red', linestyle='dashed')
+
+    ax.set_title(title)
+    ax.set_xlabel(r"$\nu$")
+    ax.set_ylabel(r"$c(\nu)$")
+    ax.legend()
+
+# --- Database and Model Setup ---
+db_path = project_root / "data" / "contagion.db"
+engine = create_engine(f"sqlite:///{db_path}")
+Session = sessionmaker(bind=engine)
+session = Session()
+
+stan_file_path = project_root / "src" / "models" / "model_JGY-mod.stan"
+model = csp.CmdStanModel(stan_file=str(stan_file_path))
+
+# --- Stan Sampling Configuration ---
+STAN_SAMPLING_CONFIG = {
+    "seed": 37,
+    "chains": 1, 
+    "iter_sampling": 70,
+    "iter_warmup": 20,
+    "show_progress": False, 
+    "show_console": False
+}
+```
+
+# Part 1: Simulated Data Analysis
+
+First, we generate data from a known contagion process. This allows us to validate our inference method by comparing the inferred kernel to the ground truth.
+
+## Generate Simulation Data
+
+```{python}
+#| label: sim-data-generation
+target_run_id = "oo_sim_165_duration"
+adj_df = get_adjacency_matrix(session, target_run_id)
+adj = (adj_df.to_numpy() > 0).astype(int)
+N_nodes = adj.shape[0]
+
+# Simulation params from logs for simple contagion
+gamma = 0.1
+dt = 1.0
+T_steps = 512
+num_seeds = 32
+rep_number = 2.0
+avg_degree = adj.sum() / N_nodes if N_nodes > 0 else 18
+beta = rep_number * gamma / avg_degree
+kmax_sim = int(adj.sum(axis=1).max())
+
+# Ground truth kernel
+c_vec = 1 - np.power(1 - beta, np.arange(1, kmax_sim + 1))
+kernels = np.tile(c_vec, (N_nodes, 1))
+
+# Initial infected state
+rng = np.random.default_rng(123)
+x0 = np.zeros(N_nodes, dtype=int)
+initial_infected = rng.choice(N_nodes, size=min(num_seeds, N_nodes), replace=False)
+x0[initial_infected] = 1
+
+# Run simulation
+states = heterogeneous_contagion_process(adj, gamma, kernels, x0, tmax=T_steps, dt=dt, random_seed=123)
+M_sim_uncapped, N_sim_uncapped = get_activations(states.T, adj, kmax_sim)
+
+# Create bin-capped matrices
+kmax_bin_cap = 20
+M_sim_capped, N_sim_capped = cap_exposure_bins(M_sim_uncapped, N_sim_uncapped, max_k=kmax_bin_cap)
+```
+
+## Visualize Simulated Outbreak and Exposure Matrices
+
+```{python}
+#| label: fig-sim-viz
+#| fig-cap: "Simulated infection dynamics, network visualization, and comparison of exposure matrices."
+G_sim = nx.from_numpy_array(adj)
+fig = plt.figure(figsize=(15, 18))
+gs = fig.add_gridspec(4, 2, height_ratios=[2, 2, 2, 2], hspace=0.5)
+
+# --- Row 1: Infection Dynamics ---
+ax_ts = fig.add_subplot(gs[0, 0])
+im = ax_ts.imshow(states, aspect="auto", cmap="Reds", interpolation="nearest", origin="lower")
+ax_ts.set_title("Simulated Infection States")
+ax_ts.set_xlabel("Node")
+ax_ts.set_ylabel("Timestep")
+
+ax_cum = fig.add_subplot(gs[0, 1])
+ax_cum.plot(states.sum(axis=1), color="black")
+ax_cum.set_title("Total Infected Over Time")
+ax_cum.set_xlabel("Timestep")
+ax_cum.set_ylabel("# Infected")
+
+# --- Row 2: Network Visualization ---
+ax_net = fig.add_subplot(gs[1, :])
+pos_sim = nx.spring_layout(G_sim, seed=1, k=0.2)
+infected_any_sim = (states.max(axis=0) > 0)
+node_colors_sim = ["#E74C3C" if infected_any_sim[i] else "#D3D3D3" for i in G_sim.nodes()]
+node_sizes_sim = 8 + 2 * np.array([G_sim.degree(n) for n in G_sim.nodes()])
+nx.draw_networkx_nodes(G_sim, pos_sim, ax=ax_net, node_color=node_colors_sim, node_size=node_sizes_sim)
+nx.draw_networkx_edges(G_sim, pos_sim, ax=ax_net, edge_color="#BDC3C7", alpha=0.4, width=0.8)
+ax_net.set_title("Simulated Outbreak on Network")
+ax_net.axis('off')
+
+# --- Row 3: M Matrices ---
+ax_m_uncapped = fig.add_subplot(gs[2, 0])
+sns.heatmap(M_sim_uncapped, cmap="Blues", ax=ax_m_uncapped, cbar_kws={'label': 'count'})
+ax_m_uncapped.set_title("Uncapped Exposure Successes (M)")
+ax_m_uncapped.set_xlabel("Infected neighbors (k)")
+ax_m_uncapped.set_ylabel("Node")
+
+ax_m_capped = fig.add_subplot(gs[2, 1])
+sns.heatmap(M_sim_capped, cmap="Blues", ax=ax_m_capped, cbar_kws={'label': 'count'})
+ax_m_capped.set_title("Capped Exposure Successes (M)")
+ax_m_capped.set_xlabel("Infected neighbors (k)")
+
+# --- Row 4: N Matrices ---
+ax_n_uncapped = fig.add_subplot(gs[3, 0])
+sns.heatmap(N_sim_uncapped, cmap="Greens", ax=ax_n_uncapped, cbar_kws={'label': 'count'})
+ax_n_uncapped.set_title("Uncapped Exposure Failures (N)")
+ax_n_uncapped.set_xlabel("Infected neighbors (k)")
+ax_n_uncapped.set_ylabel("Node")
+
+ax_n_capped = fig.add_subplot(gs[3, 1])
+sns.heatmap(N_sim_capped, cmap="Greens", ax=ax_n_capped, cbar_kws={'label': 'count'})
+ax_n_capped.set_title("Capped Exposure Failures (N)")
+ax_n_capped.set_xlabel("Infected neighbors (k)")
+
+plt.tight_layout()
+plt.show()
+```
+
+## Run Stan Inference on Simulated Data
+
+We run inference twice: once with the original (uncapped) exposure counts and once with the binarized (capped) counts.
+
+```{python}
+#| label: sim-inference
+# --- Uncapped Inference ---
+# kmax_uncapped = M_sim_uncapped.shape[1]
+# data_sim_uncapped = {
+#     "V": N_nodes, "kmax": kmax_uncapped, "K": 1,
+#     "M": M_sim_uncapped, "N": N_sim_uncapped,
+#     "DEVIATION_SCALE": [1.0], "REPLICATES": 1000
+# }
+# fit_sim_uncapped = model.sample(data=data_sim_uncapped, **STAN_SAMPLING_CONFIG)
+
+# --- Capped Inference ---
+kmax_capped = M_sim_capped.shape[1]
+data_sim_capped = {
+    "V": N_nodes, "kmax": kmax_capped, "K": 1,
+    "M": M_sim_capped, "N": N_sim_capped,
+    "DEVIATION_SCALE": [1.0], "REPLICATES": 1000
+}
+fit_sim_capped = model.sample(data=data_sim_capped, **STAN_SAMPLING_CONFIG)
+
+print("Inference on simulated data complete for both uncapped and capped matrices.")
+```
+
+## Compare Inferred Kernels for Simulated Data
+
+```{python}
+#| label: fig-sim-kernels
+#| fig-cap: "Comparison of inferred kernels from uncapped and capped simulated data."
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6), sharey=True)
+
+# plot_kernels(fit_sim_uncapped, c_vec, kmax_uncapped, "Inference from Uncapped Data", ax1)
+plot_kernels(fit_sim_capped, c_vec, kmax_capped, "Inference from Capped Data", ax2)
+
+plt.suptitle("Simulated Data: Inferred Kernels vs. Ground Truth")
+plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+plt.show()
+```
+
+
+# Part 2: Real Data Analysis
+
+Now we apply the same analysis to a real-world dataset (`oo_sim_165_duration`), which is from an earlier simulation study.
+
+This data is taken from Operation Outbreak, Sim #165 which was conducted  Wenzhou-Kean University (WKU) in China, run between November 20 and December 4 of 2023. Currently the is the only available data. 
+The link to the Zenodo is [here](https://zenodo.org/records/10674401). A blog post about the event can be found [here](https://colabobio.medium.com/a-multimodal-dataset-for-network-epidemiology-from-a-two-week-long-outbreak-simulation-at-667295c43907). 
+
+
+The full dataset with all simulations is [here](https://zenodo.org/records/10674401). 
+
+## Load and Prepare Real Data
+
+```{python}
+#| label: real-data-prep
+run_metadata = session.query(ContagionMetadata).filter_by(run_id=target_run_id).first()
+ts_df_real_raw = get_timeseries(session, target_run_id)  # time x nodes
+adj_df_real = get_adjacency_matrix(session, target_run_id)
+ts_df_real = ts_df_real_raw.reindex(columns=adj_df_real.index, fill_value=0)
+
+# Compute exposure counts directly from the time series + adjacency (weighted)
+binary_adj_real = (adj_df_real.to_numpy() > 0).astype(int)
+kmax_real_uncapped = int(binary_adj_real.sum(axis=1).max())
+M_real_uncapped, N_real_uncapped = compute_exposure_counts_from_timeseries(
+    ts_df_real, adj_df_real, kmax=kmax_real_uncapped
+)
+
+# Thresholded adjacency (e.g., keep edges with duration >= 1 minute)
+contact_weight_threshold = 1.0
+adj_df_real_thresh = (adj_df_real >= contact_weight_threshold).astype(int)
+binary_adj_real_thresh = adj_df_real_thresh.to_numpy().astype(int)
+kmax_real_thresh_uncapped = int(binary_adj_real_thresh.sum(axis=1).max())
+M_real_thresh, N_real_thresh = compute_exposure_counts_from_timeseries(
+    ts_df_real, adj_df_real_thresh, kmax=kmax_real_thresh_uncapped
+)
+
+# Create the "capped" versions by truncating the number of exposure bins.
+kmax_bin_cap = 20
+M_real_capped, N_real_capped = cap_exposure_bins(M_real_uncapped, N_real_uncapped, max_k=kmax_bin_cap)
+M_real_thresh_capped, N_real_thresh_capped = cap_exposure_bins(M_real_thresh, N_real_thresh, max_k=kmax_bin_cap)
+```
+
+## Visualize Real Outbreak and Exposure Matrices
+
+```{python}
+#| label: fig-real-viz
+#| fig-cap: "Real data infection dynamics, network visualization, and comparison of exposure matrices."
+adjacency_binary_real = (adj_df_real.to_numpy() > 0).astype(int)
+G_real = nx.from_numpy_array(adjacency_binary_real)
+real_states_np = ts_df_real.to_numpy()  # time x nodes aligned to adjacency
+
+fig = plt.figure(figsize=(15, 18))
+gs = fig.add_gridspec(5, 2, height_ratios=[2, 2, 2, 2, 2], hspace=0.5)
+
+# --- Row 1: Infection Dynamics ---
+ax_ts = fig.add_subplot(gs[0, 0])
+im = ax_ts.imshow(real_states_np, aspect="auto", cmap="Reds", interpolation="nearest", origin="lower")
+ax_ts.set_title(f"Infection States for {target_run_id}")
+ax_ts.set_xlabel("Node")
+ax_ts.set_ylabel("Timestep")
+
+ax_cum = fig.add_subplot(gs[0, 1])
+ax_cum.plot(real_states_np.sum(axis=1), color="black") # sum over nodes (axis 1)
+ax_cum.set_title("Total Infected Over Time")
+ax_cum.set_xlabel("Timestep")
+ax_cum.set_ylabel("# Infected")
+
+# --- Row 2: Network Visualization ---
+ax_net = fig.add_subplot(gs[1, :])
+pos_real = nx.spring_layout(G_real, seed=1, k=0.2)
+infected_any_real = (real_states_np.max(axis=0) > 0) # max over time (axis 0)
+node_colors_real = ["#E74C3C" if infected_any_real[i] else "#D3D3D3" for i in G_real.nodes()]
+node_sizes_real = 8 + 2 * np.array([G_real.degree(n) for n in G_real.nodes()])
+nx.draw_networkx_nodes(G_real, pos_real, ax=ax_net, node_color=node_colors_real, node_size=node_sizes_real)
+nx.draw_networkx_edges(G_real, pos_real, ax=ax_net, edge_color="#BDC3C7", alpha=0.4, width=0.8)
+ax_net.set_title("Real Data Outbreak on Network")
+ax_net.axis('off')
+
+# --- Row 3: M Matrices ---
+ax_m_uncapped = fig.add_subplot(gs[2, 0])
+sns.heatmap(M_real_uncapped, cmap="Blues", ax=ax_m_uncapped, cbar_kws={'label': 'count'})
+ax_m_uncapped.set_title("Uncapped Exposure Successes (M)")
+ax_m_uncapped.set_xlabel("Infected neighbors (k)")
+ax_m_uncapped.set_ylabel("Node")
+
+ax_m_capped = fig.add_subplot(gs[2, 1])
+sns.heatmap(M_real_capped, cmap="Blues", ax=ax_m_capped, cbar_kws={'label': 'count'})
+ax_m_capped.set_title("Capped Exposure Successes (M)")
+ax_m_capped.set_xlabel("Infected neighbors (k)")
+
+# --- Row 4: N Matrices ---
+ax_n_uncapped = fig.add_subplot(gs[3, 0])
+sns.heatmap(N_real_uncapped, cmap="Greens", ax=ax_n_uncapped, cbar_kws={'label': 'count'})
+ax_n_uncapped.set_title("Uncapped Exposure Failures (N)")
+ax_n_uncapped.set_xlabel("Infected neighbors (k)")
+ax_n_uncapped.set_ylabel("Node")
+
+ax_n_capped = fig.add_subplot(gs[3, 1])
+sns.heatmap(N_real_capped, cmap="Greens", ax=ax_n_capped, cbar_kws={'label': 'count'})
+ax_n_capped.set_title("Capped Exposure Failures (N)")
+ax_n_capped.set_xlabel("Infected neighbors (k)")
+
+# --- Row 5: Thresholded (capped) M/N Matrices ---
+ax_m_thresh = fig.add_subplot(gs[4, 0])
+sns.heatmap(M_real_thresh_capped, cmap="Purples", ax=ax_m_thresh, cbar_kws={'label': 'count'})
+ax_m_thresh.set_title("Thresholded Exposure Successes (M)")
+ax_m_thresh.set_xlabel("Infected neighbors (k)")
+ax_m_thresh.set_ylabel("Node")
+
+ax_n_thresh = fig.add_subplot(gs[4, 1])
+sns.heatmap(N_real_thresh_capped, cmap="Greens", ax=ax_n_thresh, cbar_kws={'label': 'count'})
+ax_n_thresh.set_title("Thresholded Exposure Failures (N)")
+ax_n_thresh.set_xlabel("Infected neighbors (k)")
+
+plt.tight_layout()
+plt.show()
+```
+
+## Run Stan Inference on Real Data
+
+```{python}
+#| label: real-inference
+num_nodes_real = M_real_uncapped.shape[0]
+kmax_real_uncapped = M_real_uncapped.shape[1]
+kmax_real_capped = M_real_capped.shape[1]
+kmax_real_thresh = M_real_thresh_capped.shape[1]
+
+# --- Uncapped Inference ---
+# data_real_uncapped = {
+#     "V": num_nodes_real, "kmax": kmax_real_uncapped, "K": 1,
+#     "M": M_real_uncapped, "N": N_real_uncapped,
+#     "DEVIATION_SCALE": [1.0], "REPLICATES": 1000
+# }
+# fit_real_uncapped = model.sample(data=data_real_uncapped, **STAN_SAMPLING_CONFIG)
+
+# --- Capped Inference ---
+data_real_capped = {
+    "V": num_nodes_real, "kmax": kmax_real_capped, "K": 1,
+    "M": M_real_capped, "N": N_real_capped,
+    "DEVIATION_SCALE": [1.0], "REPLICATES": 1000
+}
+fit_real_capped = model.sample(data=data_real_capped, **STAN_SAMPLING_CONFIG)
+
+# --- Thresholded (capped) Inference ---
+data_real_thresh = {
+    "V": num_nodes_real, "kmax": kmax_real_thresh, "K": 1,
+    "M": M_real_thresh_capped, "N": N_real_thresh_capped,
+    "DEVIATION_SCALE": [1.0], "REPLICATES": 1000
+}
+fit_real_thresh = model.sample(data=data_real_thresh, **STAN_SAMPLING_CONFIG)
+
+
+fit_real_uncapped = fit_real_thresh #TEMPORARY TO AVOID LONG SAMPLING TIMES, REMOVE LATER
+
+print("Inference on real data complete for uncapped, capped, and thresholded matrices.")
+```
+
+## Compare Inferred Kernels for Real Data
+
+```{python}
+#| label: fig-real-kernels
+#| fig-cap: "Comparison of inferred kernels from uncapped, capped, and thresholded real data. The first plot uses the full adjacency (edge if any contact exists). The second caps the exposure matrices (values > k_eff set to k_eff). The third uses the adjacency thresholded to contacts longer than 1 minute."
+fig, axs = plt.subplots(1, 3, figsize=(24, 6), sharey=False)
+
+plot_kernels(fit_real_uncapped, None, kmax_real_uncapped, "Inference from Uncapped Data", axs[0])
+plot_kernels(fit_real_capped, None, kmax_real_capped, "Inference from Capped Data", axs[1])
+plot_kernels(fit_real_thresh, None, kmax_real_thresh, "Inference from Thresholded Adj", axs[2])
+
+plt.suptitle("Real Data: Inferred Kernels")
+plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+plt.show()
+```
+
+## Thresholded Adjacency: 2-Component Mixture
+
+```{python}
+#| label: real-thresh-mixture
+#| fig-cap: "Thresholded adjacency: inferred kernels for a 2-component mixture."
+# Build and sample a 2-component mixture on the thresholded (capped) exposure matrices.
+adj_df_real = get_adjacency_matrix(session, target_run_id)
+contact_weight_threshold = 1.0
+adj_df_real_thresh = (adj_df_real >= contact_weight_threshold).astype(int)
+M_real_thresh, N_real_thresh = compute_exposure_counts_from_timeseries(
+    ts_df_real, adj_df_real_thresh, kmax=int(adj_df_real_thresh.sum(axis=1).max())
+)
+kmax_bin_cap = 20
+M_real_thresh_capped, N_real_thresh_capped = cap_exposure_bins(M_real_thresh, N_real_thresh, max_k=kmax_bin_cap)
+
+num_nodes_real_mix = M_real_thresh_capped.shape[0]
+kmax_real_thresh = M_real_thresh_capped.shape[1]
+data_real_thresh_mix2 = {
+    "V": num_nodes_real_mix,
+    "kmax": kmax_real_thresh,
+    "K": 2,
+    "M": M_real_thresh_capped,
+    "N": N_real_thresh_capped,
+    "DEVIATION_SCALE": [1.0, 1.0],
+    "REPLICATES": 1000,
+}
+fit_real_thresh_mix2 = model.sample(data=data_real_thresh_mix2, **STAN_SAMPLING_CONFIG)
+
+# Plot per-mode kernels
+alpha_k_samples_mix2 = fit_real_thresh_mix2.stan_variable("alpha_k")  # (samples, K, kmax)
+k_axis = np.arange(kmax_real_thresh)
+c_k_mean = expit(alpha_k_samples_mix2.mean(axis=0))
+c_k_lower = expit(np.percentile(alpha_k_samples_mix2, 2.5, axis=0))
+c_k_upper = expit(np.percentile(alpha_k_samples_mix2, 97.5, axis=0))
+
+fig, axs = plt.subplots(1, 2, figsize=(14, 5), sharex=True, sharey=True)
+for mode_idx in range(2):
+    ax = axs[mode_idx]
+    ax.plot(k_axis, c_k_mean[mode_idx], label="Inferred (MAP)", color="blue")
+    ax.fill_between(k_axis, c_k_lower[mode_idx], c_k_upper[mode_idx], color="blue", alpha=0.2, label="95% CI")
+    ax.set_title(f"Mode {mode_idx + 1}")
+    ax.set_xlabel(r"$\nu$")
+    ax.legend()
+axs[0].set_ylabel(r"$c(\nu)$")
+plt.suptitle("Thresholded Adjacency: 2-Component Mixture")
+plt.tight_layout(rect=[0, 0.03, 1, 0.9])
+plt.show()
+```
+
+
+- The first component assiggns basically zero probability getting infected while the second compoenent have a much higher level of infection. I think this might be the effect of an incorrect network. Here is what I think might be happening. Nodes which are not activated get placed in mode 1 while nodes which do get activated are placed in mode 2. For the single component model In Fig @fig-real-kernels we see an overall much lower values for the kernel(order of 0.014) per hour versus with second mode of the two component mixture model which have $c(\nu) \sim O(0.1)$ an hour. I think this might be averaging over un-activated nodes. 
+
+
+
+
+## Mixture Weights by Node (Thresholded, K=2)
+
+```{python}
+#| label: fig-real-thresh-mix-pi
+#| fig-cap: "Posterior mixture weights per node for the 2-component thresholded fit."
+# Extract per-node mixture weights and visualize vs. infection status.
+pi_samples = fit_real_thresh_mix2.stan_variable("pi")  # shape (draws, V, K)
+pi_mean = pi_samples.mean(axis=0)  # (V, K)
+
+# Infection status: ever infected in the thresholded time series
+ever_infected = (ts_df_real > 0).any(axis=0).reindex(adj_df_real.index, fill_value=False).to_numpy()
+
+fig, axs = plt.subplots(1, 2, figsize=(12, 5))
+
+# Histogram of mixture weights for each mode
+axs[0].hist(pi_mean[:, 0], bins=30, alpha=0.7, label="Mode 1", color="#1f77b4")
+axs[0].hist(pi_mean[:, 1], bins=30, alpha=0.7, label="Mode 2", color="#ff7f0e")
+axs[0].set_xlabel("Mean mixture weight per node")
+axs[0].set_ylabel("Count")
+axs[0].set_title("Distribution of mixture weights")
+axs[0].legend()
+
+# Scatter pi[:,0] vs pi[:,1], colored by infection status
+colors = np.where(ever_infected, "#E74C3C", "#95A5A6")
+labels = np.where(ever_infected, "Ever infected", "Never infected")
+axs[1].scatter(pi_mean[:, 0], pi_mean[:, 1], c=colors, alpha=0.7, edgecolor="none")
+axs[1].set_xlabel("pi[:, 0]")
+axs[1].set_ylabel("pi[:, 1]")
+axs[1].set_title("Per-node mixture weights")
+
+# Add legend for infection status
+for status, color in [("Ever infected", "#E74C3C"), ("Never infected", "#95A5A6")]:
+    axs[1].scatter([], [], c=color, alpha=0.7, label=status, edgecolor="none")
+axs[1].legend(title="Infection status")
+
+plt.tight_layout()
+plt.show()
+```
+
+## Thresholded, K=2 on Ever-Infected Subset
+
+```{python}
+#| label: real-thresh-mixture-active
+#| fig-cap: "2-component mixture fit using only nodes that ever became infected (thresholded adjacency)."
+# Subset to ever-infected nodes
+infected_nodes = ts_df_real.columns[(ts_df_real > 0).any(axis=0)]
+ts_real_active = ts_df_real[infected_nodes]
+adj_real_active = adj_df_real.loc[infected_nodes, infected_nodes]
+
+# Recompute exposures for active nodes
+kmax_active = int((adj_real_active.to_numpy() > 0).sum(axis=1).max())
+M_active, N_active = compute_exposure_counts_from_timeseries(ts_real_active, adj_real_active, kmax=kmax_active)
+M_active_capped, N_active_capped = cap_exposure_bins(M_active, N_active, max_k=kmax_bin_cap)
+
+data_active_mix2 = {
+    "V": M_active_capped.shape[0],
+    "kmax": M_active_capped.shape[1],
+    "K": 2,
+    "M": M_active_capped,
+    "N": N_active_capped,
+    "DEVIATION_SCALE": [1.0, 1.0],
+    "REPLICATES": 1000,
+}
+fit_active_mix2 = model.sample(data=data_active_mix2, **STAN_SAMPLING_CONFIG)
+
+# Plot per-mode kernels
+alpha_k_samples_active = fit_active_mix2.stan_variable("alpha_k")
+k_axis_active = np.arange(data_active_mix2["kmax"])
+c_k_mean = expit(alpha_k_samples_active.mean(axis=0))
+c_k_lower = expit(np.percentile(alpha_k_samples_active, 2.5, axis=0))
+c_k_upper = expit(np.percentile(alpha_k_samples_active, 97.5, axis=0))
+
+fig, axs = plt.subplots(1, 2, figsize=(14, 5), sharex=True, sharey=True)
+for mode_idx in range(2):
+    ax = axs[mode_idx]
+    ax.plot(k_axis_active, c_k_mean[mode_idx], label="Inferred (MAP)", color="blue")
+    ax.fill_between(k_axis_active, c_k_lower[mode_idx], c_k_upper[mode_idx], color="blue", alpha=0.2, label="95% CI")
+    ax.set_title(f"Mode {mode_idx + 1}")
+    ax.set_xlabel(r"$\nu$")
+    ax.legend()
+axs[0].set_ylabel(r"$c(\nu)$")
+plt.suptitle("Thresholded adjacency (active nodes only): 2-Component Mixture")
+plt.tight_layout(rect=[0, 0.03, 1, 0.9])
+plt.show()
+```
+
+## Active Nodes Only: K=1 vs K=2 Comparison
+
+```{python}
+#| label: real-thresh-active-k1k2
+#| fig-cap: "Thresholded adjacency (ever-infected nodes): comparison of 1- vs 2-component fits."
+# Ensure active-node exposures are available
+if "M_active_capped" not in globals() or "N_active_capped" not in globals():
+    infected_nodes = ts_df_real.columns[(ts_df_real > 0).any(axis=0)]
+    ts_real_active = ts_df_real[infected_nodes]
+    adj_real_active = adj_df_real.loc[infected_nodes, infected_nodes]
+    kmax_active = int((adj_real_active.to_numpy() > 0).sum(axis=1).max())
+    M_active, N_active = compute_exposure_counts_from_timeseries(ts_real_active, adj_real_active, kmax=kmax_active)
+    kmax_bin_cap = 20
+    M_active_capped, N_active_capped = cap_exposure_bins(M_active, N_active, max_k=kmax_bin_cap)
+
+data_active_k1 = {
+    "V": M_active_capped.shape[0],
+    "kmax": M_active_capped.shape[1],
+    "K": 1,
+    "M": M_active_capped,
+    "N": N_active_capped,
+    "DEVIATION_SCALE": [1.0],
+    "REPLICATES": 1000,
+}
+fit_active_k1 = model.sample(data=data_active_k1, **STAN_SAMPLING_CONFIG)
+
+data_active_k2 = {
+    "V": M_active_capped.shape[0],
+    "kmax": M_active_capped.shape[1],
+    "K": 2,
+    "M": M_active_capped,
+    "N": N_active_capped,
+    "DEVIATION_SCALE": [1.0, 1.0],
+    "REPLICATES": 1000,
+}
+fit_active_k2 = model.sample(data=data_active_k2, **STAN_SAMPLING_CONFIG)
+
+# Extract kernels
+alpha_k_k1 = fit_active_k1.stan_variable("alpha_k")  # (draws, 1, kmax)
+c_k1_mean = expit(alpha_k_k1.mean(axis=0)[0])
+c_k1_lo = expit(np.percentile(alpha_k_k1, 2.5, axis=0)[0])
+c_k1_hi = expit(np.percentile(alpha_k_k1, 97.5, axis=0)[0])
+k_axis_k1 = np.arange(c_k1_mean.shape[0])
+
+alpha_k_k2 = fit_active_k2.stan_variable("alpha_k")  # (draws, 2, kmax)
+c_k2_mean = expit(alpha_k_k2.mean(axis=0))
+c_k2_lo = expit(np.percentile(alpha_k_k2, 2.5, axis=0))
+c_k2_hi = expit(np.percentile(alpha_k_k2, 97.5, axis=0))
+k_axis_k2 = np.arange(c_k2_mean.shape[1])
+
+fig, axs = plt.subplots(1, 3, figsize=(18, 5), sharex=False, sharey=True)
+
+# K=1
+axs[0].plot(k_axis_k1, c_k1_mean, color="blue", label="Inferred (MAP)")
+axs[0].fill_between(k_axis_k1, c_k1_lo, c_k1_hi, color="blue", alpha=0.2, label="95% CI")
+axs[0].set_title("K=1 (active only)")
+axs[0].set_xlabel(r"$\nu$")
+axs[0].set_ylabel(r"$c(\nu)$")
+axs[0].legend()
+
+# K=2 modes
+for mode_idx in range(2):
+    ax = axs[mode_idx + 1]
+    ax.plot(k_axis_k2, c_k2_mean[mode_idx], color="blue", label="Inferred (MAP)")
+    ax.fill_between(k_axis_k2, c_k2_lo[mode_idx], c_k2_hi[mode_idx], color="blue", alpha=0.2, label="95% CI")
+    ax.set_title(f"K=2 Mode {mode_idx + 1}")
+    ax.set_xlabel(r"$\nu$")
+    ax.legend()
+
+plt.suptitle("Thresholded adjacency (ever-infected nodes): K=1 vs K=2")
+plt.tight_layout(rect=[0, 0.03, 1, 0.92])
+plt.show()
+```
+
+```{python}
+#| label: fig-real-graph
+#| fig-cap: "Infection time series (ever-infected nodes) and thresholded adjacency subgraph."
+# Plot the infection time series for ever-infected nodes and the thresholded subgraph.
+
+# Ensure active-node data
+infected_nodes = ts_df_real.columns[(ts_df_real > 0).any(axis=0)]
+ts_real_active = ts_df_real[infected_nodes]
+adj_real_active = adj_df_real.loc[infected_nodes, infected_nodes]
+adj_bin_active = (adj_real_active.to_numpy() > 0).astype(int)
+G_active = nx.from_numpy_array(adj_bin_active)
+
+fig = plt.figure(figsize=(14, 6))
+gs = fig.add_gridspec(1, 2, width_ratios=[2, 1], wspace=0.3)
+
+# Left: infection time series heatmap (time x nodes)
+ax_ts = fig.add_subplot(gs[0, 0])
+im = ax_ts.imshow(ts_real_active.to_numpy(), aspect="auto", cmap="Reds", interpolation="nearest", origin="lower")
+ax_ts.set_title("Infection Time Series (active nodes)")
+ax_ts.set_xlabel("Node (index in active set)")
+ax_ts.set_ylabel("Timestep")
+plt.colorbar(im, ax=ax_ts, label="Infection state")
+
+# Right: thresholded adjacency subgraph
+ax_net = fig.add_subplot(gs[0, 1])
+pos = nx.spring_layout(G_active, seed=1, k=0.2)
+nx.draw_networkx_edges(G_active, pos, ax=ax_net, edge_color="#BDC3C7", alpha=0.4, width=0.8)
+nx.draw_networkx_nodes(G_active, pos, ax=ax_net, node_color="#E74C3C", node_size=8 + 2 * np.array([G_active.degree(n) for n in G_active.nodes()]))
+ax_net.set_title("Thresholded adjacency (active nodes)")
+ax_net.axis("off")
+
+plt.tight_layout()
+plt.show()
+```
+
+So looking at @fig-real-thresh-mix-pi our theory seems to be correct. The second mixture component contains mostly the unactivated nodes. So what if we only include nodes which are *eventually* activated? 
+
+### Only Activated Nodes
+
+```{python}
+#| label: real-thresh-mixture-only-activated
+    
+```
