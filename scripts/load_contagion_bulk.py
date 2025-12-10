@@ -40,7 +40,7 @@ from src.data_processing.twitter_contagion import (
     retweet_time_series,
 )
 
-
+OO_INCLUDED_SIMS = [129, 131, 136, 139, 140, 141, 143, 148, 149, 155, 158, 159, 162, 163, 165, 46, 49, 50, 53, 54, 55, 56, 57, 58, 59, 61, 64, 65, 66, 67, 68, 69, 72, 74, 75, 79, 81, 82, 83, 85, 88, 118, 126, 127]
 # ---------------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------------
@@ -60,6 +60,89 @@ def _safe_iter(items: Iterable, limit: int | None):
             yield item
 
 
+def _create_node_mapping_from_ids(node_ids: set):
+    """
+    Create a mapping from original node IDs (as strings) to integer node IDs.
+
+    Parameters
+    ----------
+    node_ids : set
+        Set of original node IDs (should be strings)
+
+    Returns
+    -------
+    tuple[dict, dict]
+        (node_to_int, int_to_node) - bidirectional mapping
+    """
+    sorted_ids = sorted(node_ids)
+    node_to_int = {orig_id: idx for idx, orig_id in enumerate(sorted_ids)}
+    int_to_node = {idx: orig_id for orig_id, idx in node_to_int.items()}
+    return node_to_int, int_to_node
+
+
+def _create_oo_node_mapping(histories: pd.DataFrame, infections: pd.DataFrame, sim_id: int):
+    """
+    Create node mapping for an Operation Outbreak simulation.
+
+    Parameters
+    ----------
+    histories : pd.DataFrame
+        Contact history data containing user_id and peer_id columns
+    infections : pd.DataFrame
+        Infection data containing user_id column
+    sim_id : int
+        Simulation ID to filter on
+
+    Returns
+    -------
+    tuple[dict, dict]
+        (node_to_int, int_to_node) - bidirectional mapping
+    """
+    # Get all unique node IDs from contacts
+    sim_contacts = histories[(histories["sim_id"] == sim_id) & (histories["type"] == "contact")]
+    contact_users = set(str(x) for x in sim_contacts["user_id"].dropna())
+    contact_peers = set(str(x) for x in sim_contacts["peer_id"].dropna())
+
+    # Get all unique node IDs from infections
+    sim_infections = infections[infections["sim_id"] == sim_id]
+    infection_users = set(str(x) for x in sim_infections["user_id"].dropna())
+
+    # Combine all node IDs
+    all_node_ids = contact_users | contact_peers | infection_users
+
+    return _create_node_mapping_from_ids(all_node_ids)
+
+
+def _create_twitter_node_mapping(adjacency: pd.DataFrame, cascade: list):
+    """
+    Create node mapping for a Twitter cascade.
+
+    Parameters
+    ----------
+    adjacency : pd.DataFrame
+        Adjacency matrix with user IDs as index/columns
+    cascade : list
+        List of tweet dictionaries in the cascade
+
+    Returns
+    -------
+    tuple[dict, dict]
+        (node_to_int, int_to_node) - bidirectional mapping
+    """
+    # Get all unique node IDs from adjacency and cascade
+    adj_nodes = set(str(x) for x in adjacency.index.unique())
+
+    cascade_users = set()
+    for tweet in cascade:
+        if "user" in tweet and "id" in tweet["user"]:
+            cascade_users.add(str(tweet["user"]["id"]))
+
+    # Combine all node IDs
+    all_node_ids = adj_nodes | cascade_users
+
+    return _create_node_mapping_from_ids(all_node_ids)
+
+
 # ---------------------------------------------------------------------------
 # Operation Outbreak bulk load
 # ---------------------------------------------------------------------------
@@ -67,28 +150,43 @@ def _safe_iter(items: Iterable, limit: int | None):
 def load_all_oo(
     session,
     histories: pd.DataFrame,
-    infections: pd.DataFrame,
     *,
     weight_type: str,
     freq: str,
     directed: bool,
     include_exposures: bool,
     overwrite: bool,
+    included_sims: Iterable[int] = OO_INCLUDED_SIMS,
 ):
+    # Extract infection events from histories (type == 'infection')
+    infections = histories[histories["type"] == "infection"].copy()
+
     sim_ids = sorted(set(histories["sim_id"].unique()) & set(infections["sim_id"].unique()))
     print(f"[OO] {len(sim_ids)} simulations with both histories and infections.")
 
     for sim_id in sim_ids:
+        if sim_id not in included_sims:
+            continue
         run_id = f"oo_sim_{sim_id}_{weight_type}"
         if not overwrite and _run_exists(session, run_id):
             print(f"[OO][skip] {run_id} already in DB")
             continue
 
-        sim_hist = histories[histories["sim_id"] == sim_id]
-        sim_inf = infections[infections["sim_id"] == sim_id]
+        sim_hist = histories[histories["sim_id"] == sim_id].copy()
+        sim_inf = infections[infections["sim_id"] == sim_id].copy()
         if sim_hist.empty or sim_inf.empty:
             print(f"[OO][warn] missing data for sim {sim_id}; histories rows={len(sim_hist)}, infections rows={len(sim_inf)}")
             continue
+
+        # Create node mapping: original_id (str) -> integer node_id
+        print(f"[OO][{sim_id}] creating node mapping")
+        node_to_int, int_to_node = _create_oo_node_mapping(histories, infections, sim_id)
+        print(f"[OO][{sim_id}] mapped {len(node_to_int)} unique nodes")
+
+        # Apply node mapping to convert original IDs to integers
+        sim_hist["user_id"] = sim_hist["user_id"].astype(str).map(node_to_int)
+        sim_hist["peer_id"] = sim_hist["peer_id"].astype(str).map(node_to_int)
+        sim_inf["user_id"] = sim_inf["user_id"].astype(str).map(node_to_int)
 
         print(f"[OO][{sim_id}] build adjacency (weight={weight_type}, directed={directed})")
         adjacency = contact_adjacency(sim_hist, sim_id, weight=weight_type, directed=directed)
@@ -117,7 +215,6 @@ def load_all_oo(
             sim_id=sim_id,
             adjacency=adjacency,
             timeseries=ts,
-            timeseries_freq=freq,
             weight_type=weight_type,
             is_directed=directed,
             description=f"Operation Outbreak sim {sim_id} ({weight_type})",
@@ -209,7 +306,6 @@ def load_all_twitter(
             cascade_id=cid,
             adjacency=adjacency,
             timeseries=ts,
-            timeseries_freq=freq,
             intervention_hashtag=hashtag,
             source_bot_id=str(source_bot) if source_bot is not None else None,
             original_tweet_id=str(original_tweet_id) if original_tweet_id is not None else None,
@@ -254,15 +350,12 @@ def main():
     try:
         # Operation Outbreak
         histories_path = oo_data_dir / "oo-histories-all.csv"
-        infections_path = oo_data_dir / "infections_all.csv"
-        if histories_path.exists() and infections_path.exists():
+        if histories_path.exists():
             print(f"\n[OO] Loading data from {oo_data_dir}")
             histories = pd.read_csv(histories_path, low_memory=False)
-            infections = pd.read_csv(infections_path, low_memory=False)
             load_all_oo(
                 session,
                 histories,
-                infections,
                 weight_type=oo_weight_type,
                 freq=oo_freq,
                 directed=oo_directed,
@@ -270,7 +363,7 @@ def main():
                 overwrite=overwrite,
             )
         else:
-            print(f"[OO] Skipping: missing CSVs in {oo_data_dir}")
+            print(f"[OO] Skipping: missing {histories_path}")
 
         # Twitter
         edges_path = tw_data_dir / "edges"

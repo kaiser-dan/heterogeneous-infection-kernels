@@ -7,6 +7,7 @@ __all__ = [
     "contact_adjacency",
     "infection_time_series",
     "compute_exposure_counts",
+    "compute_exposure_counts_from_timeseries"
 ]
 
 
@@ -94,83 +95,45 @@ def infection_time_series(infections,sim_id,*,freq="1D",participants=None,user_c
     end_ts = _to_timestamp(end_time) or sim_infections["infection_ts"].max()
     freq = freq.lower()
     timeline = pd.date_range(start=start_ts, end=end_ts, freq=freq)
-    user_ids = set(sim_infections[user_column].dropna().astype(int).tolist())
+    user_ids = set(sim_infections[user_column].dropna().tolist())
     if participants is not None:
-        user_ids.update(int(uid) for uid in participants)
+        user_ids.update(participants)
     user_index = sorted(user_ids)
     #Add data to timeseries
     states = pd.DataFrame(data=0,index=timeline,columns=user_index,dtype=int)
     for _, event in sim_infections[[user_column, "infection_ts"]].iterrows():
-        uid = int(event[user_column])
+        uid = event[user_column]
         infection_ts = event["infection_ts"]
         states.loc[states.index >= infection_ts, uid] = 1
     return states
 
 
-def compute_exposure_counts(
-    infections,
-    sim_id,
+def compute_exposure_counts_from_timeseries(
+    states,
     adjacency,
-    *,
-    freq="1D",
-    participants=None,
-    user_column="user_id",
-    time_column="time",
-    start_time=None,
-    end_time=None,
-    kmax=6,
+    kmax,
 ):
     """
-    Build M and N matrices counting infections and failures for an OO simulation.
-
+    Build M and N matrices from a pre-computed timeseries and adjacency matrix.
     Parameters
     ----------
-    infections : pandas.DataFrame
-        Infection events (``infections_all.csv``).
-    sim_id : int
-        Simulation identifier.
+    states : pandas.DataFrame
+        A DataFrame where rows are timesteps and columns are nodes.
     adjacency : pandas.DataFrame
-        Output of ``contact_adjacency`` (square matrix). Non-zero entries indicate
-        potential exposures.
-    freq, participants, user_column, time_column, start_time, end_time :
-        Passed directly to ``infection_time_series``.
+        Square matrix representing node contacts.
     kmax : int
         Exposure cap; counts >= kmax-1 overflow into the last column.
-
     Returns
     -------
     (pandas.DataFrame, pandas.DataFrame)
         Tuple ``(M, N)`` with index equal to node ids and columns ``0..kmax-1``.
     """
-    if adjacency.shape[0] != adjacency.shape[1]:
-        raise ValueError("adjacency must be square")
     if kmax < 1:
         raise ValueError("kmax must be >= 1")
-
-    adjacency = adjacency.fillna(0)
-    adjacency = adjacency.astype(float)
-
-    if not adjacency.index.equals(adjacency.columns):
-        adjacency = adjacency.loc[adjacency.index.intersection(adjacency.columns), :]
-        adjacency = adjacency.loc[:, adjacency.index]
-
+    
     nodes = list(adjacency.index)
-    if not nodes:
-        raise ValueError("adjacency contains no nodes")
-
-    binary_adj = (adjacency.values > 0).astype(int)
-
-    states = infection_time_series(
-        infections,
-        sim_id,
-        freq=freq,
-        participants=participants if participants is not None else nodes,
-        user_column=user_column,
-        time_column=time_column,
-        start_time=start_time,
-        end_time=end_time,
-    )
     states = states.reindex(columns=nodes, fill_value=0)
+    binary_adj = (adjacency.values > 0).astype(int)
 
     state_values = states.values.astype(int, copy=False)
     exposure_values = state_values.dot(binary_adj.T)
@@ -204,29 +167,67 @@ def compute_exposure_counts(
     return M_df, N_df
 
 
-base = Path("data") / "Blanchard-Thesis-main" / "data"
-sim_to_demo = 165
+def compute_exposure_counts(
+    infections,
+    sim_id,
+    adjacency,
+    *,
+    freq="1D",
+    participants=None,
+    user_column="user_id",
+    time_column="time",
+    start_time=None,
+    end_time=None,
+    kmax=6,
+):
+    """
+    Build M and N matrices counting infections and failures for an OO simulation.
+    This is a wrapper function that first builds the time series and then computes
+    the exposure counts.
 
-# Latest Operation Outbreak export stores both contact histories and cleaned
-# infection events in the infections_all.csv file.
-histories_df = pd.read_csv(base / "oo-histories-all.csv")
-infections_df = pd.read_csv(base / "infections_all.csv")
+    Parameters
+    ----------
+    infections : pandas.DataFrame
+        Infection events (``infections_all.csv``).
+    sim_id : int
+        Simulation identifier.
+    adjacency : pandas.DataFrame
+        Output of ``contact_adjacency`` (square matrix). Non-zero entries indicate
+        potential exposures.
+    freq, participants, user_column, time_column, start_time, end_time :
+        Passed directly to ``infection_time_series``.
+    kmax : int
+        Exposure cap; counts >= kmax-1 overflow into the last column.
 
-adjacency = contact_adjacency(
-    histories_df,
-    sim_to_demo,
-    weight="duration",
-    directed=False,
-)
-series = infection_time_series(
-    infections_df,
-    sim_to_demo,
-    freq="1H",
-)
+    Returns
+    -------
+    (pandas.DataFrame, pandas.DataFrame)
+        Tuple ``(M, N)`` with index equal to node ids and columns ``0..kmax-1``.
+    """
+    if adjacency.shape[0] != adjacency.shape[1]:
+        raise ValueError("adjacency must be square")
 
-print(f"Adjacency for simulation {sim_to_demo}")
-print(adjacency.head())
-print("\nInfection time series (first rows)")
-print(series.head())
-import matplotlib.pyplot as plt
-plt.spy(series.values)
+    adjacency = adjacency.fillna(0)
+    adjacency = adjacency.astype(float)
+
+    if not adjacency.index.equals(adjacency.columns):
+        adjacency = adjacency.loc[adjacency.index.intersection(adjacency.columns), :]
+        adjacency = adjacency.loc[:, adjacency.index]
+
+    nodes = list(adjacency.index)
+    if not nodes:
+        raise ValueError("adjacency contains no nodes")
+
+    states = infection_time_series(
+        infections,
+        sim_id,
+        freq=freq,
+        participants=participants if participants is not None else nodes,
+        user_column=user_column,
+        time_column=time_column,
+        start_time=start_time,
+        end_time=end_time,
+    )
+    
+    return compute_exposure_counts_from_timeseries(states, adjacency, kmax)
+

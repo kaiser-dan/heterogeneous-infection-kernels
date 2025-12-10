@@ -107,6 +107,7 @@ def insert_operation_outbreak_run(
 
     # Create unified node ID mapping
     # Get all nodes from both adjacency and timeseries
+    # Note: node IDs are already integers from load_contagion_bulk.py mapping
     adjacency_nodes = set(adjacency.index.unique())
     timeseries_nodes = set(timeseries.columns)
     all_original_node_ids = sorted(adjacency_nodes | timeseries_nodes)
@@ -251,6 +252,7 @@ def insert_twitter_run(
 
     # Create unified node ID mapping
     # Get all nodes from both adjacency and timeseries
+    # Note: node IDs are already integers from load_contagion_bulk.py mapping
     adjacency_nodes = set(adjacency.index.unique())
     timeseries_nodes = set(timeseries.columns)
     all_original_node_ids = sorted(adjacency_nodes | timeseries_nodes)
