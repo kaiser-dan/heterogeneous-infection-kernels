@@ -27,6 +27,17 @@ compile:
     uv run bin/compile_models.py
 
 # ----- Research -----
+# Generate all processed data via Snakemake
+[group('research')]
+data:
+    uv run snakemake -c1
+
+# Totally clear and regenerate all processed data
+[group('research')]
+data-total:
+    rm -rf data/processed
+    uv run snakemake -c1
+
 # Render all Quarto documents
 [group('research')]
 renderall:
