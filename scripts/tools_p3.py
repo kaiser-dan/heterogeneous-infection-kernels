@@ -68,11 +68,20 @@ def get_bot_IDs():
 
 def make_graph(include_details=True):
     G = nx.Graph()
-    conn = sqlite3.connect(DATA_DIR / 'targets.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT id_str, handle FROM targets')
-    id2handle = {int(row[0]): row[1] for row in cursor}
-    conn.close()
+    id2handle = {}
+    
+    db_path = DATA_DIR / 'targets.db'
+    if db_path.exists():
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT id_str, handle FROM targets')
+            id2handle = {int(row[0]): row[1] for row in cursor}
+            conn.close()
+        except sqlite3.Error:
+            print(f"Warning: Could not read targets.db at {db_path}. Handles will be missing.")
+    else:
+        print(f"Note: targets.db not found at {db_path}. Proceeding without handles.")
 
     edges = pd.read_csv(DATA_DIR / 'edges', low_memory=False)
     for _, row in edges.iterrows():
