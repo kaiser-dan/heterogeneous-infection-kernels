@@ -348,6 +348,9 @@ def build_exposure_matrices(data_dir=None, output_base_dir=None, q=1.0, count_re
     if output_base_dir:
         PROCESSED_DIR = Path(output_base_dir).resolve()
     
+    # CRITICAL: Patch tools_p3 to use the configured data directory
+    tools.DATA_DIR = DATA_DIR
+    
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     run_processing(q=q, count_retweets_as_exposures=count_retweets_as_exposures)
 
