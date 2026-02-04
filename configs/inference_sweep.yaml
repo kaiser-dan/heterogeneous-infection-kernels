@@ -1,0 +1,11 @@
+name: "mixture_model_sweep"
+model:
+  stan_file: "src/models/model_finite_mixture.stan"
+  K: 2
+  deviation_scale: 1.0
+data_config: "configs/default_data_prep.yaml"
+wandb_enabled: false
+
+sweep:
+  K: [1, 2, 3, 4]
+  deviation_scale: [0.1, 1.0, 10.0]

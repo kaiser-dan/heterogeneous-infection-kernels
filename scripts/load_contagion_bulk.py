@@ -18,10 +18,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.data_processing import create_tables
-from src.data_processing.ORM import ContagionMetadata
+from src.data_processing.ORM import ContagionMetadata, TwitterMetadata, NodeMapping
 from src.data_processing.database_utils import (
     insert_operation_outbreak_run,
     insert_twitter_run,
+    decompress_array,
 )
 from src.data_processing.operation_outbreak import (
     compute_exposure_counts as compute_exposure_counts_oo,
@@ -35,6 +36,8 @@ from src.data_processing.twitter_contagion import (
     get_bot_ids,
     get_cascade_bot,
     get_cascade_hashtag,
+    get_interventions,
+    filter_cascades_by_intervention,
     load_bot_tweets,
     load_retweet_cascades,
     retweet_time_series,
@@ -228,96 +231,33 @@ def load_all_oo(
 # Twitter bulk load
 # ---------------------------------------------------------------------------
 
-def load_all_twitter(
+from src.data_processing.process_twitter_data import process_intervention
+
+def load_all_twitter_interventions(
     session,
     edges_df: pd.DataFrame,
     retweets: list,
     bot_tweets: list,
     *,
-    freq: str,
-    include_source: bool,
-    include_exposures: bool,
     overwrite: bool,
     limit: int | None,
 ):
+    """
+    Load Twitter data aggregated at the intervention level.
+    """
     bot_ids = get_bot_ids()
-    cascade_sizes = [(cid, len(cascade)) for cid, cascade in enumerate(retweets)]
-    cascade_sizes.sort(key=lambda x: x[1], reverse=True)
-    print(f"[TW] {len(cascade_sizes)} cascades; processing {limit or 'all'} ordered by size desc.")
+    interventions = get_interventions()
+    if limit:
+        interventions = interventions[:limit]
 
-    for cid, _ in _safe_iter(cascade_sizes, limit):
-        run_id = f"twitter_cascade_{cid}"
+    print(f"[TW] Processing {len(interventions)} interventions...")
+    for intervention in interventions:
+        run_id = f"twitter_{intervention}_aggregated"
         if not overwrite and _run_exists(session, run_id):
             print(f"[TW][skip] {run_id} already in DB")
             continue
-
-        cascade = retweets[cid]
-        if not cascade:
-            print(f"[TW][warn] cascade {cid} empty; skipping")
-            continue
-
-        participants = {t["user"]["id"] for t in cascade}
-
-        try:
-            adjacency = build_adjacency_for_participants(edges_df, participants, include_bots=True)
-        except Exception as exc:
-            print(f"[TW][warn] cascade {cid} adjacency failed: {exc}")
-            continue
-
-        try:
-            ts = retweet_time_series(
-                retweets,
-                cid,
-                freq=freq,
-                participants=adjacency.index,
-                include_source=include_source,
-                bot_tweets=bot_tweets,
-            )
-        except Exception as exc:
-            print(f"[TW][warn] cascade {cid} timeseries failed: {exc}")
-            continue
-
-        exposure_M = exposure_N = None
-        if include_exposures:
-            try:
-                exposure_M, exposure_N = compute_exposure_counts_twitter(
-                    retweets=retweets,
-                    cascade_id=cid,
-                    adjacency=adjacency,
-                    bot_tweets=bot_tweets,
-                    freq=freq,
-                    include_source=include_source,
-                    participants=adjacency.index,
-                    kmax=8,
-                )
-            except Exception as exc:
-                print(f"[TW][warn] cascade {cid} exposure counts failed: {exc}")
-                exposure_M = exposure_N = None
-
-        hashtag = get_cascade_hashtag(retweets, cid, bot_tweets)
-        source_bot = get_cascade_bot(retweets, cid, bot_tweets)
-        original_tweet_id = cascade[0].get("retweeted_status", {}).get("id") if cascade else None
-
-        print(f"[TW][{cid}] adj {adjacency.shape}, ts {ts.shape}, hashtag #{hashtag}")
-
-        insert_twitter_run(
-            session,
-            run_id=run_id,
-            cascade_id=cid,
-            adjacency=adjacency,
-            timeseries=ts,
-            intervention_hashtag=hashtag,
-            source_bot_id=str(source_bot) if source_bot is not None else None,
-            original_tweet_id=str(original_tweet_id) if original_tweet_id is not None else None,
-            include_source=include_source,
-            is_directed=True,
-            description=f"Twitter cascade {cid} (# {hashtag})",
-            extra_metadata=None,
-            bot_ids=bot_ids,
-            exposure_success=exposure_M,
-            exposure_failure=exposure_N,
-        )
-        print(f"[TW][{cid}] ok")
+        
+        process_intervention(session, intervention, retweets, bot_tweets, edges_df, bot_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -336,10 +276,14 @@ def main():
 
     tw_freq = "6H"
     tw_include_source = True
-    tw_limit = None  # process all cascades
+    tw_limit = 5  # process only 5 cascades for testing
+    tw_recency_window = "24H" # Updated default
 
     include_exposures = True
     overwrite = False
+
+    # Limit OO sims for testing
+    included_sims = OO_INCLUDED_SIMS[:2]
 
     print(f"Using database: {db_path}")
     engine = create_engine(f"sqlite:///{db_path}")
@@ -361,6 +305,7 @@ def main():
                 directed=oo_directed,
                 include_exposures=include_exposures,
                 overwrite=overwrite,
+                included_sims=included_sims,
             )
         else:
             print(f"[OO] Skipping: missing {histories_path}")
@@ -379,17 +324,15 @@ def main():
             retweets = load_retweet_cascades(filename=retweets_path)
             bot_tweets = load_bot_tweets(filename=bot_tweets_path)
 
-            load_all_twitter(
+            load_all_twitter_interventions(
                 session,
                 edges_df,
                 retweets,
                 bot_tweets,
-                freq=tw_freq,
-                include_source=tw_include_source,
-                include_exposures=include_exposures,
                 overwrite=overwrite,
                 limit=tw_limit,
             )
+            
         else:
             print(f"[TW] Skipping: missing files in {tw_data_dir}")
     finally:

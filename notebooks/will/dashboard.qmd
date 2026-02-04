@@ -1,0 +1,584 @@
+---
+title: "Inference Results Explorer"
+format: dashboard
+server: shiny
+theme: cosmo
+---
+
+```{python}
+#| context: setup
+import pandas as pd
+import numpy as np
+from pathlib import Path
+import re
+import matplotlib.pyplot as plt
+import seaborn as sns
+from shiny import ui, render, reactive
+import duckdb
+from scipy.stats import binom
+
+# Results Discovery
+RESULTS_BASE = Path("/Users/willthompson/Documents/CSDS/side_projects/heterogeneous-infection-kernels/results")
+DATA_SUMMARIES_BASE = Path("/Users/willthompson/Documents/CSDS/side_projects/heterogeneous-infection-kernels/data/summaries")
+
+def get_all_runs_df():
+    runs = []
+    summaries = list(RESULTS_BASE.glob("**/inference_summary.parquet"))
+    
+    for s_path in summaries:
+        rel_path = s_path.relative_to(RESULTS_BASE)
+        parts = rel_path.parts
+        # parts: (sweep, source, data, ...instance_parts..., file)
+        if len(parts) < 4: continue
+        
+        sweep = parts[0]
+        source = parts[1]
+        data_name = parts[2]
+        
+        # Parse params from instance parts (directories between data_name and filename)
+        instance_parts = parts[3:-1]
+        params = {}
+        for seg in instance_parts:
+            if '~' in seg:
+                k, v = seg.split('~', 1)
+                params[k] = v
+        
+        row = {
+            'run_path': str(s_path.parent),
+            'sweep': sweep,
+            'source': source,
+            'data': data_name,
+            'instance_id': "/".join(instance_parts)
+        }
+        row.update(params)
+        runs.append(row)
+    
+    if not runs:
+        return pd.DataFrame(columns=['sweep', 'source', 'data', 'exposure_metric', 'q', 'stan_file', 'run_path'])
+        
+    return pd.DataFrame(runs)
+
+df_runs = get_all_runs_df()
+all_sweeps = sorted(df_runs['sweep'].unique().tolist()) if not df_runs.empty else []
+
+# Data Loading Helpers
+def load_empirical_data(source, data_name, q, metric, run_kmax=50):
+    summary_path = DATA_SUMMARIES_BASE / source / f"{data_name}.parquet"
+    if not summary_path.exists():
+        return None, None
+    
+    q_val = float(q)
+    con = duckdb.connect()
+    
+    # 1. DuckDB Aggregation (Reducing 1.4M rows -> <1000 rows)
+    if metric == 'k':
+        # Sum of elements
+        lvl_expr = "list_sum(CAST(A_array AS INTEGER[]))"
+    else:
+        # Count of elements
+        lvl_expr = "len(CAST(A_array AS INTEGER[]))"
+        
+    query = f"""
+        WITH raw AS (
+            SELECT 
+                {lvl_expr} as n_raw,
+                adopted
+            FROM read_parquet('{str(summary_path)}')
+        )
+        SELECT n_raw, adopted, COUNT(*) as weight
+        FROM raw
+        WHERE n_raw > 0
+        GROUP BY n_raw, adopted
+    """
+    
+    df_agg = con.query(query).to_df()
+    
+    M = np.zeros(run_kmax, dtype=float)
+    N = np.zeros(run_kmax, dtype=float)
+    
+    # 2. Python-side Binomial Smoothing on Aggregated Data
+    for row in df_agg.itertuples():
+        n_raw = int(row.n_raw)
+        w = row.weight
+        
+        # Determine effective exposure (k) distribution
+        if q_val >= 1.0:
+            # Deterministic: k = n_raw * 1.0 (approx)
+            # Actually if q=1, k=n_raw
+            idx = min(n_raw, run_kmax) - 1
+            if idx >= 0:
+                if row.adopted: M[idx] += w
+                else: N[idx] += w
+        else:
+            # Probabilistic: k ~ Binom(n_raw, q)
+            # Range of k: 0 to n_raw
+            ks = np.arange(1, min(n_raw, run_kmax) + 1)
+            # Apply multiplier w to probabilities
+            probs = binom.pmf(ks, n_raw, q_val) * w
+            
+            idx = ks - 1
+            if row.adopted:
+                np.add.at(M, idx, probs)
+            else:
+                np.add.at(N, idx, probs)
+                
+    return M, N
+
+def load_kernel_summary(run_path):
+    s_path = Path(run_path) / "inference_summary.parquet"
+    if not s_path.exists(): return None
+    
+    # 1. Try loading explicit 'mu' or 'c' (legacy)
+    # We use a robust SAFE_CAST or check for regex match
+    
+    con = duckdb.connect()
+    
+    # Regex for mu[k] or mu[k,j] or c[j]
+    # Standard format seen: c[1], c[2]... OR mu[1,1]...
+    
+    # Let's try to load 'mu' or 'c' first
+    query_mu = f"""
+        SELECT 
+            index,
+            Mean as mean,
+            "5%" as lower,
+            "95%" as upper
+        FROM read_parquet('{str(s_path)}')
+        WHERE index LIKE 'mu%' OR index LIKE 'c[%' OR index LIKE 'mu_prob%'
+    """
+    
+    try:
+        df_mu = con.query(query_mu).to_df()
+    except Exception:
+        df_mu = pd.DataFrame()
+        
+    rows = []
+    
+    if not df_mu.empty:
+        pat = re.compile(r'^(?:c|mu|mu_prob)\[(\d+)(?:,(\d+))?\]') 
+        for row in df_mu.itertuples():
+            m = pat.match(row.index)
+            if m:
+                g1, g2 = m.groups()
+                if g2:
+                    # mu[component, level]
+                    rows.append({
+                        'component': int(g1),
+                        'level': int(g2),
+                        'mean': row.mean,
+                        'lower': row.lower,
+                        'upper': row.upper
+                    })
+                else:
+                    # c[level] -> Component 1
+                    rows.append({
+                        'component': 1,
+                        'level': int(g1),
+                        'mean': row.mean,
+                        'lower': row.lower,
+                        'upper': row.upper
+                    })
+        if rows:
+             return pd.DataFrame(rows).sort_values(['component', 'level'])
+
+    # 2. Fallback: Reconstruct from logit_p + Delta (Non-parametric)
+    # Get logit_p
+    query_p = f"""SELECT Mean, "5%", "95%" FROM read_parquet('{str(s_path)}') WHERE index = 'logit_p[1]'""" # Assume K=1
+    try:
+        df_p = con.query(query_p).to_df()
+    except:
+        return pd.DataFrame(columns=['level', 'mean', 'lower', 'upper'])
+        
+    if df_p.empty:
+         return pd.DataFrame(columns=['level', 'mean', 'lower', 'upper'])
+         
+    logit_p_mean = df_p.iloc[0]['Mean']
+    logit_p_low = df_p.iloc[0]['5%']
+    logit_p_high = df_p.iloc[0]['95%']
+    
+    # Inverse logit
+    p_mean = 1 / (1 + np.exp(-logit_p_mean))
+    p_low = 1 / (1 + np.exp(-logit_p_low)) 
+    p_high = 1 / (1 + np.exp(-logit_p_high))
+    
+    # Get Delta[1, j]
+    query_delta = f"""
+        SELECT 
+            CAST(regexp_extract(index, 'Delta\[1,([0-9]+)\]', 1) as INTEGER) as level,
+            Mean as val
+        FROM read_parquet('{str(s_path)}')
+        WHERE index LIKE 'Delta[1,%]'
+        ORDER BY level
+    """
+    try:
+        df_delta = con.query(query_delta).to_df()
+    except:
+         return pd.DataFrame(columns=['level', 'mean', 'lower', 'upper'])
+
+    if df_delta.empty:
+         return pd.DataFrame(columns=['level', 'mean', 'lower', 'upper'])
+         
+    # Compute Reconstructed Curve
+    # mu_curve = p * cumsum(Delta)
+    deltas = df_delta['val'].values
+    cumsum_delta = np.cumsum(deltas)
+    
+    # Compute mean curve
+    mu_vals = p_mean * cumsum_delta
+    
+    # Approx Interval: Scale intervals by p_low/p_high (ignoring Delta uncertainty for viz speed)
+    mu_low = p_low * cumsum_delta
+    mu_high = p_high * cumsum_delta
+    
+    # Store
+    for i, level in enumerate(df_delta['level']):
+        rows.append({
+            'component': 1,
+            'level': level,
+            'mean': mu_vals[i],
+            'lower': mu_low[i],
+            'upper': mu_high[i]
+        })
+        
+    return pd.DataFrame(rows).sort_values(['component', 'level'])
+
+def load_pi_summary(run_path):
+    s_path = Path(run_path) / "posterior_samples.parquet"
+    if not s_path.exists(): return None
+    
+    # DuckDB to select columns starting with pi
+    # Currently DuckDB wildcards in SELECT (SELECT pi*) are cleaner
+    # But read_parquet might return all columns.
+    
+    con = duckdb.connect()
+    # Get columns first
+    cols = con.query(f"DESCRIBE SELECT * FROM read_parquet('{str(s_path)}')").to_df()['column_name'].tolist()
+    pi_cols = [c for c in cols if c.startswith('pi[')]
+    
+    if not pi_cols: return None
+    
+    # Construct aggregation query
+    aggs = []
+    for c in pi_cols:
+        comp = c.split('[')[1].split(']')[0]
+        aggs.append(f"AVG(\"{c}\") as mean_{comp}")
+        aggs.append(f"quantile(\"{c}\", 0.1) as low_{comp}")
+        aggs.append(f"quantile(\"{c}\", 0.9) as high_{comp}")
+        
+    agg_str = ", ".join(aggs)
+    query = f"SELECT {agg_str} FROM read_parquet('{str(s_path)}')"
+    
+    res = con.query(query).to_df().iloc[0]
+    
+    pi_data = []
+    for c in pi_cols:
+        comp = c.split('[')[1].split(']')[0]
+        pi_data.append({
+            'component': comp,
+            'mean': res[f'mean_{comp}'],
+            'lower': res[f'low_{comp}'],
+            'upper': res[f'high_{comp}']
+        })
+        
+    return pd.DataFrame(pi_data)
+```
+
+```{python}
+
+
+# Define Reactive Logic Early (Global Scope Availability)
+@reactive.Calc
+def filtered_runs():
+    s = input.sweep()
+    if not s: return pd.DataFrame()
+    return df_runs[df_runs['sweep'] == s]
+
+@reactive.Effect
+def _update_data_model_choices():
+    df = filtered_runs()
+    if df.empty:
+        ui.update_select("data_model", choices=[])
+        return
+        
+    # Construct a label
+    df['ui_label'] = df.apply(lambda r: f"{r['source']}/{r['data']} | {r.get('stan_file', 'unknown')}", axis=1)
+    unique_opts = sorted(df['ui_label'].unique().tolist())
+    ui.update_select("data_model", choices=unique_opts)
+
+@reactive.Calc
+def selected_run():
+    label = input.data_model()
+    df = filtered_runs()
+    if df.empty or not label: return None
+    
+    subset = df[df['ui_label'] == label]
+    
+    # Filter by dynamic inputs if they exist
+    # Note: inputs might be None during re-render
+    
+    # Metric
+    if 'exposure_metric' in subset.columns and input.metric():
+        subset = subset[subset['exposure_metric'] == input.metric()]
+        
+    # Q
+    if 'q' in subset.columns and input.q():
+        subset = subset[subset['q'] == input.q()]
+        
+    # K
+    if 'K' in subset.columns and input.K():
+        subset = subset[subset['K'] == input.K()]
+        
+    if subset.empty: return None
+    return subset.iloc[0].to_dict()
+```
+
+# {.sidebar}
+
+### Data Selection
+
+```{python}
+ui.input_select("sweep", "Sweep", choices=all_sweeps)
+ui.input_select("data_model", "Data | Model", choices=[])
+# Additional filters can be added here if the list gets too long
+```
+
+### Run Parameters
+
+```{python}
+@render.ui
+def sidebar_controls():
+    # Based on data_model selection, show other params (q, metric)
+    label = input.data_model()
+    df = filtered_runs()
+    if df.empty or not label: return ui.div()
+    
+    # Filter by label
+    subset = df[df['ui_label'] == label]
+    
+    ui_elems = []
+    
+    # Find varying columns in subset that aren't source/data/stan_file
+    # Typically: q, exposure_metric, K
+    
+    # Metric Selector
+    metrics = sorted(subset['exposure_metric'].dropna().unique().tolist())
+    if metrics:
+        ui_elems.append(ui.input_select("metric", "Metric", choices=metrics))
+        
+    # Q Selector
+    qs = sorted(subset['q'].dropna().unique().tolist())
+    if qs:
+        # Sort properly (float)
+        qs.sort(key=float)
+        ui_elems.append(ui.input_select("q", "Sensing (q)", choices=qs))
+       
+    # K (Components) Selector
+    ks = sorted(subset.get('K', pd.Series()).dropna().unique().tolist())
+    if ks:
+         ui_elems.append(ui.input_select("K", "Components (K)", choices=ks))
+         
+    return ui.div(*ui_elems)
+```
+
+# Main Dashboard
+
+## Row {height=60%}
+
+```{python}
+@render.plot
+def main_plot_view():
+    run = selected_run()
+    if run is None: return
+    
+    # Load Data
+    kernel_df = load_kernel_summary(run['run_path'])
+    has_model = kernel_df is not None and not kernel_df.empty
+    
+    # Determine dims from data or model
+    if has_model:
+        kmax = int(kernel_df['level'].max())
+        if 'component' in kernel_df.columns:
+            comps = sorted(kernel_df['component'].unique())
+        else:
+             comps = [1]
+             kernel_df['component'] = 1
+    else:
+        kmax = 20
+        comps = [1]
+        
+    qs = run.get('q', '1.0')
+    metric = run.get('exposure_metric', 'k')
+    
+    M, N = load_empirical_data(run['source'], run['data'], qs, metric, kmax)
+    
+    total = M + N
+    # Avoid div by zero
+    with np.errstate(divide='ignore', invalid='ignore'):
+        obs_p = np.where(total > 0, M / total, 0)
+    
+    # PLOTTING
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    x = np.arange(1, kmax + 1)
+    
+    # 1. Empirical Histogram (Bars)
+    is_smoothed = float(qs) < 1.0
+    label_emp = 'Empirical (Smoothed)' if is_smoothed else 'Empirical Data'
+    ax.bar(x, obs_p, alpha=0.3, color='gray', label=label_emp, width=0.8, zorder=1)
+    
+    # 2. Model Kernels (Multi-Component)
+    if has_model:
+        prop_cycle = plt.rcParams['axes.prop_cycle']
+        colors = prop_cycle.by_key()['color']
+        
+        for idx, k_comp in enumerate(comps):
+            sub = kernel_df[kernel_df['component'] == k_comp].sort_values('level')
+            if sub.empty: continue
+            
+            c = colors[idx % len(colors)]
+            label = f'Model Comp {k_comp}'
+            
+            ax.plot(sub['level'], sub['mean'], 'o-', color=c, label=label, linewidth=2, zorder=5)
+            ax.fill_between(sub['level'], sub['lower'], sub['upper'], color=c, alpha=0.1, zorder=4)
+            
+    ax.set_xlabel(f"Exposure ({metric})")
+    ax.set_ylabel("Probability of Adoption")
+    ax.set_title(f"Model vs Data | {run['source']}/{run['data']} | q={qs}")
+    
+    # Dynamic Lim
+    y_max = 1.0
+    if has_model:
+         upper_max = kernel_df['upper'].max()
+         y_max = max(upper_max, obs_p.max()) if len(obs_p) > 0 else upper_max
+    else:
+         y_max = obs_p.max() if len(obs_p) > 0 else 1.0
+         
+    ax.set_ylim(0, min(y_max * 1.2, 1.05)) # Cap at 1.05
+    ax.grid(True, alpha=0.15)
+    ax.legend(loc='upper left')
+    
+    return fig
+```
+
+## Row {height=40%}
+
+### Mixture Weights
+
+```{python}
+@render.plot
+def mixture_plot_view():
+    run = selected_run()
+    if run is None: return
+    
+    pi_df = load_pi_summary(run['run_path'])
+    if pi_df is None or pi_df.empty:
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, "No mixture components (K=1)", ha='center')
+        ax.axis('off')
+        return fig
+        
+    fig, ax = plt.subplots(figsize=(5, 4))
+    sns.barplot(data=pi_df, x='component', y='mean', ax=ax, color='teal', alpha=0.7)
+    
+    # Add error bars manually or iterate
+    ax.errorbar(x=pi_df.index, y=pi_df['mean'], 
+                yerr=[pi_df['mean'] - pi_df['lower'], pi_df['upper'] - pi_df['mean']], 
+                fmt='none', c='black', capsize=5)
+                
+    ax.set_ylim(0, 1)
+    ax.set_ylabel("Component Weight (pi)")
+    ax.set_title("Mixture Component Weights")
+    return fig
+```
+
+### Data Heatmaps (N vs M)
+
+```{python}
+@render.plot
+def matrix_plot_view():
+    run = selected_run()
+    if run is None: return
+    
+    summary_path = DATA_SUMMARIES_BASE / run['source'] / f"{run['data']}.parquet"
+    if not summary_path.exists(): return
+    
+    # 1. OPTIMIZED SAMPLING via DuckDB
+    # Instead of loading 1.4M rows, we pull 50 directly.
+    con_mat = duckdb.connect()
+    
+    # Stratified: 25 Adopters, 25 Non-adopters
+    # We use explicit SQL for speed
+    n_sample = 25
+    query = f"""
+        (SELECT A_array, adopted FROM read_parquet('{str(summary_path)}') WHERE adopted = true LIMIT {n_sample})
+        UNION ALL
+        (SELECT A_array, adopted FROM read_parquet('{str(summary_path)}') WHERE adopted = false LIMIT {n_sample})
+    """
+    
+    input_df = con_mat.query(query).to_df()
+        
+    qs = float(run.get('q', '1.0'))
+    metric = run.get('exposure_metric', 'k')
+    kmax = 20 # Limit for heatmap width
+    
+    # Initialize grids
+    V = len(input_df)
+    N_grid = np.zeros((V, kmax))
+    M_grid = np.zeros((V, kmax))
+    
+    import json
+    for i, row in enumerate(input_df.itertuples()):
+        A_raw = row.A_array
+        if isinstance(A_raw, str):
+            try:
+                A = json.loads(A_raw)
+            except:
+                A = []
+        else:
+             A = A_raw
+        
+        # Calculate Input N_raw
+        if metric == 'k': n_raw = int(sum(A))
+        else: n_raw = int(len(A)) 
+        
+        # Binomial Spread
+        ks = np.arange(1, min(n_raw, kmax) + 1)
+        if len(ks) == 0: continue
+        
+        if qs >= 1.0:
+            # Deterministic
+            idx = min(n_raw, kmax) - 1
+            if idx >= 0:
+                if row.adopted: M_grid[i, idx] = 1.0
+                else: N_grid[i, idx] = 1.0
+        else:
+            # Probabilistic
+            probs = binom.pmf(ks, n_raw, qs)
+            idx = ks - 1
+            # Check bounds
+            mask = idx < kmax
+            idx = idx[mask]
+            probs = probs[mask]
+            
+            if row.adopted:
+                M_grid[i, idx] += probs
+            else:
+                N_grid[i, idx] += probs
+    
+    # Plotting
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5), sharey=True)
+    
+    # N Matrix
+    sns.heatmap(N_grid, cmap="Blues", cbar=True, ax=axes[0], linewidths=0.1, linecolor='white')
+    axes[0].set_title(f"N Matrix {'(Smoothed)' if qs < 1 else ''} (Survived)")
+    axes[0].set_xlabel(f"Exposure Level ({metric})")
+    axes[0].set_ylabel("Sampled Users")
+    
+    # M Matrix
+    sns.heatmap(M_grid, cmap="Reds", cbar=True, ax=axes[1], linewidths=0.1, linecolor='white')
+    axes[1].set_title(f"M Matrix {'(Smoothed)' if qs < 1 else ''} (Adopted)")
+    axes[1].set_xlabel(f"Exposure Level ({metric})")
+    
+    plt.tight_layout()
+    return fig
+```

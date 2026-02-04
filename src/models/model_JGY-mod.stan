@@ -2,13 +2,13 @@
 data {
 	/* Population constants */
 		// Number of individuals in the population
-		int<lower=2> V;
+		int<lower=1> V;
 	
 		// Maximum number of neighbors (and hence number of infected neighbors)
-		int<lower=1, upper=V> kmax;
+		int<lower=1> kmax;
 
         // Number of kernel modes
-        int<lower=1, upper=V> K;  // NOTE: Should this be a parameter? Inferred according to some information criterion.
+        int<lower=1> K;  // NOTE: Should this be a parameter? Inferred according to some information criterion.
 
     /* Node states */
         // Infection events, M_ij = number of infection events when node i has j infected neighbors

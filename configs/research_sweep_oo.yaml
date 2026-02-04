@@ -1,0 +1,29 @@
+# ============================================================================
+# Research Sweep - Operation Outbreak (Sim 165)
+# ============================================================================
+name: "research_sweep_oo"
+
+source: "oo"
+oo:
+  sim_id: 165
+  backbone_method: "disparity"
+  kmax: 20
+
+model:
+  stan_file: "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  K: 1
+  concentration: 1.0
+  deviation_scale: 1.0
+  logit_p_location: "empirical"
+  logit_p_scale: 2.0
+  V_max_local: 1000  # OO datasets are smaller, can use more
+
+sweep:
+  # Model variants
+  K: [1, 2]
+  stan_file: [
+    "src/models/non_parametric_monotonic_empirical_bayes.stan",
+    "src/models/non_parametric_non_monotonic.stan",
+    "src/models/model_simple_contagion.stan",
+    "src/models/model_complex_contagion.stan"
+  ]

@@ -1,44 +1,18 @@
 """
 Data processing module for contagion datasets.
 
-This module provides database schema and utilities for storing and
-retrieving contagion network data in a unified format.
+This module provides utilities for processing Twitter and Operation Outbreak 
+contagion data into a simplified, interoperable format (Parquet).
 """
 
-from .ORM import (
-    Base,
-    ContagionMetadata,
-    OperationOutbreakMetadata,
-    TwitterMetadata,
-    NodeMapping,
-    create_tables,
-    drop_tables,
-)
-
-from .database_utils import (
-    insert_operation_outbreak_run,
-    insert_twitter_run,
-    get_adjacency_matrix,
-    get_timeseries,
-    compress_array,
-    decompress_array,
+from .operation_outbreak import (
+    generate_oo_exposure_parquet,
+    contact_adjacency,
+    infection_time_series
 )
 
 __all__ = [
-    # ORM models
-    'Base',
-    'ContagionMetadata',
-    'OperationOutbreakMetadata',
-    'TwitterMetadata',
-    'NodeMapping',
-    'create_tables',
-    'drop_tables',
-    # Database utilities
-    'insert_operation_outbreak_run',
-    'insert_twitter_run',
-    'get_adjacency_matrix',
-    'get_timeseries',
-    'get_exposure_counts',
-    'compress_array',
-    'decompress_array',
+    'generate_oo_exposure_parquet',
+    'contact_adjacency',
+    'infection_time_series'
 ]
