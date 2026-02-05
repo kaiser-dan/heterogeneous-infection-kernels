@@ -237,9 +237,9 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
     # Only add V and K if the model likely needs them (simple models might not)
     # But usually extra methods don't cause failure in generic CmdStan unless strict=True
     # safely adding them is better
-    if "int V;" in stan_code or "int<lower=2> V;" in stan_code:
+    if re.search(r"\bV\b", stan_code) and "int" in stan_code:
         stan_data['V'] = V
-    if "int K;" in stan_code or "int<lower=1" in stan_code and "int<lower=1, upper=V> K;" in stan_code or "int K;" in stan_code:
+    if re.search(r"\bK\b", stan_code) and "int" in stan_code and 'K' in config['model']:
         stan_data['K'] = k_components
          
     # Add other params robustly based on what's in the stan code
