@@ -237,23 +237,25 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
     # Only add V and K if the model likely needs them (simple models might not)
     # But usually extra methods don't cause failure in generic CmdStan unless strict=True
     # safely adding them is better
-    stan_data['V'] = V
-    if 'K' in config['model']:
-         stan_data['K'] = k_components
+    if "int V;" in stan_code or "int<lower=2> V;" in stan_code:
+        stan_data['V'] = V
+    if "int K;" in stan_code or "int<lower=1" in stan_code and "int<lower=1, upper=V> K;" in stan_code or "int K;" in stan_code:
+        stan_data['K'] = k_components
          
-    # Add other params
-    if 'concentration' in config['model']:
+    # Add other params robustly based on what's in the stan code
+    if "CONCENTRATION" in stan_code:
         stan_data['CONCENTRATION'] = float(config['model'].get('concentration', 1.0))
         
-    stan_data['LOGIT_P_LOCATION'] = float(logit_p_loc)
-    stan_data['LOGIT_P_SCALE'] = float(config['model'].get('logit_p_scale', 2.0))
+    if "LOGIT_P_LOCATION" in stan_code:
+        stan_data['LOGIT_P_LOCATION'] = float(logit_p_loc)
+        
+    if "LOGIT_P_SCALE" in stan_code:
+        stan_data['LOGIT_P_SCALE'] = float(config['model'].get('logit_p_scale', 2.0))
     
     if is_vector_dev:
         stan_data['DEVIATION_SCALE'] = [dev_scale_val] * k_components
-    else:
-        # Check if DEVIATION_SCALE is in the model at all
-        if "DEVIATION_SCALE" in stan_code:
-            stan_data['DEVIATION_SCALE'] = dev_scale_val
+    elif "DEVIATION_SCALE" in stan_code:
+        stan_data['DEVIATION_SCALE'] = dev_scale_val
         
     if is_jgy_mod:
         stan_data['REPLICATES'] = int(config['model'].get('replicates', 100))
