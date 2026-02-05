@@ -49,9 +49,14 @@ else:
 
 # 2. Main Rules
 rule all:
+    """Default rule: Only prepare processed data."""
     input:
         "data/processed/twitter",
-        expand("data/processed/oo/sim_{sim_id}_exposures.parquet", sim_id=[165, 57, 118, 70, 76, 131, 66, 61, 72, 67]),
+        expand("data/processed/oo/sim_{sim_id}_exposures.parquet", sim_id=[165, 57, 118, 70, 76, 131, 66, 61, 72, 67])
+
+rule inference:
+    """Explicitly run models defined in the config."""
+    input:
         INFERENCE_OUTPUTS
 
 # 3. Include Modular Rules
