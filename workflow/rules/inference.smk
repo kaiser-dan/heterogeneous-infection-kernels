@@ -90,6 +90,12 @@ rule generate_oo_summary:
         
         shutil.copy(input.exposures, out_dir / "infections.parquet")
         shutil.copy(edges_src, out_dir / "edges.parquet")
+        
+        # Propagate M and N
+        m_src = Path(str(input.exposures).replace("_exposures.parquet", "_M.parquet"))
+        n_src = Path(str(input.exposures).replace("_exposures.parquet", "_N.parquet"))
+        if m_src.exists(): shutil.copy(m_src, out_dir / "M.parquet")
+        if n_src.exists(): shutil.copy(n_src, out_dir / "N.parquet")
 
 rule run_inference:
     input:
