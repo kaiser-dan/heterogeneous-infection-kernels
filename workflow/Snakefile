@@ -1,0 +1,69 @@
+INTERVENTIONS = [
+    'getyourflushot', 'highfiveastranger', 'somethinggood',
+    'HowManyPushups', 'turkeyface', 'SFThanks',
+    'blackfridaystories', 'BanksySF'
+]
+
+OO_SIMS = [118, 131, 165]
+OO_BACKBONES = ["metric_distance_backbone", "disparity", "lans"]
+
+rule all:
+    input:
+        "data/dashboard/dashboard_twitter_data.json",
+        "data/dashboard/dashboard_oo_data.json"
+
+rule process_twitter_all:
+    input:
+        "data/twitter_contagion_data/all_bot_tweets_",
+        "data/twitter_contagion_data/retweets_",
+        "data/twitter_contagion_data/edges"
+    output:
+        # Individual interventions
+        expand("data/processed/twitter/{intervention}/M_k_q{{q}}.parquet", intervention=INTERVENTIONS),
+        expand("data/processed/twitter/{intervention}/N_k_q{{q}}.parquet", intervention=INTERVENTIONS),
+        expand("data/processed/twitter/{intervention}/M_kappa_q{{q}}.parquet", intervention=INTERVENTIONS),
+        expand("data/processed/twitter/{intervention}/N_kappa_q{{q}}.parquet", intervention=INTERVENTIONS),
+        # Aggregated "full"
+        "data/processed/twitter/full/M_k_q{q}.parquet",
+        "data/processed/twitter/full/N_k_q{q}.parquet",
+        "data/processed/twitter/full/M_kappa_q{q}.parquet",
+        "data/processed/twitter/full/N_kappa_q{q}.parquet"
+    shell:
+        "python3 src/data_processing/process_twitter.py --q {wildcards.q}"
+
+rule process_oo_sim:
+    input:
+        histories = "data/Blanchard-Thesis-main/data/oo-histories-all.csv"
+    output:
+        exposures = "data/processed/oo/sim_{sim}_backbone_{method}_exposures.parquet",
+        edges = "data/processed/oo/sim_{sim}_backbone_{method}_edges.parquet",
+        nodes = "data/processed/oo/sim_{sim}_backbone_{method}_nodes.parquet"
+    shell:
+        "python3.10 src/data_processing/operation_outbreak.py "
+        "--histories {input.histories} "
+        "--sim-id {wildcards.sim} "
+        "--output {output.exposures} "
+        "--backbone-method {wildcards.method} "
+        "--backbone-threshold 0.05"
+
+rule prepare_twitter_dashboard:
+    input:
+        # Individual interventions
+        expand("data/processed/twitter/{intervention}/M_k_q1.0.parquet", intervention=INTERVENTIONS),
+        expand("data/processed/twitter/{intervention}/N_k_q1.0.parquet", intervention=INTERVENTIONS),
+        # Aggregated full
+        "data/processed/twitter/full/M_k_q1.0.parquet",
+        "data/processed/twitter/full/N_k_q1.0.parquet"
+    output:
+        "data/dashboard/dashboard_twitter_data.json"
+    shell:
+        "python3 src/viz/twitter_prep.py"
+
+rule prepare_oo_dashboard:
+    input:
+        expand("data/processed/oo/sim_{sim}_backbone_{method}_exposures.parquet", 
+               sim=OO_SIMS, method=OO_BACKBONES)
+    output:
+        "data/dashboard/dashboard_oo_data.json"
+    shell:
+        "python3.10 src/viz/oo_prep.py"

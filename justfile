@@ -43,6 +43,11 @@ data-total:
 renderall:
     find ./ -type f -name "*.qmd" | xargs -I{} quarto render {}
 
+# Run a research sweep defined in a YAML config
+[group('research')]
+sweep config:
+    uv run python scripts/run_sweep.py {{config}}
+
 
 # ----- Cleanup -----
 # Remove temporary and test files

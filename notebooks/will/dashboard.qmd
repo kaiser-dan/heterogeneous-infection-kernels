@@ -510,9 +510,9 @@ def matrix_plot_view():
     # We use explicit SQL for speed
     n_sample = 25
     query = f"""
-        (SELECT A_array, adopted FROM read_parquet('{str(summary_path)}') WHERE adopted = true LIMIT {n_sample})
+        (SELECT A_array, adopted FROM read_parquet('{str(summary_path)}') WHERE adopted = true ORDER BY random() LIMIT {n_sample})
         UNION ALL
-        (SELECT A_array, adopted FROM read_parquet('{str(summary_path)}') WHERE adopted = false LIMIT {n_sample})
+        (SELECT A_array, adopted FROM read_parquet('{str(summary_path)}') WHERE adopted = false ORDER BY random() LIMIT {n_sample})
     """
     
     input_df = con_mat.query(query).to_df()
