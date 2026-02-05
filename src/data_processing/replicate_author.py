@@ -84,10 +84,17 @@ def run_replication():
         except KeyError:
             pass  
 
-    # 3. Process Exposure (Modified to Save)
-    process_exposures(G, interventions, intervention2tweets, intervention2user_retweets, intervention2bot_retweets, q=1.0)
+    # NEW: Determine 'active' users
+    active_user_ids = set()
+    for rts in ID2retweets.values():
+        for rt in rts:
+            active_user_ids.add(rt['user']['id'])
+    print(f"Identified {len(active_user_ids)} active users.")
 
-def process_exposures(G, interventions, intervention2tweets, intervention2user_retweets, intervention2bot_retweets, q=1.0):
+    # 3. Process Exposure (Modified to Save)
+    process_exposures(G, interventions, intervention2tweets, intervention2user_retweets, intervention2bot_retweets, active_user_ids, q=1.0)
+
+def process_exposures(G, interventions, intervention2tweets, intervention2user_retweets, intervention2bot_retweets, active_user_ids, q=1.0):
     count_retweets_as_exposures = True
     
     for intervention in interventions:
@@ -113,6 +120,9 @@ def process_exposures(G, interventions, intervention2tweets, intervention2user_r
             if origin not in G: continue
             
             for user in G.neighbors(origin):
+                # NEW: Filter active only
+                if user not in active_user_ids: continue
+                
                 tweet_time = tools.parse_created_at(tweet['created_at'])
                 if user in user2first_retweet and user2first_retweet[user] < tweet_time:
                     continue
@@ -135,6 +145,9 @@ def process_exposures(G, interventions, intervention2tweets, intervention2user_r
             if proxy not in G: continue
 
             for user in G.neighbors(proxy):
+                # NEW: Filter active only
+                if user not in active_user_ids: continue
+                
                 tweet_time = tools.parse_created_at(tweet['created_at'])
                 if user in user2first_retweet and user2first_retweet[user] < tweet_time:
                     continue

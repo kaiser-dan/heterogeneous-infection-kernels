@@ -39,6 +39,7 @@ def process_intervention(
     intervention2user_retweets,
     intervention2bot_retweets,
     bot_IDs,
+    active_user_ids,
     q=1.0,
     count_retweets_as_exposures=True
 ):
@@ -78,6 +79,10 @@ def process_intervention(
             continue
         
         for user in G.neighbors(origin_bot):
+            # NEW: Filter for active users only
+            if user not in active_user_ids:
+                continue
+            
             tweet_time = tools.parse_created_at(tweet['created_at'])
             
             # Skip if exposure happened after adoption
@@ -115,6 +120,10 @@ def process_intervention(
             continue
         
         for user in G.neighbors(proxy_bot):
+            # NEW: Filter for active users only
+            if user not in active_user_ids:
+                continue
+            
             tweet_time = tools.parse_created_at(tweet['created_at'])
             
             # Skip if exposure happened after adoption
@@ -355,7 +364,7 @@ def build_exposure_matrices(data_dir=None, output_base_dir=None, q=1.0, count_re
     run_processing(q=q, count_retweets_as_exposures=count_retweets_as_exposures)
 
 
-def run_processing(q=1.0, count_retweets_as_exposures=True):
+def run_processing(q=1.0, count_retweets_as_exposures=True, filter_active_only=True):
     """Main processing function using verified author logic."""
     print("Loading data using author's tools...")
     
@@ -364,6 +373,18 @@ def run_processing(q=1.0, count_retweets_as_exposures=True):
     ID2retweets = tools.get_ID2retweets()
     interventions = tools.interventions
     bot_IDs = tools.bot_IDs
+    
+    # NEW: Determine 'active' users (those who tweeted / retweeted anything in our logs)
+    active_user_ids = set()
+    if filter_active_only:
+        for rts in ID2retweets.values():
+            for rt in rts:
+                active_user_ids.add(rt['user']['id'])
+        print(f"Identified {len(active_user_ids)} active users (with at least 1 retweet).")
+    else:
+        # If not filtering, we consider every node in the graph as potentially active
+        # We'll fill this on demand or use a dummy check
+        pass
     
     # 2. Filter tweets by intervention (CASE INSENSITIVE)
     intervention2tweets = {intervention: [] for intervention in interventions}
@@ -419,6 +440,7 @@ def run_processing(q=1.0, count_retweets_as_exposures=True):
             intervention2user_retweets,
             intervention2bot_retweets,
             bot_IDs,
+            active_user_ids=active_user_ids if filter_active_only else set(G.nodes()),
             q=q,
             count_retweets_as_exposures=count_retweets_as_exposures
         )
