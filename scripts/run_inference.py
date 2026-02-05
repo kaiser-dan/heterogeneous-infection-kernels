@@ -88,13 +88,13 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
         print(f"Debug: Does NOT exist!")
 
     # Check CmdStan
-    from cmdstanpy import install_cmdstan
     try:
-        import cmdstanpy
-        print(f"CmdStanPy CmdStan path: {cmdstanpy.get_cmdstan_path()}")
+        from cmdstanpy import cmdstan_path, install_cmdstan
+        print(f"CmdStanPy CmdStan path: {cmdstan_path()}")
     except Exception as e:
         print(f"CmdStan not found or error: {e}")
         print("Installing CmdStan...")
+        from cmdstanpy import install_cmdstan
         install_cmdstan()
 
     output_dir = Path(output_dir)
