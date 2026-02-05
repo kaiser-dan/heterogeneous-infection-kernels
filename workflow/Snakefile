@@ -44,6 +44,8 @@ rule process_oo_sim:
         nodes = "data/processed/oo/sim_{sim}_backbone_{method}_nodes.parquet",
         m = "data/processed/oo/sim_{sim}_backbone_{method}_M.parquet",
         n = "data/processed/oo/sim_{sim}_backbone_{method}_N.parquet"
+    params:
+        kmax = lambda wildcards, config: config.get('oo', {}).get('kmax', 20)
     shell:
         "uv run python {input.script} "
         "--histories {input.histories} "
@@ -51,7 +53,7 @@ rule process_oo_sim:
         "--output {output.exposures} "
         "--backbone-method {wildcards.method} "
         "--backbone-threshold 0.05 "
-        "--kmax {config[oo][kmax]}"
+        "--kmax {params.kmax}"
 
 rule prepare_twitter_dashboard:
     input:
