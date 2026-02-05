@@ -16,9 +16,10 @@ include: "rules/inference.smk"
 
 rule process_twitter_all:
     input:
-        "data/twitter_contagion_data/all_bot_tweets_",
-        "data/twitter_contagion_data/retweets_",
-        "data/twitter_contagion_data/edges"
+        tweets = "data/twitter_contagion_data/all_bot_tweets_",
+        retweets = "data/twitter_contagion_data/retweets_",
+        edges = "data/twitter_contagion_data/edges",
+        script = "src/data_processing/process_twitter.py"
     output:
         # Individual interventions
         expand("data/processed/twitter/{intervention}/M_k_q{{q}}.parquet", intervention=INTERVENTIONS),
@@ -31,11 +32,12 @@ rule process_twitter_all:
         "data/processed/twitter/full/M_kappa_q{q}.parquet",
         "data/processed/twitter/full/N_kappa_q{q}.parquet"
     shell:
-        "uv run python src/data_processing/process_twitter.py --q {wildcards.q}"
+        "uv run python {input.script} --q {wildcards.q}"
 
 rule process_oo_sim:
     input:
-        histories = "data/raw/operation_outbreak/oo-histories-all.csv"
+        histories = "data/raw/operation_outbreak/oo-histories-all.csv",
+        script = "src/data_processing/operation_outbreak.py"
     output:
         exposures = "data/processed/oo/sim_{sim}_backbone_{method}_exposures.parquet",
         edges = "data/processed/oo/sim_{sim}_backbone_{method}_edges.parquet",
@@ -43,7 +45,7 @@ rule process_oo_sim:
         m = "data/processed/oo/sim_{sim}_backbone_{method}_M.parquet",
         n = "data/processed/oo/sim_{sim}_backbone_{method}_N.parquet"
     shell:
-        "uv run python src/data_processing/operation_outbreak.py "
+        "uv run python {input.script} "
         "--histories {input.histories} "
         "--sim-id {wildcards.sim} "
         "--output {output.exposures} "
