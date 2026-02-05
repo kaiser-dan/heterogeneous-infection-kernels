@@ -26,8 +26,7 @@ PROCESSED_DIR = Path("data/processed/twitter").resolve()
 
 # Import Python 3 compatible tools
 #TO-DO: make the tools_p3 part of the src code, adding it to src/data_processing/utils.py change these imports 
-sys.path.insert(0, str(Path("scripts").resolve()))
-import tools_p3 as tools
+from . import utils
 
 PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -58,7 +57,7 @@ def process_intervention(
     user2first_retweet = {}
     for rt in intervention2user_retweets[intervention]:
         user = rt['user']['id']
-        rt_time = tools.parse_created_at(rt['created_at'])
+        rt_time = utils.parse_created_at(rt['created_at'])
         if user not in user2first_retweet or rt_time < user2first_retweet[user]:
             user2first_retweet[user] = rt_time
     
@@ -83,7 +82,7 @@ def process_intervention(
             if user not in active_user_ids:
                 continue
             
-            tweet_time = tools.parse_created_at(tweet['created_at'])
+            tweet_time = utils.parse_created_at(tweet['created_at'])
             
             # Skip if exposure happened after adoption
             if user in user2first_retweet and user2first_retweet[user] < tweet_time:
@@ -124,7 +123,7 @@ def process_intervention(
             if user not in active_user_ids:
                 continue
             
-            tweet_time = tools.parse_created_at(tweet['created_at'])
+            tweet_time = utils.parse_created_at(tweet['created_at'])
             
             # Skip if exposure happened after adoption
             if user in user2first_retweet and user2first_retweet[user] < tweet_time:
@@ -156,7 +155,7 @@ def process_intervention(
     for user in user2expose_tweetlist.keys():
         # k metric (simple contagion): binomial distribution
         N_raw = len(set(user2expose_tweetlist[user]))
-        p_dist_k = tools.compute_binomial_distribution(N_raw, q)
+        p_dist_k = utils.compute_binomial_distribution(N_raw, q)
         
         # kappa metric (complex contagion): exposure probabilities
         bot_exposures = {
@@ -164,7 +163,7 @@ def process_intervention(
             for bot_id, tweets in user2bot2tweets[user].items()
         }
         A = list(bot_exposures.values())
-        p_dist_kappa = tools.compute_exposure_probabilities_fast(A, q)
+        p_dist_kappa = utils.compute_exposure_probabilities_fast(A, q)
         
         adopted = user in user2first_retweet
         
@@ -358,7 +357,7 @@ def build_exposure_matrices(data_dir=None, output_base_dir=None, q=1.0, count_re
         PROCESSED_DIR = Path(output_base_dir).resolve()
     
     # CRITICAL: Patch tools_p3 to use the configured data directory
-    tools.DATA_DIR = DATA_DIR
+    utils.DATA_DIR = DATA_DIR
     
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     run_processing(q=q, count_retweets_as_exposures=count_retweets_as_exposures)
@@ -366,13 +365,13 @@ def build_exposure_matrices(data_dir=None, output_base_dir=None, q=1.0, count_re
 
 def run_processing(q=1.0, count_retweets_as_exposures=True, filter_active_only=True):
     """Main processing function using verified author logic."""
-    print("Loading data using author's tools...")
+    print("Loading data using author's utils...")
     
     # 1. Load data
-    ID2bot_tweet = tools.get_ID2bot_tweet()
-    ID2retweets = tools.get_ID2retweets()
-    interventions = tools.interventions
-    bot_IDs = tools.bot_IDs
+    ID2bot_tweet = utils.get_ID2bot_tweet()
+    ID2retweets = utils.get_ID2retweets()
+    interventions = utils.interventions
+    bot_IDs = utils.bot_IDs
     
     # NEW: Determine 'active' users (those who tweeted / retweeted anything in our logs)
     active_user_ids = set()
@@ -415,7 +414,7 @@ def run_processing(q=1.0, count_retweets_as_exposures=True, filter_active_only=T
     
     # 4. Build graph
     print("Building graph...")
-    G = tools.make_graph()
+    G = utils.make_graph()
     
     # Ban suspected bot accounts (97.5th percentile of retweet counts)
     all_retweets = []

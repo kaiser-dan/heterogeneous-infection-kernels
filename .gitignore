@@ -21,3 +21,12 @@ inspect_parquet.py
 # Environments
 .venv/
 .gemini/
+
+# Stan Build Artifacts
+src/models/*
+!src/models/*.stan
+!src/models/*.py
+!src/models/.gitkeep
+*.hpp
+*.o
+*.d

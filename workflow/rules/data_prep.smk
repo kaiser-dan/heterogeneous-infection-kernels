@@ -12,20 +12,28 @@ rule process_oo_sim:
     """
     Process a single Operation Outbreak simulation.
     Produces exposure history, contact edges, infection nodes, and M/N matrices.
+    Supports optional backbone filtering.
     """
     input:
         histories = RAW_OO,
         script = "src/data_processing/operation_outbreak.py"
     output:
-        exposures = PROCESSED_BASE / "oo" / "sim_{sim_id}_exposures.parquet",
-        edges = PROCESSED_BASE / "oo" / "sim_{sim_id}_edges.parquet",
-        nodes = PROCESSED_BASE / "oo" / "sim_{sim_id}_nodes.parquet",
-        m_matrix = PROCESSED_BASE / "oo" / "sim_{sim_id}_M.parquet",
-        n_matrix = PROCESSED_BASE / "oo" / "sim_{sim_id}_N.parquet"
+        exposures = PROCESSED_BASE / "oo" / "sim_{sim_id}_backbone_{method}_exposures.parquet",
+        edges = PROCESSED_BASE / "oo" / "sim_{sim_id}_backbone_{method}_edges.parquet",
+        nodes = PROCESSED_BASE / "oo" / "sim_{sim_id}_backbone_{method}_nodes.parquet",
+        m_matrix = PROCESSED_BASE / "oo" / "sim_{sim_id}_backbone_{method}_M.parquet",
+        n_matrix = PROCESSED_BASE / "oo" / "sim_{sim_id}_backbone_{method}_N.parquet"
     params:
-        kmax = lambda wildcards: config.get('oo', {}).get('kmax', 20)
+        kmax = lambda wildcards: config.get('oo', {}).get('kmax', 20),
+        threshold = lambda wildcards: config.get('oo', {}).get('backbone_threshold', 0.05)
     shell:
-        "uv run python {input.script} --histories {input.histories} --sim-id {wildcards.sim_id} --output {output.exposures} --kmax {params.kmax}"
+        "uv run python {input.script} "
+        "--histories {input.histories} "
+        "--sim-id {wildcards.sim_id} "
+        "--output {output.exposures} "
+        "--kmax {params.kmax} "
+        "--backbone-method {wildcards.method} "
+        "--backbone-threshold {params.threshold}"
 
 
 

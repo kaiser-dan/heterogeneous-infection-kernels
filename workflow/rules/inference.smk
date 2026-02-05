@@ -106,5 +106,7 @@ rule run_inference:
         summary = "results/{sweep_name}/{data_source}/{data_name}/{instance_id}/inference_summary.parquet"
     params:
         instance_params = lambda wildcards: {p.split('~')[0]: p.split('~')[1].replace('__', '/') for p in wildcards.instance_id.split('/')} if wildcards.instance_id != "base" else {}
-    shell:
-        "uv run python scripts/run_inference.py --config {input.config} --exposure-summary {input.summary} --output-dir results/{wildcards.sweep_name}/{wildcards.data_source}/{wildcards.data_name}/{wildcards.instance_id} --instance-params '{params.instance_params}'"
+    run:
+        import json
+        params_json = json.dumps(params.instance_params)
+        shell(f"uv run python src/models/inference.py --config {input.config} --exposure-summary {input.summary} --output-dir results/{wildcards.sweep_name}/{wildcards.data_source}/{wildcards.data_name}/{wildcards.instance_id} --instance-params '{params_json}'")
