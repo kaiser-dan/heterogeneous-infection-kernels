@@ -160,6 +160,10 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
         # summary_path for OO points to the 'effective_oo_...' directory
         M, N = generate_stan_matrices_oo(summary_path, config)
         V = M.shape[0]
+        # Dynamically update kmax to match the pre-computed matrices
+        if M.shape[1] != kmax:
+            print(f"Adjusting kmax from {kmax} to {M.shape[1]} to match input matrices.")
+            kmax = M.shape[1]
 
     # Compile and load model to check data requirements
     stan_file = config['model']['stan_file']
