@@ -46,7 +46,7 @@ renderall:
 # Run a research sweep defined in a YAML config
 [group('research')]
 sweep config profile="workflow/profiles/local":
-    uv run python scripts/sweep.py {{config}} --profile {{profile}}
+    uv run snakemake inference --configfile {{config}} --profile {{profile}}
 
 
 # ----- Sync -----
