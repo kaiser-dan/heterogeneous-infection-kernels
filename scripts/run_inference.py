@@ -6,6 +6,7 @@ import yaml
 import json
 from pathlib import Path
 import wandb
+import os
 
 def generate_stan_matrices_twitter(summary_df, q, metric, kmax):
     V = len(summary_df)
@@ -69,10 +70,29 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
         for key in ['q', 'exposure_metric', 'source']:
             if key in instance_params: config[key] = instance_params[key]
         
+    print(f"Debug: Exposure Summary Path: {summary_path}")
+    if os.path.exists(summary_path):
+        print(f"Debug: Exists. Is Dir: {os.path.isdir(summary_path)}")
+        if os.path.isdir(summary_path):
+             print(f"Debug: Contents: {os.listdir(summary_path)}")
+    else:
+        print(f"Debug: Does NOT exist!")
+
+    # Check CmdStan
+    from cmdstanpy import install_cmdstan
+    try:
+        import cmdstanpy
+        print(f"CmdStanPy CmdStan path: {cmdstanpy.get_cmdstan_path()}")
+    except Exception as e:
+        print(f"CmdStan not found or error: {e}")
+        print("Installing CmdStan...")
+        install_cmdstan()
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     source = config.get('source', 'twitter')
+    # ... rest of function
     kmax = config.get('kmax', 20)
     
     if source == 'twitter':
