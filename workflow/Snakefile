@@ -35,7 +35,7 @@ rule process_twitter_all:
 
 rule process_oo_sim:
     input:
-        histories = "data/Blanchard-Thesis-main/data/oo-histories-all.csv"
+        histories = "data/raw/operation_outbreak/oo-histories-all.csv"
     output:
         exposures = "data/processed/oo/sim_{sim}_backbone_{method}_exposures.parquet",
         edges = "data/processed/oo/sim_{sim}_backbone_{method}_edges.parquet",
