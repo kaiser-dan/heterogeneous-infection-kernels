@@ -205,6 +205,8 @@ def infection_time_series(infections,sim_id,*,freq="1D",participants=None,user_c
     user_index = sorted(user_ids)
     # Add data to timeseries efficiently
     # Collect infection times to avoid repeated DataFrame slice updates
+    # Force user_id to string to match adjacency matrix IDs
+    sim_infections[user_column] = sim_infections[user_column].astype(str)
     uid_to_time = sim_infections.set_index(user_column)["infection_ts"].to_dict()
     
     # Pre-allocate as float to allow np.nan if needed, though OO uses 0/1
@@ -370,6 +372,7 @@ def generate_oo_exposure_parquet(
     
     # Extract infections
     infections = sim_events[sim_events["type"] == "infection"].copy()
+    infections["user_id"] = infections["user_id"].astype(str)
     
     if infections.empty:
         print(f"Warning: No infections found for sim {sim_id}. Creating empty placeholder files.")

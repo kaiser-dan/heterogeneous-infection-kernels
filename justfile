@@ -49,6 +49,13 @@ sweep config profile="workflow/profiles/local":
     uv run python scripts/run_sweep.py {{config}} --profile {{profile}}
 
 
+# ----- Sync -----
+# Sync results from HPC to local
+[group('sync')]
+sync:
+    rsync -avP vacc:/gpfs1/home/w/t/wthomps3/CSDS/side_projects/heterogeneous-infection-kernels/results/ results/
+
+
 # ----- Cleanup -----
 # Remove temporary and test files
 [confirm]

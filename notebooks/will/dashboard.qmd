@@ -16,6 +16,11 @@ import seaborn as sns
 from shiny import ui, render, reactive
 import duckdb
 from scipy.stats import binom
+import functools
+
+@functools.lru_cache(maxsize=128)
+def get_cached_parquet(path):
+    return pd.read_parquet(path)
 
 # Results Discovery
 RESULTS_BASE = Path("/Users/willthompson/Documents/CSDS/side_projects/heterogeneous-infection-kernels/results")
@@ -53,18 +58,43 @@ def get_all_runs_df():
         row.update(params)
         runs.append(row)
     
-    if not runs:
-        return pd.DataFrame(columns=['sweep', 'source', 'data', 'exposure_metric', 'q', 'stan_file', 'run_path'])
-        
-    return pd.DataFrame(runs)
+    df = pd.DataFrame(runs)
+    if not df.empty:
+        df['ui_label'] = df.apply(lambda r: f"{r['source']}/{r['data']} | {r.get('stan_file', 'unknown')}", axis=1)
+    return df
 
 df_runs = get_all_runs_df()
 all_sweeps = sorted(df_runs['sweep'].unique().tolist()) if not df_runs.empty else []
 
+def get_data_info(source, data_name):
+    """
+    Returns (path_to_parquet, id_col) based on source.
+    Handles OO data being stored in directories.
+    """
+    # Try direct .parquet file first
+    base = DATA_SUMMARIES_BASE / source / f"{data_name}.parquet"
+    
+    # Check if simulation ID format (e.g. sim_165) needs mapping
+    # But usually data_name already includes it.
+    
+    if base.is_dir():
+         # Check for infections.parquet inside
+         if (base / "infections.parquet").exists():
+             return str(base / "infections.parquet"), "A" if source == 'oo' else "A_array"
+    
+    # If not a directory ending in .parquet, maybe it's the folder itself
+    parent = DATA_SUMMARIES_BASE / source / data_name
+    if parent.is_dir() and (parent / "infections.parquet").exists():
+        return str(parent / "infections.parquet"), "A" if source == 'oo' else "A_array"
+
+    # Fallback to the .parquet file itself
+    return str(base), "A" if source == 'oo' else "A_array"
+
 # Data Loading Helpers
+@functools.lru_cache(maxsize=32)
 def load_empirical_data(source, data_name, q, metric, run_kmax=50):
-    summary_path = DATA_SUMMARIES_BASE / source / f"{data_name}.parquet"
-    if not summary_path.exists():
+    path, col = get_data_info(source, data_name)
+    if not Path(path).exists():
         return None, None
     
     q_val = float(q)
@@ -72,29 +102,35 @@ def load_empirical_data(source, data_name, q, metric, run_kmax=50):
     
     # 1. DuckDB Aggregation (Reducing 1.4M rows -> <1000 rows)
     if metric == 'k':
-        # Sum of elements
-        lvl_expr = "list_sum(CAST(A_array AS INTEGER[]))"
+        # Sum of elements (exposure weights)
+        lvl_expr = f"list_sum(CAST({col} AS INTEGER[]))"
     else:
-        # Count of elements
-        lvl_expr = "len(CAST(A_array AS INTEGER[]))"
+        # Count of elements (exposure count)
+        lvl_expr = f"len(CAST({col} AS INTEGER[]))"
         
     query = f"""
         WITH raw AS (
             SELECT 
                 {lvl_expr} as n_raw,
                 adopted
-            FROM read_parquet('{str(summary_path)}')
+            FROM read_parquet('{path}')
         )
         SELECT n_raw, adopted, COUNT(*) as weight
         FROM raw
-        WHERE n_raw > 0
         GROUP BY n_raw, adopted
     """
     
-    df_agg = con.query(query).to_df()
+    try:
+        df_agg = con.query(query).to_df()
+    except Exception as e:
+        print(f"Aggregation error: {e}")
+        return np.zeros(run_kmax), np.zeros(run_kmax)
     
     M = np.zeros(run_kmax, dtype=float)
     N = np.zeros(run_kmax, dtype=float)
+    
+    if df_agg.empty:
+        return M, N
     
     # 2. Python-side Binomial Smoothing on Aggregated Data
     for row in df_agg.itertuples():
@@ -281,6 +317,84 @@ def load_pi_summary(run_path):
         })
         
     return pd.DataFrame(pi_data)
+
+def load_model_fit_stats(run_path, n=1000):
+    """
+    Calculate BIC using summary statistics from inference_summary.parquet.
+    This is MUCH faster than loading posterior_samples.parquet.
+    """
+    summary_path = Path(run_path) / "inference_summary.parquet"
+    if not summary_path.exists(): return None
+    
+    try:
+        # Load the summary (very small compared to full posterior)
+        df_sum = get_cached_parquet(str(summary_path))
+        
+        if 'lp__' not in df_sum.index:
+             return None
+             
+        mean_lp = df_sum.loc['lp__', 'Mean']
+        k = len(df_sum) - 1 # Number of parameters excluding lp__
+        
+        # Use Mean LP as proxy for Max LP (reasonable for comparison)
+        bic = k * np.log(n) - 2 * mean_lp
+        aic = 2 * k - 2 * mean_lp
+        
+        return {
+            'bic': bic,
+            'aic': aic,
+            'max_lp': mean_lp,
+            'k_est': k
+        }
+    except Exception as e:
+        print(f"Error calculating fit stats for {run_path}: {e}")
+        return None
+
+def create_model_comparison_table(df):
+    if df.empty: return pd.DataFrame()
+    
+    # Select and format columns for display
+    cols = ['Model', 'k_est', 'max_lp', 'bic', 'Delta_BIC', 'Model_Weight', 'BF_vs_Best']
+    df_disp = df[cols].copy()
+    
+    # Sort by BIC
+    df_disp = df_disp.sort_values('bic')
+    
+    # Format floats
+    return df_disp.style.format({
+        'max_lp': '{:.1f}',
+        'bic': '{:.1f}',
+        'Delta_BIC': '{:.2f}',
+        'Model_Weight': '{:.3f}',
+        'BF_vs_Best': '{:.3f}'
+    })
+
+def create_model_bic_plot(df_comp, cur_run):
+    if df_comp.empty: return None
+    
+    # Sort by BIC (lower is better)
+    df_comp = df_comp.sort_values('bic', ascending=True)
+    
+    fig, ax = plt.subplots(figsize=(6, 4))
+    
+    # Color current selection
+    cur_id = cur_run['instance_id'] if cur_run else None
+    
+    # Check if instance_id is in columns, fallback to run_path
+    id_col = 'instance_id' if 'instance_id' in df_comp.columns else 'run_path'
+    colors = ['tab:blue' if r[id_col] != (cur_run[id_col] if cur_run else None) else 'tab:orange' for i, r in df_comp.iterrows()]
+    
+    sns.barplot(data=df_comp, y='Model', x='bic', ax=ax, palette=colors)
+    
+    ax.set_xlabel("BIC (Lower is Better)")
+    ax.set_ylabel("")
+    ax.set_title(f"Model Comparison (n={len(df_comp)})")
+    
+    # Add value labels
+    for i, v in enumerate(df_comp['bic']):
+        ax.text(v, i, f" {v:.1f}", va='center')
+        
+    return fig
 ```
 
 ```{python}
@@ -300,8 +414,6 @@ def _update_data_model_choices():
         ui.update_select("data_model", choices=[])
         return
         
-    # Construct a label
-    df['ui_label'] = df.apply(lambda r: f"{r['source']}/{r['data']} | {r.get('stan_file', 'unknown')}", axis=1)
     unique_opts = sorted(df['ui_label'].unique().tolist())
     ui.update_select("data_model", choices=unique_opts)
 
@@ -330,6 +442,77 @@ def selected_run():
         
     if subset.empty: return None
     return subset.iloc[0].to_dict()
+
+@reactive.Calc
+def model_comparison_data():
+    """
+    Aggregate stats for ALL models in the current sweep/data selection.
+    This allows comparing the selected model against others.
+    """
+    df = filtered_runs() # Filtered by sweep
+    if df.empty: return pd.DataFrame()
+    
+    # Filter by current data selection (source/data)
+    sel = selected_run()
+    if not sel: return pd.DataFrame()
+    
+    # Filter for same source and data
+    df = filtered_runs()
+    subset = df[(df['source'] == sel['source']) & (df['data'] == sel['data'])]
+    
+    if subset.empty: return pd.DataFrame()
+    
+    # Calculate N (Sample Size)
+    path, _ = get_data_info(sel['source'], sel['data'])
+    
+    n = 1000 # Default fallback
+    if Path(path).exists():
+        try:
+            con = duckdb.connect()
+            n = con.query(f"SELECT COUNT(*) FROM read_parquet('{path}')").fetchone()[0]
+        except:
+            pass
+            
+    res = []
+    for i, run in subset.iterrows():
+        # Use run_path from dataframe (already absolute)
+        run_path = Path(run['run_path'])
+        stats = load_model_fit_stats(run_path, n=n)
+        if stats:
+            # Create a clean model label
+            m_name = run.get('stan_file', 'unknown') or run['instance_id']
+            m_name = m_name.replace('src/models/', '').replace('.stan', '').replace('__', '/')
+            m_name = m_name.replace('non_parametric_', 'NP_').replace('model_', '')
+            m_name = m_name.replace('monotonic_empirical_bayes', 'Mono(EB)')
+            m_name = m_name.replace('complex_contagion', 'Complex')
+            m_name = m_name.replace('simple_contagion', 'Simple')
+            m_name = m_name.replace('finite_mixture', 'Mixture')
+            
+            # Add K if relevant
+            if 'K' in run and str(run['K']) != '1':
+                 m_name += f" (K={run['K']})"
+            
+            entry = run.to_dict()
+            entry.update(stats)
+            entry['Model'] = m_name
+            res.append(entry)
+            
+    df_res = pd.DataFrame(res)
+    if not df_res.empty:
+        # Calculate Delta BIC and Weights
+        min_bic = df_res['bic'].min()
+        df_res['Delta_BIC'] = df_res['bic'] - min_bic
+        
+        # Schwarz Weights (approx posterior model prob if priors equal)
+        df_res['Model_Weight'] = np.exp(-0.5 * df_res['Delta_BIC'])
+        df_res['Model_Weight'] = df_res['Model_Weight'] / df_res['Model_Weight'].sum()
+        
+        # Bayes Factor vs Best 
+        # BF_best_vs_i = exp(Delta_BIC_i / 2)
+        # We report BF_vs_Best = exp(-Delta/2) (so <1 means evidence AGAINST this model vs best)
+        df_res['BF_vs_Best'] = np.exp(-0.5 * df_res['Delta_BIC'])
+        
+    return df_res
 ```
 
 # {.sidebar}
@@ -445,6 +628,10 @@ def main_plot_view():
     ax.set_ylabel("Probability of Adoption")
     ax.set_title(f"Model vs Data | {run['source']}/{run['data']} | q={qs}")
     
+    if not has_model and np.sum(obs_p) == 0:
+        ax.text(0.5, 0.5, "No Exposure Data Found for this simulation\nCheck if backbone disparity filtering removed all edges", 
+                ha='center', va='center', transform=ax.transAxes, fontsize=12, color='red')
+    
     # Dynamic Lim
     y_max = 1.0
     if has_model:
@@ -499,8 +686,8 @@ def matrix_plot_view():
     run = selected_run()
     if run is None: return
     
-    summary_path = DATA_SUMMARIES_BASE / run['source'] / f"{run['data']}.parquet"
-    if not summary_path.exists(): return
+    path, col = get_data_info(run['source'], run['data'])
+    if not Path(path).exists(): return
     
     # 1. OPTIMIZED SAMPLING via DuckDB
     # Instead of loading 1.4M rows, we pull 50 directly.
@@ -509,13 +696,23 @@ def matrix_plot_view():
     # Stratified: 25 Adopters, 25 Non-adopters
     # We use explicit SQL for speed
     n_sample = 25
-    query = f"""
-        (SELECT A_array, adopted FROM read_parquet('{str(summary_path)}') WHERE adopted = true ORDER BY random() LIMIT {n_sample})
-        UNION ALL
-        (SELECT A_array, adopted FROM read_parquet('{str(summary_path)}') WHERE adopted = false ORDER BY random() LIMIT {n_sample})
-    """
     
-    input_df = con_mat.query(query).to_df()
+    # Safely check for adopters
+    has_adopters = con_mat.query(f"SELECT COUNT(*) FROM read_parquet('{path}') WHERE adopted = true").fetchone()[0] > 0
+    
+    if has_adopters:
+        query = f"""
+            (SELECT {col} as A_raw_col, adopted FROM read_parquet('{path}') WHERE adopted = true ORDER BY random() LIMIT {n_sample})
+            UNION ALL
+            (SELECT {col} as A_raw_col, adopted FROM read_parquet('{path}') WHERE adopted = false ORDER BY random() LIMIT {n_sample})
+        """
+    else:
+        query = f"SELECT {col} as A_raw_col, adopted FROM read_parquet('{path}') WHERE adopted = false ORDER BY random() LIMIT {n_sample*2}"
+    
+    try:
+        input_df = con_mat.query(query).to_df()
+    except:
+        return None
         
     qs = float(run.get('q', '1.0'))
     metric = run.get('exposure_metric', 'k')
@@ -528,7 +725,7 @@ def matrix_plot_view():
     
     import json
     for i, row in enumerate(input_df.itertuples()):
-        A_raw = row.A_array
+        A_raw = row.A_raw_col
         if isinstance(A_raw, str):
             try:
                 A = json.loads(A_raw)
@@ -581,4 +778,32 @@ def matrix_plot_view():
     
     plt.tight_layout()
     return fig
+```
+
+### Model Comparison
+
+```{python}
+@render.plot
+def model_bic_plot():
+    return create_model_bic_plot(model_comparison_data(), selected_run())
+```
+
+# Hypothesis Testing
+
+## Row
+
+### Model Comparison Table
+
+```{python}
+@render.table
+def hypothesis_testing_table():
+    return create_model_comparison_table(model_comparison_data())
+```
+
+### Model Selection (BIC)
+
+```{python}
+@render.plot
+def model_bic_plot_ht():
+    return create_model_bic_plot(model_comparison_data(), selected_run())
 ```
