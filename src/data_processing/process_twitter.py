@@ -25,8 +25,11 @@ DATA_DIR = Path("data/twitter_contagion_data").resolve()
 PROCESSED_DIR = Path("data/processed/twitter").resolve()
 
 # Import Python 3 compatible tools
-#TO-DO: make the tools_p3 part of the src code, adding it to src/data_processing/utils.py change these imports 
-from . import utils
+# Import relative when in package, local when run as script
+try:
+    from . import utils
+except (ImportError, ValueError):
+    import utils
 
 PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
