@@ -24,7 +24,6 @@ sweep:
   # Model variants
   K: [1, 2]
   stan_file: [
-    "src/models/non_parametric_monotonic_empirical_bayes.stan",
     "src/models/non_parametric_non_monotonic.stan",
     "src/models/model_simple_contagion.stan",
     "src/models/model_complex_contagion.stan"
