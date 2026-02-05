@@ -16,3 +16,4 @@ model:
     deviation_scale: 1.0
     logit_p_location: "empirical"
     logit_p_scale: 2.0
+    concentration: 1.0
