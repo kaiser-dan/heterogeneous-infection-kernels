@@ -5,7 +5,7 @@ import itertools
 import subprocess
 import sys
 
-def run_sweep(config_path):
+def run_sweep(config_path, profile=None):
     with open(config_path) as f:
         conf = yaml.safe_load(f)
     
@@ -51,7 +51,8 @@ def run_sweep(config_path):
         # Construct instance_id: k1~v1/k2~v2...
         parts = []
         for k, v in zip(keys, combination):
-            parts.append(f"{k}~{v}")
+            v_safe = str(v).replace('/', '__')
+            parts.append(f"{k}~{v_safe}")
         
         instance_id = "/".join(parts)
         
@@ -65,14 +66,23 @@ def run_sweep(config_path):
     # Run Snakemake
     # We need to point to the inference rules. 
     # If workflow/Snakefile doesn't include them, we point to workflow/rules/inference.smk
-    snakefile = "workflow/rules/inference.smk"
+    # UPDATE: We now include inference.smk in Snakefile to handle dependencies
+    snakefile = "workflow/Snakefile"
     
     cmd = [
         "uv", "run", "snakemake",
+    ] + targets + [
         "-s", snakefile,
-        "-c1",
         "--configfile", str(config_path)
-    ] + targets
+    ]
+
+    if profile:
+        cmd.extend(["--profile", profile])
+    else:
+        # Default fallback if no profile is given, though we likely usually want one
+        # Or maybe -c1 if no profile? Let's leave -c1 separate or assume profile handles it.
+        # Original code had -c1 hardcoded. Let's keep -c1 only if no profile is specified.
+        cmd.append("-c1")
     
     print("Running command:")
     print(" ".join(cmd))
@@ -82,6 +92,7 @@ def run_sweep(config_path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("config", type=Path)
+    parser.add_argument("--profile", type=str, help="Snakemake profile to use (e.g. slurm, local)")
     args = parser.parse_args()
     
-    run_sweep(args.config)
+    run_sweep(args.config, args.profile)

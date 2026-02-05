@@ -57,11 +57,39 @@ rule generate_twitter_summary:
 
 rule generate_oo_summary:
     input:
-        "data/processed/oo/{data_name}_exposures.parquet"
+        exposures = "data/processed/oo/{data_name}.parquet",
+        edges = lambda wildcards: f"data/processed/oo/{wildcards.data_name.replace('_exposures', '')}_edges.parquet"
+        # Wait, data_name is "sim_165_backbone_disparity_exposures". 
+        # The edges file is "sim_165_backbone_disparity_edges.parquet".
+        # So if data_name has "_exposures", we need to replace it?
+        # run_sweep.py generates data_name as "sim_..._backbone_..._exposures"
+        # So we can use a lambda or string manip? Snakemake wildcards are strings.
     output:
-        "data/summaries/oo/{data_name}.parquet"
-    shell:
-        "mkdir -p $(dirname {output}) && cp {input} {output}"
+        directory("data/summaries/oo/{data_name}.parquet") 
+        # keeping .parquet extension for consistency with rule run_inference input pattern
+    run:
+        # Convert _exposures to _edges for the second input
+        # Actually easier to fix inputs:
+        import shutil
+        from pathlib import Path
+        
+        # Parse sim/method from data_name if needed, or rely on parallel file naming
+        # data_name = "sim_165_backbone_disparity_exposures"
+        # derived edges = "sim_165_backbone_disparity_edges.parquet"
+        
+        base_name = wildcards.data_name.replace("_exposures", "")
+        edges_src = Path(f"data/processed/oo/{base_name}_edges.parquet")
+        
+        # Check if exists (Snakemake usually handles this if we state it as input)
+        # But since we can't easily express the input pattern transformation in 'input' block 
+        # without a lambda or complex regex, we might assume they exist if the exposure exists?
+        # Better: use proper inputs.
+        
+        out_dir = Path(output[0])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        
+        shutil.copy(input.exposures, out_dir / "infections.parquet")
+        shutil.copy(edges_src, out_dir / "edges.parquet")
 
 rule run_inference:
     input:
@@ -71,6 +99,6 @@ rule run_inference:
         samples = "results/{sweep_name}/{data_source}/{data_name}/{instance_id}/posterior_samples.parquet",
         summary = "results/{sweep_name}/{data_source}/{data_name}/{instance_id}/inference_summary.parquet"
     params:
-        instance_params = lambda wildcards: {p.split('~')[0]: p.split('~')[1] for p in wildcards.instance_id.split('/')} if wildcards.instance_id != "base" else {}
+        instance_params = lambda wildcards: {p.split('~')[0]: p.split('~')[1].replace('__', '/') for p in wildcards.instance_id.split('/')} if wildcards.instance_id != "base" else {}
     shell:
         "uv run python scripts/run_inference.py --config {input.config} --exposure-summary {input.summary} --output-dir results/{wildcards.sweep_name}/{wildcards.data_source}/{wildcards.data_name}/{wildcards.instance_id} --instance-params '{params.instance_params}'"

@@ -12,6 +12,8 @@ rule all:
         "data/dashboard/dashboard_twitter_data.json",
         "data/dashboard/dashboard_oo_data.json"
 
+include: "rules/inference.smk"
+
 rule process_twitter_all:
     input:
         "data/twitter_contagion_data/all_bot_tweets_",
@@ -29,7 +31,7 @@ rule process_twitter_all:
         "data/processed/twitter/full/M_kappa_q{q}.parquet",
         "data/processed/twitter/full/N_kappa_q{q}.parquet"
     shell:
-        "python3 src/data_processing/process_twitter.py --q {wildcards.q}"
+        "uv run python src/data_processing/process_twitter.py --q {wildcards.q}"
 
 rule process_oo_sim:
     input:
@@ -39,7 +41,7 @@ rule process_oo_sim:
         edges = "data/processed/oo/sim_{sim}_backbone_{method}_edges.parquet",
         nodes = "data/processed/oo/sim_{sim}_backbone_{method}_nodes.parquet"
     shell:
-        "python3.10 src/data_processing/operation_outbreak.py "
+        "uv run python src/data_processing/operation_outbreak.py "
         "--histories {input.histories} "
         "--sim-id {wildcards.sim} "
         "--output {output.exposures} "
@@ -66,4 +68,4 @@ rule prepare_oo_dashboard:
     output:
         "data/dashboard/dashboard_oo_data.json"
     shell:
-        "python3.10 src/viz/oo_prep.py"
+        "uv run python src/viz/oo_prep.py"
