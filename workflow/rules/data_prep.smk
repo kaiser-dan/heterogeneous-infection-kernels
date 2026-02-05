@@ -23,7 +23,7 @@ rule process_oo_sim:
         m_matrix = PROCESSED_BASE / "oo" / "sim_{sim_id}_M.parquet",
         n_matrix = PROCESSED_BASE / "oo" / "sim_{sim_id}_N.parquet"
     shell:
-        "uv run python {input.script} --histories {input.histories} --sim-id {wildcards.sim_id} --output {output.exposures}"
+        "uv run python {input.script} --histories {input.histories} --sim-id {wildcards.sim_id} --output {output.exposures} --kmax {config.get('oo', {}).get('kmax', 20)}"
 
 
 

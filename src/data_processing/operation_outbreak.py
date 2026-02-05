@@ -483,8 +483,9 @@ if __name__ == "__main__":
     parser.add_argument("--histories", type=str, required=True, help="Path to histories.csv")
     parser.add_argument("--sim-id", type=int, required=True, help="Simulation ID")
     parser.add_argument("--output", type=str, required=True, help="Output parquet path")
-    parser.add_argument("--backbone-method", type=str, default=None, help="Network backboning method")
+    parser.add_argument("--backbone-method", type=str, default=None, help="Network backbonining method")
     parser.add_argument("--backbone-threshold", type=float, default=0.05, help="Backbone threshold")
+    parser.add_argument("--kmax", type=int, default=10, help="Maximum neighbors for M/N matrices")
     
     args = parser.parse_args()
     
@@ -492,6 +493,7 @@ if __name__ == "__main__":
         histories_path=Path(args.histories),
         sim_id=args.sim_id,
         output_path=Path(args.output),
+        kmax=args.kmax,
         backbone_method=args.backbone_method,
         backbone_threshold=args.backbone_threshold
     )

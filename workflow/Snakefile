@@ -50,7 +50,8 @@ rule process_oo_sim:
         "--sim-id {wildcards.sim} "
         "--output {output.exposures} "
         "--backbone-method {wildcards.method} "
-        "--backbone-threshold 0.05"
+        "--backbone-threshold 0.05 "
+        "--kmax {config[oo][kmax]}"
 
 rule prepare_twitter_dashboard:
     input:
