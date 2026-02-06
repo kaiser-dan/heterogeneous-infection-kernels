@@ -36,17 +36,12 @@ RESULTS_BASE = REPO_ROOT / "results"
 DATA_SUMMARIES_BASE = REPO_ROOT / "data" / "summaries"
 DATA_PROCESSED_BASE = REPO_ROOT / "data" / "processed"
 
-print(f"DEBUG: Project Root: {REPO_ROOT}")
-print(f"DEBUG: Results Base: {RESULTS_BASE}")
-
 def get_all_runs_df():
     runs = []
     if not RESULTS_BASE.exists():
-        print(f"DEBUG: Results directory not found at {RESULTS_BASE}")
         return pd.DataFrame()
-        
+
     summaries = list(RESULTS_BASE.glob("**/inference_summary.parquet"))
-    print(f"DEBUG: Found {len(summaries)} inference_summary.parquet files")
     
     for s_path in summaries:
         rel_path = s_path.relative_to(RESULTS_BASE)
@@ -57,11 +52,7 @@ def get_all_runs_df():
         sweep = parts[0]
         source = parts[1]
         data_name = parts[2]
-        
-        # DEBUG LOGGING FOR OO
-        if source == 'oo':
-            print(f"DEBUG OO: {rel_path} -> Sweep: {sweep}, Source: {source}, Data: {data_name}, Instance: {parts[3:-1]}")
-        
+
         # Parse params from instance parts (directories between data_name and filename)
         instance_parts = parts[3:-1]
         params = {}
@@ -98,26 +89,45 @@ def get_data_info(source, data_name):
         DATA_PROCESSED_BASE / source
     ]
     
+    # Explicit OO Handling
+    if source == 'oo':
+        # Check for summary directory first (where the valid infections.parquet lives)
+        summary_path = DATA_SUMMARIES_BASE / source / f"{data_name}.parquet"
+        if summary_path.exists() and (summary_path / "infections.parquet").exists():
+             return str(summary_path / "infections.parquet"), "A"
+             
+        # Check processed directory (legacy/fallback)
+        processed_path = DATA_PROCESSED_BASE / source / f"{data_name}.parquet"
+        if processed_path.exists() and (processed_path / "infections.parquet").exists():
+             return str(processed_path / "infections.parquet"), "A"
+             
+        # Fallback for just the folder name without .parquet extension
+        summary_path_raw = DATA_SUMMARIES_BASE / source / data_name
+        if summary_path_raw.exists() and (summary_path_raw / "infections.parquet").exists():
+             return str(summary_path_raw / "infections.parquet"), "A"
+
+    options = [
+        DATA_SUMMARIES_BASE / source,
+        DATA_PROCESSED_BASE / source
+    ]
+    
     for base_dir in options:
         if not base_dir.exists(): continue
         
         # Check variants of the name
         for name in [f"{data_name}.parquet", data_name]:
             path = base_dir / name
-            # 1. Directory-style (OO with infections.parquet)
-            if path.is_dir() and (path / "infections.parquet").exists():
-                return str(path / "infections.parquet"), "A" if source == 'oo' else "A_array"
             
             # 2. Direct file
             if path.is_file() and path.suffix == ".parquet":
-                return str(path), "A" if source == 'oo' else "A_array"
+                return str(path), "A_array"
             
             # 3. File missing .parquet extension in name arg
             if not str(name).endswith(".parquet") and (base_dir / f"{name}.parquet").is_file():
-                 return str(base_dir / f"{name}.parquet"), "A" if source == 'oo' else "A_array"
+                 return str(base_dir / f"{name}.parquet"), "A_array"
 
-    # Fallback to default path
-    return str(DATA_SUMMARIES_BASE / source / f"{data_name}.parquet"), "A" if source == 'oo' else "A_array"
+    # Default fallback
+    return str(DATA_SUMMARIES_BASE / source / f"{data_name}.parquet"), "A_array"
 
 # Data Loading Helpers
 @functools.lru_cache(maxsize=32)
@@ -148,6 +158,8 @@ def load_empirical_data(source, data_name, q, metric, run_kmax=50):
         FROM raw
         GROUP BY n_raw, adopted
     """
+    
+    print(f"DEBUG: Loading data from {path} with metric={metric} q={q_val}")
     
     try:
         df_agg = con.query(query).to_df()
@@ -489,6 +501,24 @@ def model_comparison_data():
     df = filtered_runs()
     subset = df[(df['source'] == sel['source']) & (df['data'] == sel['data'])]
     
+    
+    # Filter by Q and Metric to compare apples-to-apples (same data construction)
+    # but verify columns exist and inputs are ready
+    if 'q' in subset.columns:
+        # If the input is available, use it. Try/except in case sidebar isn't ready
+        try:
+            q_val = input.q()
+            if q_val:
+                subset = subset[subset['q'] == q_val]
+        except: pass
+        
+    if 'exposure_metric' in subset.columns:
+        try:
+            m_val = input.metric()
+            if m_val:
+                subset = subset[subset['exposure_metric'] == m_val]
+        except: pass
+    
     if subset.empty: return pd.DataFrame()
     
     # Calculate N (Sample Size)
@@ -551,7 +581,6 @@ def model_comparison_data():
 ```{python}
 ui.input_select("sweep", "Sweep", choices=all_sweeps)
 ui.input_select("data_model", "Data | Model", choices=[])
-ui.markdown(f"**Status**: Found {len(df_runs)} total runs.")
 # Additional filters can be added here if the list gets too long
 ```
 
@@ -598,6 +627,17 @@ def sidebar_controls():
 ## Row {height=60%}
 
 ```{python}
+@render.text
+def debug_info():
+    run = selected_run()
+    if run is None: return "No run selected"
+    
+    qs = run.get('q', '1.0')
+    metric = run.get('exposure_metric', 'k')
+    path, _ = get_data_info(run['source'], run['data'])
+    
+    return f"DEBUG INFO:\nPath: {path}\nMetric: {metric}, q: {qs}\nExists: {Path(path).exists()}"
+
 @render.plot
 def main_plot_view():
     run = selected_run()
