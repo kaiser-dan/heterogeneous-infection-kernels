@@ -48,4 +48,4 @@ rule process_twitter_dataset:
     output:
         directory(PROCESSED_BASE / "twitter")
     shell:
-        "uv run python {input.script} --data-dir {input.data_dir} --output-dir {output} --no-bot-retweets"
+        "uv run python -m src.data_processing.process_twitter --data-dir {input.data_dir} --output-dir {output} --no-bot-retweets"

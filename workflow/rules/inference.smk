@@ -92,6 +92,25 @@ rule generate_oo_summary:
         if m_src.exists(): shutil.copy(m_src, out_dir / "M.parquet")
         if n_src.exists(): shutil.copy(n_src, out_dir / "N.parquet")
 
+def parse_instance_params(instance_id):
+    if instance_id == "base":
+        return dict()
+    params_dict = dict()
+    for p in instance_id.split('/'):
+        key_val = p.split('~')
+        value = key_val[1].replace('__', '/')
+        # Try to convert to int or float if possible
+        try:
+            if '.' in value:
+                value = float(value)
+            else:
+                value = int(value)
+        except ValueError:
+            # Keep as string if not a number
+            pass
+        params_dict[key_val[0]] = value
+    return params_dict
+
 rule run_inference:
     input:
         summary = "data/summaries/{data_source}/{data_name}.parquet",
@@ -99,9 +118,13 @@ rule run_inference:
     output:
         samples = "results/{sweep_name}/{data_source}/{data_name}/{instance_id}/posterior_samples.parquet",
         summary = "results/{sweep_name}/{data_source}/{data_name}/{instance_id}/inference_summary.parquet"
-    params:
-        instance_params = lambda wildcards: {p.split('~')[0]: p.split('~')[1].replace('__', '/') for p in wildcards.instance_id.split('/')} if wildcards.instance_id != "base" else {}
     run:
         import json
-        params_json = json.dumps(params.instance_params)
-        shell(f"uv run python src/models/inference.py --config {input.config} --exposure-summary {input.summary} --output-dir results/{wildcards.sweep_name}/{wildcards.data_source}/{wildcards.data_name}/{wildcards.instance_id} --instance-params '{params_json}'")
+        
+        instance_params = parse_instance_params(wildcards.instance_id)
+        params_json = json.dumps(instance_params)
+        # Escape curly braces for Snakemake's shell() function
+        params_json_escaped = params_json.replace('{', '{{').replace('}', '}}')
+        
+        cmd = f"uv run python src/models/inference.py --config {input.config} --exposure-summary {input.summary} --output-dir results/{wildcards.sweep_name}/{wildcards.data_source}/{wildcards.data_name}/{wildcards.instance_id} --instance-params '{params_json_escaped}'"
+        shell(cmd)
