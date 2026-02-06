@@ -131,20 +131,22 @@ def get_data_info(source, data_name):
 
 # Data Loading Helpers
 @functools.lru_cache(maxsize=32)
-def load_empirical_data(source, data_name, q, metric, run_kmax=50):
-    path, col = get_data_info(source, data_name)
+def load_twitter_data(data_name, q, metric, run_kmax=50):
+    """
+    Load specialized Twitter data (probability distributions).
+    Expected format: Parquet with columns 0..49 (probs) + user_id.
+    """
+    path, col = get_data_info('twitter', data_name) # Forced source='twitter'
     if not Path(path).exists():
         return None, None
     
     q_val = float(q)
     con = duckdb.connect()
     
-    # 1. DuckDB Aggregation (Reducing 1.4M rows -> <1000 rows)
+    # 1. DuckDB Aggregation
     if metric == 'k':
-        # Sum of elements (exposure weights)
         lvl_expr = f"list_sum(CAST({col} AS INTEGER[]))"
     else:
-        # Count of elements (exposure count)
         lvl_expr = f"len(CAST({col} AS INTEGER[]))"
         
     query = f"""
@@ -159,12 +161,10 @@ def load_empirical_data(source, data_name, q, metric, run_kmax=50):
         GROUP BY n_raw, adopted
     """
     
-    print(f"DEBUG: Loading data from {path} with metric={metric} q={q_val}")
-    
     try:
         df_agg = con.query(query).to_df()
     except Exception as e:
-        print(f"Aggregation error: {e}")
+        print(f"Twitter Aggregation error: {e}")
         return np.zeros(run_kmax), np.zeros(run_kmax)
     
     M = np.zeros(run_kmax, dtype=float)
@@ -173,33 +173,110 @@ def load_empirical_data(source, data_name, q, metric, run_kmax=50):
     if df_agg.empty:
         return M, N
     
-    # 2. Python-side Binomial Smoothing on Aggregated Data
+    # 2. Binomial Smoothing
     for row in df_agg.itertuples():
         n_raw = int(row.n_raw)
         w = row.weight
         
-        # Determine effective exposure (k) distribution
         if q_val >= 1.0:
-            # Deterministic: k = n_raw * 1.0 (approx)
-            # Actually if q=1, k=n_raw
             idx = min(n_raw, run_kmax) - 1
             if idx >= 0:
                 if row.adopted: M[idx] += w
                 else: N[idx] += w
         else:
             # Probabilistic: k ~ Binom(n_raw, q)
-            # Range of k: 0 to n_raw
-            ks = np.arange(1, min(n_raw, run_kmax) + 1)
-            # Apply multiplier w to probabilities
-            probs = binom.pmf(ks, n_raw, q_val) * w
-            
-            idx = ks - 1
-            if row.adopted:
-                np.add.at(M, idx, probs)
-            else:
-                np.add.at(N, idx, probs)
+            start_k = 1 if row.adopted else 0
+            for k in range(start_k, n_raw + 1):
+                if k == 0: continue 
+                if k > run_kmax: break
+                
+                prob = binom.pmf(k, n_raw, q_val)
+                if row.adopted: M[k-1] += w * prob
+                else: N[k-1] += w * prob
                 
     return M, N
+
+@functools.lru_cache(maxsize=32)
+def load_oo_data(data_name, run_kmax=50):
+    """
+    Load specialized OO data (M/N matrices).
+    Expected format: 
+      data/summaries/oo/.../M.parquet (cols 0..19)
+      data/summaries/oo/.../N.parquet (cols 0..19)
+    """
+    # 1. Resolve path to the summary directory using get_data_info logic manually
+    # or just assume the structure we know exists.
+    
+    # Try finding the directory based on data_name
+    # data_name usually like "sim_165_backbone..."
+    
+    # Search locations
+    candidates = [
+        DATA_SUMMARIES_BASE / 'oo' / f"{data_name}.parquet",
+        DATA_SUMMARIES_BASE / 'oo' / data_name,
+        DATA_PROCESSED_BASE / 'oo' / f"{data_name}.parquet", # Legacy
+        DATA_PROCESSED_BASE / 'oo' / data_name
+    ]
+    
+    oo_dir = None
+    for p in candidates:
+        if p.exists() and (p / "M.parquet").exists():
+            oo_dir = p
+            break
+            
+    if not oo_dir:
+        return np.zeros(run_kmax), np.zeros(run_kmax)
+        
+    try:
+        M_df = pd.read_parquet(oo_dir / "M.parquet")
+        N_df = pd.read_parquet(oo_dir / "N.parquet")
+        
+        # Sum columns (users) to get total counts per k
+        # Cols are 0, 1, ... 19
+        # Take max intersection of columns and run_kmax
+        
+        valid_cols = [c for c in M_df.columns if str(c).isdigit()]
+        valid_cols = sorted(valid_cols, key=int)
+        
+        # Arrays to fill
+        M_arr = np.zeros(run_kmax)
+        N_arr = np.zeros(run_kmax)
+        
+        # Calculate sums
+        m_sums = M_df[valid_cols].sum(axis=0).values
+        n_sums = N_df[valid_cols].sum(axis=0).values
+        
+        # Fill arrays mapping col index K to array index K-1 (since array is 1-based k=1..50)
+        # Wait, typical convention: index 0 -> k=1.
+        # OO Cols: 0, 1, 2... represent k=0, k=1, k=2...
+        # So col '1' (k=1) goes to index 0.
+        
+        for k_val_str in valid_cols:
+            k = int(k_val_str)
+            if k == 0: continue # k=0 usually ignored for infection prob
+            if k > run_kmax: break
+            
+            idx = k - 1
+            if idx < len(M_arr):
+                M_arr[idx] = m_sums[k]
+                N_arr[idx] = n_sums[k]
+                
+        return M_arr, N_arr
+
+    except Exception as e:
+        print(f"OO Load Error: {e}")
+        return np.zeros(run_kmax), np.zeros(run_kmax)
+
+
+def load_empirical_data_dispatch(run, run_kmax=50):
+    if run is None: return None, None
+    
+    source = run['source']
+    if source == 'oo':
+        return load_oo_data(run['data'], run_kmax)
+    else:
+        return load_twitter_data(run['data'], run.get('q', 1.0), run.get('exposure_metric', 'k'), run_kmax)
+
 
 def load_kernel_summary(run_path):
     s_path = Path(run_path) / "inference_summary.parquet"
@@ -662,7 +739,7 @@ def main_plot_view():
     qs = run.get('q', '1.0')
     metric = run.get('exposure_metric', 'k')
     
-    M, N = load_empirical_data(run['source'], run['data'], qs, metric, kmax)
+    M, N = load_empirical_data_dispatch(run, kmax)
     
     total = M + N
     # Avoid div by zero

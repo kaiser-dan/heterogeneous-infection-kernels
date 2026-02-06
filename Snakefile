@@ -17,7 +17,7 @@ SOURCE = config.get('source', data_prep_data.get('source', 'twitter'))
 
 if SOURCE == 'oo':
     sim_id = config.get('oo', {}).get('sim_id', 165)
-    method = config.get('oo', {}).get('backbone_method', 'raw')
+    method = config.get('oo', {}).get('backbone_method', 'disparity')
     DATA_CFG_NAME = f"sim_{sim_id}_backbone_{method}_exposures"
 else:
     DATA_CFG_NAME = Path(data_config_path).stem
@@ -53,7 +53,7 @@ rule all:
     """Default rule: Only prepare processed data."""
     input:
         "data/processed/twitter",
-        expand("data/processed/oo/sim_{sim_id}_backbone_raw_exposures.parquet", sim_id=[165, 57, 118, 70, 76, 131, 66, 61, 72, 67]),
+        expand("data/processed/oo/sim_{sim_id}_backbone_disparity_exposures.parquet", sim_id=[165, 57, 118, 70, 76, 131, 66, 61, 72, 67]),
 
 rule inference:
     """Explicitly run models defined in the config."""

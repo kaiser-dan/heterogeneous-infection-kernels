@@ -446,8 +446,20 @@ def generate_oo_exposure_parquet(
     df = pd.DataFrame(rows)
     df.to_parquet(output_path, engine='pyarrow', index=False)
 
-    # Export Edges
-    edges_df = contact_edgelist(histories, sim_id)
+    # Export Edges - use backboned adjacency matrix, not raw histories
+    edges_rows = []
+    for i, src in enumerate(adj.index):
+        for j, dst in enumerate(adj.columns):
+            if i <= j:  # Upper triangle for undirected network
+                weight = adj.iloc[i, j]
+                if weight > 0:
+                    edges_rows.append({
+                        'src': str(src),
+                        'dst': str(dst),
+                        'sim_id': sim_id,
+                        'weight': weight
+                    })
+    edges_df = pd.DataFrame(edges_rows)
     edges_path = output_path.parent / output_path.name.replace("_exposures.parquet", "_edges.parquet")
     edges_df.to_parquet(edges_path, engine='pyarrow', index=False)
 
