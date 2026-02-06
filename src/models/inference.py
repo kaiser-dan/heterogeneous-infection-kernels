@@ -74,11 +74,9 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
     if instance_params:
         if isinstance(instance_params, str):
             try:
-                import json
                 instance_params = json.loads(instance_params)
             except json.JSONDecodeError:
                 # Fallback for old Snakemake string representation if needed
-                import yaml
                 instance_params = yaml.safe_load(instance_params)
         
         config['model'].update(instance_params)

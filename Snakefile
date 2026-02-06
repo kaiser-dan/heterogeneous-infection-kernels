@@ -17,7 +17,8 @@ SOURCE = config.get('source', data_prep_data.get('source', 'twitter'))
 
 if SOURCE == 'oo':
     sim_id = config.get('oo', {}).get('sim_id', 165)
-    DATA_CFG_NAME = f"sim_{sim_id}"
+    method = config.get('oo', {}).get('backbone_method', 'raw')
+    DATA_CFG_NAME = f"sim_{sim_id}_backbone_{method}_exposures"
 else:
     DATA_CFG_NAME = Path(data_config_path).stem
 

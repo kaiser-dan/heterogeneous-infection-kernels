@@ -58,12 +58,7 @@ rule generate_twitter_summary:
 rule generate_oo_summary:
     input:
         exposures = "data/processed/oo/{data_name}.parquet",
-        edges = lambda wildcards: f"data/processed/oo/{wildcards.data_name.replace('_exposures', '')}_edges.parquet"
-        # Wait, data_name is "sim_165_backbone_disparity_exposures". 
-        # The edges file is "sim_165_backbone_disparity_edges.parquet".
-        # So if data_name has "_exposures", we need to replace it?
-        # run_sweep.py generates data_name as "sim_..._backbone_..._exposures"
-        # So we can use a lambda or string manip? Snakemake wildcards are strings.
+        edges = lambda wildcards: f"data/processed/oo/{wildcards.data_name.replace('_exposures', '_edges')}.parquet"
     output:
         directory("data/summaries/oo/{data_name}.parquet") 
         # keeping .parquet extension for consistency with rule run_inference input pattern
