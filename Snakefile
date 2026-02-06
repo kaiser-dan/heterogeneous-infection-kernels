@@ -54,7 +54,6 @@ rule all:
     input:
         "data/processed/twitter",
         expand("data/processed/oo/sim_{sim_id}_backbone_raw_exposures.parquet", sim_id=[165, 57, 118, 70, 76, 131, 66, 61, 72, 67]),
-        "data/dashboard/dashboard_twitter_data.json"
 
 rule inference:
     """Explicitly run models defined in the config."""
@@ -64,4 +63,3 @@ rule inference:
 # 3. Include Modular Rules
 include: "workflow/rules/data_prep.smk"
 include: "workflow/rules/inference.smk"
-include: "workflow/rules/viz.smk"
