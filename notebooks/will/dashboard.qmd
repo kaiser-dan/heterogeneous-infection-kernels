@@ -23,12 +23,30 @@ def get_cached_parquet(path):
     return pd.read_parquet(path)
 
 # Results Discovery
-RESULTS_BASE = Path("/Users/willthompson/Documents/CSDS/side_projects/heterogeneous-infection-kernels/results")
-DATA_SUMMARIES_BASE = Path("/Users/willthompson/Documents/CSDS/side_projects/heterogeneous-infection-kernels/data/summaries")
+def find_repo_root():
+    curr = Path.cwd()
+    for _ in range(5):
+        if (curr / "Snakefile").exists() or (curr / ".git").exists():
+            return curr
+        curr = curr.parent
+    return Path.cwd() # Fallback
+
+REPO_ROOT = find_repo_root()
+RESULTS_BASE = REPO_ROOT / "results"
+DATA_SUMMARIES_BASE = REPO_ROOT / "data" / "summaries"
+DATA_PROCESSED_BASE = REPO_ROOT / "data" / "processed"
+
+print(f"DEBUG: Project Root: {REPO_ROOT}")
+print(f"DEBUG: Results Base: {RESULTS_BASE}")
 
 def get_all_runs_df():
     runs = []
+    if not RESULTS_BASE.exists():
+        print(f"DEBUG: Results directory not found at {RESULTS_BASE}")
+        return pd.DataFrame()
+        
     summaries = list(RESULTS_BASE.glob("**/inference_summary.parquet"))
+    print(f"DEBUG: Found {len(summaries)} inference_summary.parquet files")
     
     for s_path in summaries:
         rel_path = s_path.relative_to(RESULTS_BASE)
@@ -39,6 +57,10 @@ def get_all_runs_df():
         sweep = parts[0]
         source = parts[1]
         data_name = parts[2]
+        
+        # DEBUG LOGGING FOR OO
+        if source == 'oo':
+            print(f"DEBUG OO: {rel_path} -> Sweep: {sweep}, Source: {source}, Data: {data_name}, Instance: {parts[3:-1]}")
         
         # Parse params from instance parts (directories between data_name and filename)
         instance_parts = parts[3:-1]
@@ -71,24 +93,31 @@ def get_data_info(source, data_name):
     Returns (path_to_parquet, id_col) based on source.
     Handles OO data being stored in directories.
     """
-    # Try direct .parquet file first
-    base = DATA_SUMMARIES_BASE / source / f"{data_name}.parquet"
+    options = [
+        DATA_SUMMARIES_BASE / source,
+        DATA_PROCESSED_BASE / source
+    ]
     
-    # Check if simulation ID format (e.g. sim_165) needs mapping
-    # But usually data_name already includes it.
-    
-    if base.is_dir():
-         # Check for infections.parquet inside
-         if (base / "infections.parquet").exists():
-             return str(base / "infections.parquet"), "A" if source == 'oo' else "A_array"
-    
-    # If not a directory ending in .parquet, maybe it's the folder itself
-    parent = DATA_SUMMARIES_BASE / source / data_name
-    if parent.is_dir() and (parent / "infections.parquet").exists():
-        return str(parent / "infections.parquet"), "A" if source == 'oo' else "A_array"
+    for base_dir in options:
+        if not base_dir.exists(): continue
+        
+        # Check variants of the name
+        for name in [f"{data_name}.parquet", data_name]:
+            path = base_dir / name
+            # 1. Directory-style (OO with infections.parquet)
+            if path.is_dir() and (path / "infections.parquet").exists():
+                return str(path / "infections.parquet"), "A" if source == 'oo' else "A_array"
+            
+            # 2. Direct file
+            if path.is_file() and path.suffix == ".parquet":
+                return str(path), "A" if source == 'oo' else "A_array"
+            
+            # 3. File missing .parquet extension in name arg
+            if not str(name).endswith(".parquet") and (base_dir / f"{name}.parquet").is_file():
+                 return str(base_dir / f"{name}.parquet"), "A" if source == 'oo' else "A_array"
 
-    # Fallback to the .parquet file itself
-    return str(base), "A" if source == 'oo' else "A_array"
+    # Fallback to default path
+    return str(DATA_SUMMARIES_BASE / source / f"{data_name}.parquet"), "A" if source == 'oo' else "A_array"
 
 # Data Loading Helpers
 @functools.lru_cache(maxsize=32)
@@ -522,6 +551,7 @@ def model_comparison_data():
 ```{python}
 ui.input_select("sweep", "Sweep", choices=all_sweeps)
 ui.input_select("data_model", "Data | Model", choices=[])
+ui.markdown(f"**Status**: Found {len(df_runs)} total runs.")
 # Additional filters can be added here if the list gets too long
 ```
 

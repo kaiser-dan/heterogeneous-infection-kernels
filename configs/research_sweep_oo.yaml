@@ -7,6 +7,7 @@ source: "oo"
 oo:
   sim_id: 165
   backbone_method: "disparity"
+  backbone_threshold: 0.05
   kmax: 20
 
 model:
