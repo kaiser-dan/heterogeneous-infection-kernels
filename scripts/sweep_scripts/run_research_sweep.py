@@ -1,5 +1,6 @@
 
 import argparse
+print("Starting script...", flush=True)
 import itertools
 import yaml
 import subprocess
