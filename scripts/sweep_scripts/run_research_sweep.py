@@ -26,10 +26,12 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running")
     args = parser.parse_args()
 
+    print(f"Loading config from {args.config}", flush=True)
     config = load_config(args.config)
     
     # Get sweep parameters, default to empty dict if not present
     sweep_params = config.get('sweep', {})
+    print(f"Sweep params: {sweep_params}", flush=True)
     
     # Base paths
     # Assuming run from repo root
@@ -57,6 +59,8 @@ def main():
         combinations = [()]
     else:
         keys, combinations = generate_combinations(sweep_params)
+
+    print(f"Generating {len(combinations)} combinations", flush=True)
 
     for i, combo in enumerate(combinations):
         param_dict = dict(zip(keys, combo))
@@ -124,9 +128,9 @@ def main():
             submit_cmd = ["sbatch", "-J", job_name, "-o", str(output_dir / "slurm-%j.out"), str(slurm_script_path)]
             
             if args.dry_run:
-                print(f"[Dry Run] Did not submit: {' '.join(submit_cmd)}")
+                print(f"[Dry Run] Did not submit: {' '.join(submit_cmd)}", flush=True)
             else:
-                print(f"Submitting job {job_name}...")
+                print(f"Submitting job {job_name}...", flush=True)
                 subprocess.run(submit_cmd, check=True)
 
         else:
