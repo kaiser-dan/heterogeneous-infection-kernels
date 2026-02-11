@@ -57,40 +57,27 @@ rule generate_twitter_summary:
 
 rule generate_oo_summary:
     input:
-        exposures = "data/processed/oo/{data_name}.parquet",
-        edges = lambda wildcards: f"data/processed/oo/{wildcards.data_name.replace('_exposures', '_edges')}.parquet"
+        exposures = "data/processed/oo/{data_name}/exposures.parquet",
+        edges = "data/processed/oo/{data_name}/edges.parquet",
+        M = "data/processed/oo/{data_name}/M.parquet",
+        N = "data/processed/oo/{data_name}/N.parquet"
     output:
         directory("data/summaries/oo/{data_name}.parquet") 
-        # keeping .parquet extension for consistency with rule run_inference input pattern
     run:
-        # Convert _exposures to _edges for the second input
-        # Actually easier to fix inputs:
         import shutil
         from pathlib import Path
-        
-        # Parse sim/method from data_name if needed, or rely on parallel file naming
-        # data_name = "sim_165_backbone_disparity_exposures"
-        # derived edges = "sim_165_backbone_disparity_edges.parquet"
-        
-        base_name = wildcards.data_name.replace("_exposures", "")
-        edges_src = Path(f"data/processed/oo/{base_name}_edges.parquet")
-        
-        # Check if exists (Snakemake usually handles this if we state it as input)
-        # But since we can't easily express the input pattern transformation in 'input' block 
-        # without a lambda or complex regex, we might assume they exist if the exposure exists?
-        # Better: use proper inputs.
         
         out_dir = Path(output[0])
         out_dir.mkdir(parents=True, exist_ok=True)
         
+        # Copy files to expected names for inference
+        # inference.py expects 'infections.parquet' (legacy name?) or we can stick to exposures
+        # generate_stan_matrices_oo expects 'infections.parquet'
         shutil.copy(input.exposures, out_dir / "infections.parquet")
-        shutil.copy(edges_src, out_dir / "edges.parquet")
+        shutil.copy(input.edges, out_dir / "edges.parquet")
         
-        # Propagate M and N
-        m_src = Path(str(input.exposures).replace("_exposures.parquet", "_M.parquet"))
-        n_src = Path(str(input.exposures).replace("_exposures.parquet", "_N.parquet"))
-        if m_src.exists(): shutil.copy(m_src, out_dir / "M.parquet")
-        if n_src.exists(): shutil.copy(n_src, out_dir / "N.parquet")
+        if Path(input.M).exists(): shutil.copy(input.M, out_dir / "M.parquet")
+        if Path(input.N).exists(): shutil.copy(input.N, out_dir / "N.parquet")
 
 def parse_instance_params(instance_id):
     if instance_id == "base":
