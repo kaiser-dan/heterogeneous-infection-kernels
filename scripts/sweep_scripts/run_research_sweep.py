@@ -4,6 +4,7 @@ import yaml
 import subprocess
 import os
 import sys
+import shlex
 from pathlib import Path
 import json
 
@@ -96,7 +97,8 @@ def main():
             "--instance-params", instance_params_json
         ]
         
-        cmd_str = " ".join(cmd)
+        # Properly quote arguments for shell execution
+        cmd_str = " ".join(shlex.quote(str(x)) for x in cmd)
         
         if args.hpc:
             if not args.slurm_template:
