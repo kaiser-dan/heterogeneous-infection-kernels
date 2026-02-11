@@ -1,6 +1,4 @@
-
 import argparse
-print("Starting script...", flush=True)
 import itertools
 import yaml
 import subprocess
@@ -140,3 +138,6 @@ def main():
                 print(f"[Dry Run] {cmd_str}")
             else:
                 subprocess.run(cmd, check=True)
+
+if __name__ == "__main__":
+    main()
