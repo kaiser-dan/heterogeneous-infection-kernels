@@ -7,7 +7,7 @@ source: "oo"
 oo:
   sim_id: 165
   backbone_method: "disparity"
-  backbone_threshold: 0.05
+  backbone_threshold: 0.3
   kmax: 20
 
 model:
@@ -23,7 +23,8 @@ sweep:
   # Model variants
   K: [1, 2]
   stan_file: [
-    "src/models/non_parametric_non_monotonic.stan",
     "src/models/model_simple_contagion.stan",
-    "src/models/model_complex_contagion.stan"
+    "src/models/model_complex_contagion.stan",
+    "src/models/non_parametric_monotonic_empirical_bayes.stan",
+    "src/models/non_parametric_non_monotonic.stan"
   ]

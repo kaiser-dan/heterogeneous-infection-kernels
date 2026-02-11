@@ -3,6 +3,7 @@ title: "Inference Results Explorer"
 format: dashboard
 server: shiny
 theme: cosmo
+jupyter: python3
 ---
 
 ```{python}
@@ -12,6 +13,7 @@ import numpy as np
 from pathlib import Path
 import re
 import matplotlib.pyplot as plt
+import arviz as az
 import seaborn as sns
 from shiny import ui, render, reactive
 import duckdb
@@ -82,49 +84,29 @@ all_sweeps = sorted(df_runs['sweep'].unique().tolist()) if not df_runs.empty els
 def get_data_info(source, data_name):
     """
     Returns (path_to_parquet, id_col) based on source.
-    Handles OO data being stored in directories.
+    Standardized directory structure: source / data_name / exposures.parquet
     """
-    options = [
-        DATA_SUMMARIES_BASE / source,
-        DATA_PROCESSED_BASE / source
-    ]
+    bases = [DATA_PROCESSED_BASE / source, DATA_SUMMARIES_BASE / source]
     
-    # Explicit OO Handling
-    if source == 'oo':
-        # Check for summary directory first (where the valid infections.parquet lives)
-        summary_path = DATA_SUMMARIES_BASE / source / f"{data_name}.parquet"
-        if summary_path.exists() and (summary_path / "infections.parquet").exists():
-             return str(summary_path / "infections.parquet"), "A"
-             
-        # Check processed directory (legacy/fallback)
-        processed_path = DATA_PROCESSED_BASE / source / f"{data_name}.parquet"
-        if processed_path.exists() and (processed_path / "infections.parquet").exists():
-             return str(processed_path / "infections.parquet"), "A"
-             
-        # Fallback for just the folder name without .parquet extension
-        summary_path_raw = DATA_SUMMARIES_BASE / source / data_name
-        if summary_path_raw.exists() and (summary_path_raw / "infections.parquet").exists():
-             return str(summary_path_raw / "infections.parquet"), "A"
-
-    options = [
-        DATA_SUMMARIES_BASE / source,
-        DATA_PROCESSED_BASE / source
-    ]
-    
-    for base_dir in options:
-        if not base_dir.exists(): continue
+    for base in bases:
+        if not base.exists(): continue
         
-        # Check variants of the name
-        for name in [f"{data_name}.parquet", data_name]:
-            path = base_dir / name
-            
-            # 2. Direct file
-            if path.is_file() and path.suffix == ".parquet":
-                return str(path), "A_array"
-            
-            # 3. File missing .parquet extension in name arg
-            if not str(name).endswith(".parquet") and (base_dir / f"{name}.parquet").is_file():
-                 return str(base_dir / f"{name}.parquet"), "A_array"
+        # 1. Standard Directory Style: sim_165_... / exposures.parquet
+        # (data_name is usually the folder name)
+        d = base / data_name
+        if d.is_dir():
+            # Check for standard names
+            for fname in ["exposures.parquet", "infections.parquet"]:
+                if (d / fname).exists():
+                    id_col = "A" if source == "oo" else "A_array"
+                    return str(d / fname), id_col
+        
+        # 2. Legacy Flat File Style (Fallback if directory missing)
+        for name in [data_name, f"{data_name}.parquet", f"{data_name}_exposures.parquet"]:
+            p = base / name
+            if p.is_file():
+                id_col = "A" if source == "oo" else "A_array"
+                return str(p), id_col
 
     # Default fallback
     return str(DATA_SUMMARIES_BASE / source / f"{data_name}.parquet"), "A_array"
@@ -184,15 +166,14 @@ def load_twitter_data(data_name, q, metric, run_kmax=50):
                 if row.adopted: M[idx] += w
                 else: N[idx] += w
         else:
-            # Probabilistic: k ~ Binom(n_raw, q)
-            start_k = 1 if row.adopted else 0
-            for k in range(start_k, n_raw + 1):
-                if k == 0: continue 
-                if k > run_kmax: break
-                
-                prob = binom.pmf(k, n_raw, q_val)
-                if row.adopted: M[k-1] += w * prob
-                else: N[k-1] += w * prob
+            # Vectorized Binomial Smoothing: k ~ Binom(n_raw, q)
+            k_vals = np.arange(1, min(n_raw, run_kmax) + 1)
+            probs = binom.pmf(k_vals, n_raw, q_val)
+            
+            if row.adopted:
+                M[:len(probs)] += w * probs
+            else:
+                N[:len(probs)] += w * probs
                 
     return M, N
 
@@ -207,29 +188,33 @@ def load_oo_data(data_name, run_kmax=50):
     # 1. Resolve path to the summary directory using get_data_info logic manually
     # or just assume the structure we know exists.
     
-    # Try finding the directory based on data_name
-    # data_name usually like "sim_165_backbone..."
+    m_path = None
+    n_path = None
     
-    # Search locations
-    candidates = [
-        DATA_SUMMARIES_BASE / 'oo' / f"{data_name}.parquet",
-        DATA_SUMMARIES_BASE / 'oo' / data_name,
-        DATA_PROCESSED_BASE / 'oo' / f"{data_name}.parquet", # Legacy
-        DATA_PROCESSED_BASE / 'oo' / data_name
-    ]
-    
-    oo_dir = None
-    for p in candidates:
-        if p.exists() and (p / "M.parquet").exists():
-            oo_dir = p
+    # Standard: Look for M.parquet and N.parquet in the same directory as exposures
+    for base in [DATA_PROCESSED_BASE / 'oo', DATA_SUMMARIES_BASE / 'oo']:
+        d = base / data_name
+        if not d.exists(): d = base / f"{data_name}.parquet"
+        
+        if d.is_dir():
+            if (d / "M.parquet").exists():
+                m_path = d / "M.parquet"
+                n_path = d / "N.parquet"
+                break
+        
+        # Fallback to legacy flat file pattern
+        p_m = base / f"{data_name}_M.parquet"
+        if p_m.exists():
+            m_path = p_m
+            n_path = base / f"{data_name}_N.parquet"
             break
             
-    if not oo_dir:
+    if not m_path or not m_path.exists():
         return np.zeros(run_kmax), np.zeros(run_kmax)
         
     try:
-        M_df = pd.read_parquet(oo_dir / "M.parquet")
-        N_df = pd.read_parquet(oo_dir / "N.parquet")
+        M_df = pd.read_parquet(m_path)
+        N_df = pd.read_parquet(n_path)
         
         # Sum columns (users) to get total counts per k
         # Cols are 0, 1, ... 19
@@ -243,23 +228,18 @@ def load_oo_data(data_name, run_kmax=50):
         N_arr = np.zeros(run_kmax)
         
         # Calculate sums
-        m_sums = M_df[valid_cols].sum(axis=0).values
-        n_sums = N_df[valid_cols].sum(axis=0).values
-        
-        # Fill arrays mapping col index K to array index K-1 (since array is 1-based k=1..50)
-        # Wait, typical convention: index 0 -> k=1.
-        # OO Cols: 0, 1, 2... represent k=0, k=1, k=2...
-        # So col '1' (k=1) goes to index 0.
+        m_sums = M_df[valid_cols].sum(axis=0)
+        n_sums = N_df[valid_cols].sum(axis=0)
         
         for k_val_str in valid_cols:
             k = int(k_val_str)
-            if k == 0: continue # k=0 usually ignored for infection prob
+            if k == 0: continue
             if k > run_kmax: break
             
             idx = k - 1
             if idx < len(M_arr):
-                M_arr[idx] = m_sums[k]
-                N_arr[idx] = n_sums[k]
+                M_arr[idx] = m_sums[k_val_str]
+                N_arr[idx] = n_sums[k_val_str]
                 
         return M_arr, N_arr
 
@@ -291,9 +271,10 @@ def load_kernel_summary(run_path):
     # Standard format seen: c[1], c[2]... OR mu[1,1]...
     
     # Let's try to load 'mu' or 'c' first
+    # robustly handle index column name
     query_mu = f"""
         SELECT 
-            index,
+            __index_level_0__ as index,
             Mean as mean,
             "5%" as lower,
             "95%" as upper
@@ -309,35 +290,52 @@ def load_kernel_summary(run_path):
     rows = []
     
     if not df_mu.empty:
-        pat = re.compile(r'^(?:c|mu|mu_prob)\[(\d+)(?:,(\d+))?\]') 
+        # Regex to handle:
+        # c[k] -> component=1, level=k
+        # mu[c,k] -> component=c, level=k
+        # mu_prob[c,k] -> component=c, level=k
+        
+        # We need to be careful about order. 
+        # c[10] vs mu[1,10]
+        
+        pat_comp = re.compile(r'^(?:mu|mu_prob)\[(\d+),(\d+)\]')
+        pat_single = re.compile(r'^(?:c|mu)\[(\d+)\]')
+        
         for row in df_mu.itertuples():
-            m = pat.match(row.index)
+            idx = row.index
+            
+            # Try Multi-Component first
+            m = pat_comp.match(idx)
             if m:
-                g1, g2 = m.groups()
-                if g2:
-                    # mu[component, level]
-                    rows.append({
-                        'component': int(g1),
-                        'level': int(g2),
-                        'mean': row.mean,
-                        'lower': row.lower,
-                        'upper': row.upper
-                    })
-                else:
-                    # c[level] -> Component 1
-                    rows.append({
-                        'component': 1,
-                        'level': int(g1),
-                        'mean': row.mean,
-                        'lower': row.lower,
-                        'upper': row.upper
-                    })
+                comp_id = int(m.group(1))
+                level_id = int(m.group(2))
+                rows.append({
+                    'component': comp_id,
+                    'level': level_id,
+                    'mean': row.mean,
+                    'lower': row.lower,
+                    'upper': row.upper
+                })
+                continue
+                
+            # Try Single Component
+            m = pat_single.match(idx)
+            if m:
+                level_id = int(m.group(1))
+                rows.append({
+                    'component': 1,
+                    'level': level_id,
+                    'mean': row.mean,
+                    'lower': row.lower,
+                    'upper': row.upper
+                })
+                
         if rows:
              return pd.DataFrame(rows).sort_values(['component', 'level'])
 
     # 2. Fallback: Reconstruct from logit_p + Delta (Non-parametric)
     # Get logit_p
-    query_p = f"""SELECT Mean, "5%", "95%" FROM read_parquet('{str(s_path)}') WHERE index = 'logit_p[1]'""" # Assume K=1
+    query_p = f"""SELECT Mean, "5%", "95%" FROM read_parquet('{str(s_path)}') WHERE __index_level_0__ = 'logit_p[1]'""" # Assume K=1
     try:
         df_p = con.query(query_p).to_df()
     except:
@@ -358,10 +356,10 @@ def load_kernel_summary(run_path):
     # Get Delta[1, j]
     query_delta = f"""
         SELECT 
-            CAST(regexp_extract(index, 'Delta\[1,([0-9]+)\]', 1) as INTEGER) as level,
+            CAST(regexp_extract(__index_level_0__, 'Delta\[1,([0-9]+)\]', 1) as INTEGER) as level,
             Mean as val
         FROM read_parquet('{str(s_path)}')
-        WHERE index LIKE 'Delta[1,%]'
+        WHERE __index_level_0__ LIKE 'Delta[1,%]'
         ORDER BY level
     """
     try:
@@ -427,43 +425,71 @@ def load_pi_summary(run_path):
     pi_data = []
     for c in pi_cols:
         comp = c.split('[')[1].split(']')[0]
+        # Robust access for both 'mean_1' and 'mean_1,1' formats
+        try:
+            m_val = res[f'mean_{comp}']
+            l_val = res[f'low_{comp}']
+            h_val = res[f'high_{comp}']
+        except KeyError:
+            # Fallback for pandas/duckdb potentially double-quoting or differing on commas
+            m_val = res.get(f'mean_{comp}', 0)
+            l_val = res.get(f'low_{comp}', 0)
+            h_val = res.get(f'high_{comp}', 0)
+
         pi_data.append({
             'component': comp,
-            'mean': res[f'mean_{comp}'],
-            'lower': res[f'low_{comp}'],
-            'upper': res[f'high_{comp}']
+            'mean': m_val,
+            'lower': l_val,
+            'upper': h_val
         })
         
     return pd.DataFrame(pi_data)
 
 def load_model_fit_stats(run_path, n=1000):
     """
-    Calculate BIC using summary statistics from inference_summary.parquet.
-    This is MUCH faster than loading posterior_samples.parquet.
+    Calculate fit statistics (BIC, WAIC, LOO approximation).
+    WAIC/LOO require pointwise log_lik which is extracted from 
+    inference_summary.parquet if available.
     """
     summary_path = Path(run_path) / "inference_summary.parquet"
     if not summary_path.exists(): return None
     
     try:
-        # Load the summary (very small compared to full posterior)
         df_sum = get_cached_parquet(str(summary_path))
         
-        if 'lp__' not in df_sum.index:
-             return None
-             
-        mean_lp = df_sum.loc['lp__', 'Mean']
-        k = len(df_sum) - 1 # Number of parameters excluding lp__
+        # 1. BIC/AIC (Legacy Fallback)
+        result = {'bic': None, 'aic': None, 'waic': None, 'loo': None}
         
-        # Use Mean LP as proxy for Max LP (reasonable for comparison)
-        bic = k * np.log(n) - 2 * mean_lp
-        aic = 2 * k - 2 * mean_lp
+        if 'lp__' in df_sum.index:
+            mean_lp = df_sum.loc['lp__', 'Mean']
+            k = len(df_sum) - 1
+            result['bic'] = k * np.log(n) - 2 * mean_lp
+            result['aic'] = 2 * k - 2 * mean_lp
+            result['max_lp'] = mean_lp
+            result['k_est'] = k
+
+        # 2. WAIC Approximation
+        # Check for log_lik[i] rows
+        log_lik_rows = df_sum[df_sum.index.str.startswith('log_lik[')]
         
-        return {
-            'bic': bic,
-            'aic': aic,
-            'max_lp': mean_lp,
-            'k_est': k
-        }
+        if not log_lik_rows.empty:
+            # lppd = sum(log(E[p(y|theta)]))
+            # Approx: log(E[p]) ~ E[log(p)] + 0.5 * var(log(p))
+            # p_waic = sum(var(log(p)))
+            
+            e_log_p = log_lik_rows['Mean'].values
+            var_log_p = (log_lik_rows['StdDev'].values) ** 2
+            
+            lppd = np.sum(e_log_p + 0.5 * var_log_p)
+            p_waic = np.sum(var_log_p)
+            
+            result['waic'] = -2 * (lppd - p_waic)
+            
+            # LOO approx (simple penalty similar to WAIC)
+            # PSIS-LOO is more complex, but WAIC is usually a good proxy
+            result['loo'] = result['waic'] # Use WAIC as proxy if samples not available
+            
+        return result
     except Exception as e:
         print(f"Error calculating fit stats for {run_path}: {e}")
         return None
@@ -471,46 +497,69 @@ def load_model_fit_stats(run_path, n=1000):
 def create_model_comparison_table(df):
     if df.empty: return pd.DataFrame()
     
-    # Select and format columns for display
-    cols = ['Model', 'k_est', 'max_lp', 'bic', 'Delta_BIC', 'Model_Weight', 'BF_vs_Best']
+    # Identify available columns
+    all_cols = df.columns
+    cols = ['Model']
+    if 'k_est' in all_cols: cols.append('k_est')
+    
+    # Metrics
+    metrics = []
+    if 'waic' in all_cols and df['waic'].notna().any():
+        metrics.extend(['waic', 'Delta_WAIC', 'WAIC_Weight'])
+    if 'bic' in all_cols and df['bic'].notna().any():
+        metrics.extend(['bic', 'Delta_BIC', 'BIC_Weight'])
+        
+    cols.extend(metrics)
     df_disp = df[cols].copy()
     
-    # Sort by BIC
-    df_disp = df_disp.sort_values('bic')
+    # Sort by first available metric
+    main_metric = 'waic' if 'waic' in cols else 'bic'
+    df_disp = df_disp.sort_values(main_metric)
     
     # Format floats
-    return df_disp.style.format({
-        'max_lp': '{:.1f}',
+    formats = {
+        'waic': '{:.1f}',
+        'Delta_WAIC': '{:.2f}',
+        'WAIC_Weight': '{:.3f}',
         'bic': '{:.1f}',
         'Delta_BIC': '{:.2f}',
-        'Model_Weight': '{:.3f}',
-        'BF_vs_Best': '{:.3f}'
-    })
+        'BIC_Weight': '{:.3f}',
+        'max_lp': '{:.1f}'
+    }
+    # Only format existing columns
+    fmt = {k: v for k, v in formats.items() if k in df_disp.columns}
+    
+    return df_disp.style.format(fmt)
 
-def create_model_bic_plot(df_comp, cur_run):
+def create_model_comparison_plot(df_comp, cur_run):
     if df_comp.empty: return None
     
-    # Sort by BIC (lower is better)
-    df_comp = df_comp.sort_values('bic', ascending=True)
+    # Determine metric to plot
+    metric = 'waic' if 'waic' in df_comp.columns and df_comp['waic'].notna().any() else 'bic'
+    label = "WAIC" if metric == 'waic' else "BIC"
+    
+    # Sort by metric (lower is better)
+    df_comp = df_comp.sort_values(metric, ascending=True)
     
     fig, ax = plt.subplots(figsize=(6, 4))
     
     # Color current selection
     cur_id = cur_run['instance_id'] if cur_run else None
-    
-    # Check if instance_id is in columns, fallback to run_path
     id_col = 'instance_id' if 'instance_id' in df_comp.columns else 'run_path'
-    colors = ['tab:blue' if r[id_col] != (cur_run[id_col] if cur_run else None) else 'tab:orange' for i, r in df_comp.iterrows()]
     
-    sns.barplot(data=df_comp, y='Model', x='bic', ax=ax, palette=colors)
+    comp_val = cur_run[id_col] if cur_run else None
+    colors = ['tab:blue' if r[id_col] != comp_val else 'tab:orange' for i, r in df_comp.iterrows()]
     
-    ax.set_xlabel("BIC (Lower is Better)")
+    sns.barplot(data=df_comp, y='Model', x=metric, ax=ax, palette=colors)
+    
+    ax.set_xlabel(f"{label} (Lower is Better)")
     ax.set_ylabel("")
-    ax.set_title(f"Model Comparison (n={len(df_comp)})")
+    ax.set_title(f"Model Selection Summary ({label})")
     
     # Add value labels
-    for i, v in enumerate(df_comp['bic']):
-        ax.text(v, i, f" {v:.1f}", va='center')
+    for i, v in enumerate(df_comp[metric]):
+        if pd.notna(v):
+            ax.text(v, i, f" {v:.1f}", va='center')
         
     return fig
 ```
@@ -539,24 +588,44 @@ def _update_data_model_choices():
 def selected_run():
     label = input.data_model()
     df = filtered_runs()
+    
     if df.empty or not label: return None
     
     subset = df[df['ui_label'] == label]
     
-    # Filter by dynamic inputs if they exist
-    # Note: inputs might be None during re-render
+    # Filter by dynamic inputs
     
     # Metric
-    if 'exposure_metric' in subset.columns and input.metric():
-        subset = subset[subset['exposure_metric'] == input.metric()]
+    try:
+        metric_val = input.metric()
+    except:
+        metric_val = None
+        
+    if 'exposure_metric' in subset.columns and metric_val:
+        # Only filter if the column has meaningful values for this subset
+        if not subset['exposure_metric'].isna().all():
+             subset = subset[subset['exposure_metric'] == metric_val]
         
     # Q
-    if 'q' in subset.columns and input.q():
-        subset = subset[subset['q'] == input.q()]
+    try:
+        q_val = input.q()
+    except:
+        q_val = None
+        
+    if 'q' in subset.columns and q_val:
+        if not subset['q'].isna().all():
+            subset = subset[subset['q'] == q_val]
         
     # K
-    if 'K' in subset.columns and input.K():
-        subset = subset[subset['K'] == input.K()]
+    try:
+        k_val = input.K()
+    except:
+        k_val = None
+        
+    if 'K' in subset.columns and k_val:
+        # K is usually present for all models
+        # Ensure types match (str vs int)
+        subset = subset[subset['K'].astype(str) == str(k_val)]
         
     if subset.empty: return None
     return subset.iloc[0].to_dict()
@@ -635,19 +704,28 @@ def model_comparison_data():
             
     df_res = pd.DataFrame(res)
     if not df_res.empty:
-        # Calculate Delta BIC and Weights
-        min_bic = df_res['bic'].min()
-        df_res['Delta_BIC'] = df_res['bic'] - min_bic
-        
-        # Schwarz Weights (approx posterior model prob if priors equal)
-        df_res['Model_Weight'] = np.exp(-0.5 * df_res['Delta_BIC'])
-        df_res['Model_Weight'] = df_res['Model_Weight'] / df_res['Model_Weight'].sum()
-        
-        # Bayes Factor vs Best 
-        # BF_best_vs_i = exp(Delta_BIC_i / 2)
-        # We report BF_vs_Best = exp(-Delta/2) (so <1 means evidence AGAINST this model vs best)
-        df_res['BF_vs_Best'] = np.exp(-0.5 * df_res['Delta_BIC'])
-        
+        # Calculate Delta BIC/AIC
+        if 'bic' in df_res.columns and df_res['bic'].notna().any():
+            min_bic = df_res['bic'].min()
+            df_res['Delta_BIC'] = df_res['bic'] - min_bic
+            df_res['BIC_Weight'] = np.exp(-0.5 * df_res['Delta_BIC'])
+            df_res['BIC_Weight'] /= df_res['BIC_Weight'].sum()
+            df_res['BF_vs_Best'] = np.exp(-0.5 * df_res['Delta_BIC'])
+
+        # Calculate Delta WAIC
+        if 'waic' in df_res.columns and df_res['waic'].notna().any():
+            min_waic = df_res['waic'].min()
+            df_res['Delta_WAIC'] = df_res['waic'] - min_waic
+            df_res['WAIC_Weight'] = np.exp(-0.5 * df_res['Delta_WAIC'])
+            df_res['WAIC_Weight'] /= df_res['WAIC_Weight'].sum()
+            
+            # Prefer sorting by WAIC if available
+            df_res = df_res.sort_values('waic')
+            df_res['Model_Weight'] = df_res['WAIC_Weight']
+        else:
+            df_res = df_res.sort_values('bic')
+            df_res['Model_Weight'] = df_res.get('BIC_Weight', 0)
+            
     return df_res
 ```
 
@@ -746,6 +824,16 @@ def main_plot_view():
     with np.errstate(divide='ignore', invalid='ignore'):
         obs_p = np.where(total > 0, M / total, 0)
     
+    # Load Weights (pi) if available
+    pi_df = load_pi_summary(run['run_path'])
+    weights = {}
+    if pi_df is not None and not pi_df.empty:
+        for r in pi_df.itertuples():
+            try:
+                comp_id = int(r.component)
+                weights[comp_id] = r.mean
+            except: pass
+            
     # PLOTTING
     fig, ax = plt.subplots(figsize=(10, 6))
     
@@ -766,7 +854,13 @@ def main_plot_view():
             if sub.empty: continue
             
             c = colors[idx % len(colors)]
-            label = f'Model Comp {k_comp}'
+            
+            # Format Label with Weight
+            w_val = weights.get(k_comp, None)
+            if w_val is not None:
+                label = f'Model Comp {k_comp} ($\pi={w_val:.2f}$)'
+            else:
+                label = f'Model Comp {k_comp}'
             
             ax.plot(sub['level'], sub['mean'], 'o-', color=c, label=label, linewidth=2, zorder=5)
             ax.fill_between(sub['level'], sub['lower'], sub['upper'], color=c, alpha=0.1, zorder=4)
@@ -849,12 +943,12 @@ def matrix_plot_view():
     
     if has_adopters:
         query = f"""
-            (SELECT {col} as A_raw_col, adopted FROM read_parquet('{path}') WHERE adopted = true ORDER BY random() LIMIT {n_sample})
+            (SELECT {col} as A_raw_col, adopted, user_id FROM read_parquet('{path}') WHERE adopted = true ORDER BY random() LIMIT {n_sample})
             UNION ALL
-            (SELECT {col} as A_raw_col, adopted FROM read_parquet('{path}') WHERE adopted = false ORDER BY random() LIMIT {n_sample})
+            (SELECT {col} as A_raw_col, adopted, user_id FROM read_parquet('{path}') WHERE adopted = false ORDER BY random() LIMIT {n_sample})
         """
     else:
-        query = f"SELECT {col} as A_raw_col, adopted FROM read_parquet('{path}') WHERE adopted = false ORDER BY random() LIMIT {n_sample*2}"
+        query = f"SELECT {col} as A_raw_col, adopted, user_id FROM read_parquet('{path}') WHERE adopted = false ORDER BY random() LIMIT {n_sample*2}"
     
     try:
         input_df = con_mat.query(query).to_df()
@@ -862,7 +956,11 @@ def matrix_plot_view():
         return None
         
     qs = float(run.get('q', '1.0'))
+    if pd.isna(qs): qs = 1.0
+    
     metric = run.get('exposure_metric', 'k')
+    if not metric or pd.isna(metric): metric = 'k'
+    
     kmax = 20 # Limit for heatmap width
     
     # Initialize grids
@@ -870,44 +968,112 @@ def matrix_plot_view():
     N_grid = np.zeros((V, kmax))
     M_grid = np.zeros((V, kmax))
     
-    import json
-    for i, row in enumerate(input_df.itertuples()):
-        A_raw = row.A_raw_col
-        if isinstance(A_raw, str):
-            try:
-                A = json.loads(A_raw)
-            except:
-                A = []
-        else:
-             A = A_raw
+    # Determine mode: OO vs Twitter
+    # OO has pre-computed M/N matrices
+    is_oo = run.get('source', '') == 'oo'
+    
+    if is_oo:
+        base_dir = Path(path).parent
+        m_path = base_dir / 'M.parquet'
+        n_path = base_dir / 'N.parquet'
         
-        # Calculate Input N_raw
-        if metric == 'k': n_raw = int(sum(A))
-        else: n_raw = int(len(A)) 
-        
-        # Binomial Spread
-        ks = np.arange(1, min(n_raw, kmax) + 1)
-        if len(ks) == 0: continue
-        
-        if qs >= 1.0:
-            # Deterministic
-            idx = min(n_raw, kmax) - 1
-            if idx >= 0:
-                if row.adopted: M_grid[i, idx] = 1.0
-                else: N_grid[i, idx] = 1.0
-        else:
-            # Probabilistic
-            probs = binom.pmf(ks, n_raw, qs)
-            idx = ks - 1
-            # Check bounds
-            mask = idx < kmax
-            idx = idx[mask]
-            probs = probs[mask]
+        # Fallback for flat style
+        if not m_path.exists():
+            m_path = Path(path.replace("_exposures.parquet", "_M.parquet"))
+            n_path = Path(path.replace("_exposures.parquet", "_N.parquet"))
             
-            if row.adopted:
-                M_grid[i, idx] += probs
+        if m_path.exists() and n_path.exists():
+            try:
+                m_df = pd.read_parquet(m_path)
+                n_df = pd.read_parquet(n_path)
+                
+                # Ensure index type match
+                target_ids = input_df['user_id'].astype(m_df.index.dtype)
+                
+                # Extract rows
+                # Handle missing IDs gracefully
+                valid_ids = target_ids[target_ids.isin(m_df.index)]
+                
+                # We need to map back to input_df order to align with 'adopted' status sort if needed
+                # Actually input_df order matters for the heatmap y-axis? 
+                # Heatmap y-axis is just "Sampled Users", order doesn't strictly matter but grouping by adoption does.
+                # The query output is grouped (first adopters, then non).
+                # So we should iterate input_df and fetch row from m_df/n_df
+                
+                for i, row in enumerate(input_df.itertuples()):
+                    uid = row.user_id
+                    # Type conversion if needed
+                    if isinstance(m_df.index[0], (int, np.integer)) and isinstance(uid, str):
+                        try: uid = int(uid)
+                        except: pass
+                    elif isinstance(m_df.index[0], str) and isinstance(uid, (int, np.integer)):
+                        uid = str(uid)
+                        
+                    if uid in m_df.index:
+                        # Get row values
+                        m_vals = m_df.loc[uid].values
+                        n_vals = n_df.loc[uid].values
+                        
+                        # Truncate/Pad to kmax
+                        # m_vals might be length 20, or different
+                        dim = len(m_vals)
+                        copy_len = min(dim, kmax)
+                        
+                        M_grid[i, :copy_len] = m_vals[:copy_len]
+                        N_grid[i, :copy_len] = n_vals[:copy_len]
+                        
+            except Exception as e:
+                print(f"Error loading OO matrices: {e}")
+                # Fallback to standard logic? No, OO standard logic is broken.
+                pass
+    else:
+        # Standard Logic (Twitter / Simulated Binomial)
+        import json
+        for i, row in enumerate(input_df.itertuples()):
+            A_raw = row.A_raw_col
+            if isinstance(A_raw, str):
+                try:
+                    A = json.loads(A_raw)
+                except:
+                    A = []
             else:
-                N_grid[i, idx] += probs
+                 A = A_raw
+            
+            # Calculate Input N_raw
+            # Use simple truncation for now, or sum if metric is k
+            if metric == 'k': 
+                # Handle float A (weighted)
+                val = sum(A)
+                if isinstance(val, (int, float)):
+                    n_raw = int(val)
+                else:
+                    n_raw = 0
+            else: 
+                n_raw = int(len(A)) 
+            
+            # Binomial Spread
+            ks = np.arange(1, min(n_raw, kmax) + 1)
+            if len(ks) == 0: continue
+            
+            if qs >= 1.0:
+                # Deterministic
+                idx = min(n_raw, kmax) - 1
+                if idx >= 0:
+                    if row.adopted: M_grid[i, idx] = 1.0
+                    else: N_grid[i, idx] = 1.0
+            else:
+                # Probabilistic
+                probs = binom.pmf(ks, n_raw, qs)
+                idx = ks - 1
+                # Check bounds
+                mask = idx < kmax
+                idx = idx[mask]
+                probs = probs[mask]
+                
+                if row.adopted:
+                    M_grid[i, idx] += probs
+                else:
+                    N_grid[i, idx] += probs
     
     # Plotting
     fig, axes = plt.subplots(1, 2, figsize=(10, 5), sharey=True)
@@ -932,7 +1098,7 @@ def matrix_plot_view():
 ```{python}
 @render.plot
 def model_bic_plot():
-    return create_model_bic_plot(model_comparison_data(), selected_run())
+    return create_model_comparison_plot(model_comparison_data(), selected_run())
 ```
 
 # Hypothesis Testing
@@ -952,5 +1118,5 @@ def hypothesis_testing_table():
 ```{python}
 @render.plot
 def model_bic_plot_ht():
-    return create_model_bic_plot(model_comparison_data(), selected_run())
+    return create_model_comparison_plot(model_comparison_data(), selected_run())
 ```

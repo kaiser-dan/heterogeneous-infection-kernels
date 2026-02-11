@@ -352,16 +352,18 @@ def compute_exposure_counts(
 def generate_oo_exposure_parquet(
     histories_path: Path,
     sim_id: int,
-    output_path: Path,
+    output_dir: Path,
     freq: str = "30min",
     kmax: int = 10,
     backbone_method: str = None,
     backbone_threshold: float = None
 ):
     """
-    Process O.O. data for a given simulation and save raw exposure data to Parquet.
-    Extracts both contacts and infections from the unified histories file.
+    Process O.O. data for a given simulation and save results to a standardized directory.
+    Aligns with the Twitter pipeline structure.
     """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
     all_events = pd.read_csv(histories_path, low_memory=False)
     
     # Filter for this simulation
@@ -377,29 +379,12 @@ def generate_oo_exposure_parquet(
     if infections.empty:
         print(f"Warning: No infections found for sim {sim_id}. Creating empty placeholder files.")
         # Create empty DataFrames for all expected outputs
-        empty_exposures = pd.DataFrame()
-        empty_edges = pd.DataFrame(columns=['source', 'target', 'weight'])
-        empty_nodes = pd.DataFrame(columns=['user_id', 'sim_id', 'infection_time', 'adopted'])
-        empty_m = pd.DataFrame()
-        empty_n = pd.DataFrame()
-        
-        # Save empty files
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        empty_exposures.to_parquet(output_path, engine='pyarrow', index=False)
-        
-        edges_path = output_path.parent / output_path.name.replace("_exposures.parquet", "_edges.parquet")
-        empty_edges.to_parquet(edges_path, engine='pyarrow', index=False)
-        
-        nodes_path = output_path.parent / output_path.name.replace("_exposures.parquet", "_nodes.parquet")
-        empty_nodes.to_parquet(nodes_path, engine='pyarrow', index=False)
-        
-        m_path = output_path.parent / output_path.name.replace("_exposures.parquet", "_M.parquet")
-        empty_m.to_parquet(m_path, engine='pyarrow', index=False)
-        
-        n_path = output_path.parent / output_path.name.replace("_exposures.parquet", "_N.parquet")
-        empty_n.to_parquet(n_path, engine='pyarrow', index=False)
-        
-        print(f"  Created empty placeholder files for sim {sim_id}")
+        pd.DataFrame().to_parquet(output_dir / "exposures.parquet", index=False)
+        pd.DataFrame(columns=['src', 'dst', 'sim_id', 'weight']).to_parquet(output_dir / "edges.parquet", index=False)
+        pd.DataFrame(columns=['user_id', 'sim_id', 'infection_time', 'adopted']).to_parquet(output_dir / "nodes.parquet", index=False)
+        pd.DataFrame().to_parquet(output_dir / "M.parquet", index=True)
+        pd.DataFrame().to_parquet(output_dir / "N.parquet", index=True)
+        print(f"  Created empty placeholder files for sim {sim_id} in {output_dir}")
         return
 
     adj = contact_adjacency(histories, sim_id)
@@ -415,8 +400,8 @@ def generate_oo_exposure_parquet(
     states = states.reindex(columns=adj.index, fill_value=0)
     
     nodes = list(adj.index)
-    binary_adj = (adj.values > 0).astype(int)
     state_values = states.values.astype(int)
+    weighted_adj = adj.values # (V, V)
     
     rows = []
     for i, node in enumerate(nodes):
@@ -429,28 +414,28 @@ def generate_oo_exposure_parquet(
         else:
             peer_states = state_values[-1, :]
             
-        exposers = (peer_states * binary_adj[:, i]) > 0
-        num_exposures = exposers.sum()
-        
-        a_list = [1] * int(num_exposures)
+        incoming_weights = weighted_adj[:, i] # (V,) weights from all j to me i
+        exposure_weights = peer_states * incoming_weights
+        a_list = exposure_weights[exposure_weights > 0].tolist()
+        num_exposures = sum(a_list)
         
         rows.append({
             'user_id': str(node),
             'sim_id': sim_id,
             'adopted': adopted,
-            'k': num_exposures,
-            'kappa': num_exposures,
-            'A': a_list
+            'k': num_exposures, 
+            'kappa': len(a_list), 
+            'A': a_list 
         })
         
     df = pd.DataFrame(rows)
-    df.to_parquet(output_path, engine='pyarrow', index=False)
+    df.to_parquet(output_dir / "exposures.parquet", engine='pyarrow', index=False)
 
-    # Export Edges - use backboned adjacency matrix, not raw histories
+    # Export Edges
     edges_rows = []
     for i, src in enumerate(adj.index):
         for j, dst in enumerate(adj.columns):
-            if i <= j:  # Upper triangle for undirected network
+            if i <= j:  
                 weight = adj.iloc[i, j]
                 if weight > 0:
                     edges_rows.append({
@@ -459,9 +444,7 @@ def generate_oo_exposure_parquet(
                         'sim_id': sim_id,
                         'weight': weight
                     })
-    edges_df = pd.DataFrame(edges_rows)
-    edges_path = output_path.parent / output_path.name.replace("_exposures.parquet", "_edges.parquet")
-    edges_df.to_parquet(edges_path, engine='pyarrow', index=False)
+    pd.DataFrame(edges_rows).to_parquet(output_dir / "edges.parquet", engine='pyarrow', index=False)
 
     # Export Nodes (Infection Times)
     inf_map = infections.set_index(infections["user_id"].astype(str))["time"].to_dict()
@@ -474,19 +457,13 @@ def generate_oo_exposure_parquet(
             'infection_time': inf_map.get(node_str, np.nan),
             'adopted': node_str in inf_map
         })
-    nodes_df = pd.DataFrame(node_rows)
-    nodes_path = output_path.parent / output_path.name.replace("_exposures.parquet", "_nodes.parquet")
-    nodes_df.to_parquet(nodes_path, engine='pyarrow', index=False)
+    pd.DataFrame(node_rows).to_parquet(output_dir / "nodes.parquet", engine='pyarrow', index=False)
 
     # 4. Compute and Save M/N Matrices (Fixed q=1.0)
     m_df, n_df = compute_exposure_counts(infections, sim_id, adj, freq=freq, kmax=kmax)
-    
-    m_path = output_path.parent / output_path.name.replace("_exposures.parquet", "_M.parquet")
-    n_path = output_path.parent / output_path.name.replace("_exposures.parquet", "_N.parquet")
-    
-    m_df.to_parquet(m_path, engine='pyarrow', index=True)
-    n_df.to_parquet(n_path, engine='pyarrow', index=True)
-    print(f"  Saved M/N matrices to {output_path.parent}")
+    m_df.to_parquet(output_dir / "M.parquet", engine='pyarrow', index=True)
+    n_df.to_parquet(output_dir / "N.parquet", engine='pyarrow', index=True)
+    print(f"  Saved simulation results to {output_dir}")
 
 
 if __name__ == "__main__":
@@ -504,7 +481,7 @@ if __name__ == "__main__":
     generate_oo_exposure_parquet(
         histories_path=Path(args.histories),
         sim_id=args.sim_id,
-        output_path=Path(args.output),
+        output_dir=Path(args.output),
         kmax=args.kmax,
         backbone_method=args.backbone_method,
         backbone_threshold=args.backbone_threshold
