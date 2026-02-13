@@ -27,10 +27,33 @@ compile:
     uv run bin/compile_models.py
 
 # ----- Research -----
+# Generate all processed data via Snakemake
+[group('research')]
+data:
+    uv run snakemake -c1
+
+# Totally clear and regenerate all processed data
+[group('research')]
+data-total:
+    rm -rf data/processed
+    uv run snakemake -c1
+
 # Render all Quarto documents
 [group('research')]
 renderall:
     find ./ -type f -name "*.qmd" | xargs -I{} quarto render {}
+
+# Run a research sweep defined in a YAML config
+[group('research')]
+sweep config profile="workflow/profiles/local":
+    uv run snakemake inference --configfile {{config}} --profile {{profile}}
+
+
+# ----- Sync -----
+# Sync results from HPC to local
+[group('sync')]
+sync:
+    rsync -avP vacc:/gpfs1/home/w/t/wthomps3/CSDS/side_projects/heterogeneous-infection-kernels/results/ results/
 
 
 # ----- Cleanup -----

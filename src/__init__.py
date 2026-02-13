@@ -1,9 +1,19 @@
-from . import dynamics
-from . import model
-from . import networks
+try:
+    from . import dynamics
+    from .dynamics import *
+except ImportError:
+    pass
 
-from .dynamics import *
-from .model import *
-from .networks import *
+try:
+    from . import model
+    from .model import *
+except ImportError:
+    pass
+
+try:
+    from . import networks
+    from .networks import *
+except ImportError:
+    pass
 
 from . import _logger  # do not bring logger into scope automatically

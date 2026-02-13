@@ -1,0 +1,33 @@
+# ============================================================================
+# Research Sweep - Twitter Full Data
+# ============================================================================
+name: "research_sweep_twitter"
+
+data_config: "configs/default_data_prep.yaml"
+source: "twitter"
+wandb_enabled: false
+
+model:
+  stan_file: "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  K: 1
+  concentration: 1.0
+  deviation_scale: 1.0
+  logit_p_location: "empirical"
+  logit_p_scale: 2.0
+  V_max_local: 500  # Subsample for speed during sweep
+
+sweep:
+  # Dataset variants
+  q: [1.0, 0.2]
+  exposure_metric: ["k", "kappa"]
+  
+  # Model variants
+  K: [1, 2]
+  stan_file: [
+    "src/models/non_parametric_non_monotonic.stan",
+    "src/models/model_simple_contagion.stan",
+    "src/models/model_complex_contagion.stan"
+  ]
+
+# Note: Simple and Complex models will ignore K and other NP-specific parameters.
+# The run_inference.py script handles parameter extraction gracefully.

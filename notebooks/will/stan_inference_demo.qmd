@@ -1,0 +1,500 @@
+---
+title: "Stan Inference Demo"
+format: html
+
+---
+
+This notebook demonstrates how to load Operation Outbreak simulation data (specifically Sim 165) from the database and run a Stan inference model.
+
+## Setup and Imports
+
+```{python}
+#| label: setup
+
+import sys
+import os
+from pathlib import Path
+
+# Add project root to sys.path
+# The notebook is in notebooks/will, so the project root is two levels up.
+project_root = Path.cwd().parent.parent
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
+
+import pandas as pd
+import numpy as np
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+import cmdstanpy as csp
+import seaborn as sns
+from scipy.special import logit, expit
+import matplotlib.pyplot as plt
+import networkx as nx
+
+
+from src.data_processing.ORM import ContagionMetadata
+from src.data_processing.database_utils import decompress_array, get_timeseries, get_adjacency_matrix
+
+def cap_exposure_bins(M, N, max_k):
+    """
+    Collapse exposure matrices to `max_k` bins by pooling any counts above the cap
+    into the final bin (>= max_k).
+    """
+    if max_k is None:
+        return M, N
+    if max_k < 1:
+        raise ValueError("max_k must be >= 1")
+
+    def _cap(arr):
+        if arr is None:
+            return None
+        arr = np.asarray(arr)
+        if arr.ndim != 2:
+            raise ValueError("Exposure arrays must be 2D")
+        # Already within the requested cap
+        if arr.shape[1] <= max_k:
+            return arr[:, :max_k]
+        capped = np.zeros((arr.shape[0], max_k), dtype=arr.dtype)
+        if max_k > 1:
+            capped[:, :max_k - 1] = arr[:, :max_k - 1]
+        capped[:, -1] = arr[:, max_k - 1:].sum(axis=1)
+        return capped
+
+    return _cap(M), _cap(N)
+
+# Database connection
+db_path = project_root / "data" / "contagion.db"
+engine = create_engine(f"sqlite:///{db_path}")
+Session = sessionmaker(bind=engine)
+session = Session()
+```
+
+## Load Data (Sim 165)
+
+We fetch the metadata for Simulation 165 and decompress the $M$ (success) and $N$ (failure) exposure matrices.
+
+```{python}
+#| label: load_data
+target_run_id = "oo_sim_165_duration"
+run_metadata = session.query(ContagionMetadata).filter_by(run_id=target_run_id).first()
+
+M = decompress_array(run_metadata.exposure_success_blob).astype(int)
+N = decompress_array(run_metadata.exposure_failure_blob).astype(int)
+
+# Cap high-k bins to reduce sparsity
+kmax_cap = 20
+M, N = cap_exposure_bins(M, N, max_k=kmax_cap)
+
+print(f"Loaded Run: {run_metadata.run_id}")
+num_nodes, kmax = M.shape
+data = {
+    "V": num_nodes,
+    "kmax": kmax,
+    "K": 2,     # Number of modes
+    "M": M,
+    "N": N,
+    "DEVIATION_SCALE": [1.0, 1.0], # Hyperparameter
+    "REPLICATES": 1000         # Number of replicates
+    # "AVERAGE_SCALE": 2.0   # Unused in mixture model
+}
+```
+
+
+## Stan Model Sampling
+
+```{python}
+#| label: sampling.load_model
+stan_file_path = project_root / "src" / "models" / "model_JGY-mod.stan"
+model = csp.CmdStanModel(stan_file=str(stan_file_path))
+```
+
+```{python}
+#| label: sampling.sample
+#| echo: true
+
+# Sample from model
+print("Starting sampling...")
+fit = model.sample(
+    data=data,
+    seed=37,
+    chains=1, 
+    iter_sampling=100,
+    iter_warmup=20,
+    show_progress=True, 
+    show_console=True
+)
+
+print("Sampling complete.")
+print(fit.summary())
+```
+
+```{{python}}
+#| label: fig-mode-posterior-fit
+#| fig-cap: "Sampled posterior distribution for kernel modes compared to ground truth."
+
+alpha_k_rep = fit.stan_variable('alpha_k_rep')
+alpha_k = fit.stan_variable('alpha_k')
+
+records = []
+for sample_idx in range(100): # Changed 'sample' to 'sample_idx' to avoid conflict with `fit.stan_variable('sample')`
+    for _mode in [0, 1]:
+        for nu in range(28):
+            records.append({
+                "sample": sample_idx,
+                "k": _mode,
+                "nu": nu,
+                "val": alpha_k[sample_idx, _mode, nu],
+                "kind": 'inferred'
+            })
+            for replicate in range(1000):
+                records.append({
+                    "sample": sample_idx,
+                    "k": _mode,
+                    "nu": nu,
+                    "val": alpha_k_rep[sample_idx, _mode, nu, replicate],
+                    "kind": 'replicate'
+                })
+
+df = pd.DataFrame.from_records(records)
+df_rep = df.query("kind == 'replicate'")
+df_inf = df.query("kind == 'inferred'")
+```
+
+```{{python}}
+#| label: fig-mode-posterior-fit-plot
+#| fig-cap: "Inferred Kernel Functions (MAP and 95% CI) vs. Ground Truth."
+
+# alpha_k_samples has shape (num_samples, K, kmax)
+alpha_k_samples = fit.stan_variable('alpha_k') 
+
+# Calculate MAP estimate (mean) and 95% credible intervals for alpha_k
+alpha_k_mean = np.mean(alpha_k_samples, axis=0) # shape (K, kmax)
+alpha_k_lower = np.percentile(alpha_k_samples, 2.5, axis=0) # shape (K, kmax)
+alpha_k_upper = np.percentile(alpha_k_samples, 97.5, axis=0) # shape (K, kmax)
+
+# Transform to 'c' scale using expit
+c_k_mean = expit(alpha_k_mean)
+c_k_lower = expit(alpha_k_lower)
+c_k_upper = expit(alpha_k_upper)
+
+# Plotting
+fig, axs = plt.subplots(1, data['K'], figsize=(10, 5), sharex=True, sharey=True)
+if data['K'] == 1: # Handle single mode case for axs indexing
+    axs = [axs]
+
+if 'c1' not in locals():
+    c1 = np.zeros(kmax)
+if 'c2' not in locals():
+    c2 = np.zeros(kmax)
+
+for mode_idx in range(data['K']):
+    ax = axs[mode_idx]
+    
+    # Plot MAP estimate
+    ax.plot(range(kmax), c_k_mean[mode_idx, :], label=f'Inferred Kernel {mode_idx+1} (MAP)', color='blue')
+    
+    # Plot credible interval
+    ax.fill_between(range(kmax), c_k_lower[mode_idx, :], c_k_upper[mode_idx, :], 
+                    color='blue', alpha=0.2, label=f'95% CI')
+    
+    # Plot ground truth c1 and c2
+    ax.plot(range(kmax), c1[:kmax], label='True Kernel 1', color='gray', linestyle='dashed')
+    ax.plot(range(kmax), c2[:kmax], label='True Kernel 2', color='red', linestyle='dashed') # Assuming c2 is also relevant
+
+    ax.set_title(f"Mode {mode_idx+1}")
+    ax.set_xlabel(r"$\nu$")
+    ax.legend()
+
+axs[0].set_ylabel(r"$c(\nu)$")
+plt.suptitle("Inferred Kernel Functions (MAP and 95% CI) vs. Ground Truth")
+plt.tight_layout(rect=[0, 0.03, 1, 0.95]) # Adjust layout to prevent suptitle overlap
+plt.show()
+```
+
+## Infection Time Series Visualization
+
+```{python}
+#| label: fig-timeseries
+#| fig-cap: "Infection time series for selected run with correct datetime axis."
+ts_df = get_timeseries(session, target_run_id)
+timesteps = np.arange(len(ts_df))
+
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+
+# Heatmap by discrete timestep
+extent = [0, len(ts_df), 0, ts_df.shape[1]]
+im = ax1.imshow(
+    ts_df.T,
+    aspect="auto",
+    cmap="Reds",
+    interpolation="nearest",
+    origin="lower",
+    extent=extent,
+)
+ax1.set_ylabel("Node")
+ax1.set_title(f"Infection time series (1 = infected) for {target_run_id}")
+plt.colorbar(im, ax=ax1, label="Infection state")
+
+# Aggregate infections over time (discrete steps)
+ax2.plot(timesteps, ts_df.sum(axis=1), color="black")
+ax2.set_ylabel("# infected")
+ax2.set_xlabel("Timestep")
+ax2.set_title("Total infected over time")
+
+plt.tight_layout()
+plt.show()
+```
+
+## Simulated Dynamics Sanity Check
+
+Generate synthetic M/N from a simulated contagion on the same network and run the Stan inference to verify the pipeline.
+
+```{python}
+#| label: simulate-dynamics-and-fit
+#| fig-cap: "Simulated contagion (heatmap + cumulative + network) and quick Stan fit."
+from src.dynamics import heterogeneous_contagion_process, get_activations
+
+# Use the same run_id's network
+target_run_id = "oo_sim_165_duration"
+adj_df = get_adjacency_matrix(session, target_run_id)
+adj = adj_df.to_numpy(dtype=int)
+N_nodes = adj.shape[0]
+
+# Simulation params
+gamma = 0.2
+dt = 1.0
+T_steps = 40
+
+# Choose kmax as max binary degree (ignore edge weights) and cap to keep arrays reasonable
+kmax_sim = max(1, int((adj > 0).sum(axis=1).max()))
+kmax_cap = 50
+kmax_sim = min(kmax_sim, kmax_cap)
+
+# Build a simple increasing contagion kernel per node (c[i, nu] for nu>=1)
+nu_grid = np.arange(1, kmax_sim + 1, dtype=float)
+c_kernel = np.tile(np.clip(nu_grid / (kmax_sim + 1), 0.05, 0.9), (N_nodes, 1))
+
+# Initial infected (few random nodes)
+rng = np.random.default_rng(42)
+x0 = np.zeros(N_nodes, dtype=int)
+x0[rng.choice(N_nodes, size=min(3, N_nodes), replace=False)] = 1
+
+# Simulate states over time (T x N)
+states = heterogeneous_contagion_process(adj, gamma, c_kernel, x0, tmin=0, tmax=T_steps, dt=dt, random_seed=123)
+
+# Compute M and N from simulated states
+M_sim, N_sim = get_activations(states.T, adj, kmax_sim)
+# Cap high-k bins
+kmax_sim_cap = 20
+M_sim, N_sim = cap_exposure_bins(M_sim, N_sim, max_k=kmax_sim_cap)
+sim_k_axis = np.arange(M_sim.shape[1])
+
+# Quick visualization of the simulated run with M/N heatmaps
+timesteps_sim = np.arange(states.shape[0])
+fig = plt.figure(figsize=(14, 10))
+gs = fig.add_gridspec(2, 3, width_ratios=[2, 1, 1], height_ratios=[1, 1], wspace=0.3, hspace=0.35)
+ax_ts = fig.add_subplot(gs[0, 0])
+ax_cum = fig.add_subplot(gs[0, 1])
+ax_M = fig.add_subplot(gs[1, 0])
+ax_N = fig.add_subplot(gs[1, 1])
+ax_net = fig.add_subplot(gs[:, 2])
+
+# States heatmap
+im = ax_ts.imshow(states, aspect="auto", cmap="Reds", interpolation="nearest", origin="lower")
+ax_ts.set_ylabel("Timestep")
+ax_ts.set_title("Simulated infection states")
+plt.colorbar(im, ax=ax_ts, label="Infection state")
+
+# Cumulative infections
+ax_cum.plot(timesteps_sim, states.sum(axis=1), color="black")
+ax_cum.set_ylabel("# infected")
+ax_cum.set_xlabel("Timestep")
+ax_cum.set_title("Total infected over time (simulated)")
+
+# M heatmap
+if M_sim is not None:
+    im_M = ax_M.imshow(M_sim, aspect="auto", cmap="Blues", interpolation="nearest", origin="upper")
+    ax_M.set_title("Exposure successes (M)")
+    ax_M.set_ylabel("Node")
+    ax_M.set_xlabel("Infected neighbors (k)")
+    plt.colorbar(im_M, ax=ax_M, label="count")
+else:
+    ax_M.text(0.5, 0.5, "M not available", ha="center", va="center")
+    ax_M.axis("off")
+
+# N heatmap
+if N_sim is not None:
+    im_N = ax_N.imshow(N_sim, aspect="auto", cmap="Greens", interpolation="nearest", origin="upper")
+    ax_N.set_title("Exposure failures (N)")
+    ax_N.set_ylabel("Node")
+    ax_N.set_xlabel("Infected neighbors (k)")
+    plt.colorbar(im_N, ax=ax_N, label="count")
+else:
+    ax_N.text(0.5, 0.5, "N not available", ha="center", va="center")
+    ax_N.axis("off")
+
+# Network view
+G_sim = nx.from_pandas_adjacency(adj_df, create_using=nx.DiGraph() if run_metadata.is_directed else nx.Graph())
+pos_sim = nx.spring_layout(G_sim, seed=1, k=0.2)
+infected_any_sim = (states.max(axis=0) > 0)
+node_colors_sim = ["#E74C3C" if infected_any_sim[i] else "#D3D3D3" for i in range(N_nodes)]
+node_sizes_sim = 8 + 2 * np.array([G_sim.degree(n) for n in G_sim.nodes()])
+nx.draw_networkx_edges(G_sim, pos_sim, ax=ax_net, edge_color="#BDC3C7", alpha=0.4, width=0.8)
+nx.draw_networkx_nodes(G_sim, pos_sim, ax=ax_net, node_color=node_colors_sim, node_size=node_sizes_sim, alpha=0.9)
+ax_net.set_title("Network state (red = ever infected)")
+ax_net.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+# Build data dict and run a short Stan fit
+data_sim = {
+    "V": M_sim.shape[0],
+    "kmax": M_sim.shape[1],
+    "K": 2,
+    "M": M_sim,
+    "N": N_sim,
+    "DEVIATION_SCALE": [1.0, 1.0],
+    "REPLICATES": 100,
+}
+
+stan_file_path = project_root / "src" / "models" / "model_JGY-mod.stan"
+model_sim = csp.CmdStanModel(stan_file=str(stan_file_path))
+fit_sim = model_sim.sample(
+    data=data_sim,
+    seed=123,
+    chains=1,
+    iter_sampling=50,
+    iter_warmup=20,
+    show_progress=False,
+    show_console=False,
+)
+print(fit_sim.summary())
+```
+
+```{python}
+#| label: fig-sim-kernels
+#| fig-cap: "Inferred kernel functions for simulated data (MAP and 95% CI)."
+k_axis = np.arange(fit_sim.stan_variable("alpha_k").shape[2])
+alpha_k_samples_sim = fit_sim.stan_variable("alpha_k")  # shape (samples, K, kmax)
+alpha_k_mean = np.mean(alpha_k_samples_sim, axis=0)
+alpha_k_lower = np.percentile(alpha_k_samples_sim, 2.5, axis=0)
+alpha_k_upper = np.percentile(alpha_k_samples_sim, 97.5, axis=0)
+
+c_k_mean = expit(alpha_k_mean)
+c_k_lower = expit(alpha_k_lower)
+c_k_upper = expit(alpha_k_upper)
+
+K_sim = alpha_k_samples_sim.shape[1]
+fig, axs = plt.subplots(1, K_sim, figsize=(12, 4), sharex=True, sharey=True)
+if K_sim == 1:
+    axs = [axs]
+
+for mode_idx in range(K_sim):
+    ax = axs[mode_idx]
+    ax.plot(k_axis, c_k_mean[mode_idx, :], label="Inferred (MAP)", color="blue")
+    ax.fill_between(k_axis, c_k_lower[mode_idx, :], c_k_upper[mode_idx, :], color="blue", alpha=0.2, label="95% CI")
+    ax.set_title(f"Mode {mode_idx+1}")
+    ax.set_xlabel(r"$\nu$")
+    ax.legend()
+
+axs[0].set_ylabel(r"$c(\nu)$")
+plt.suptitle("Inferred Kernels on Simulated Data")
+plt.tight_layout(rect=[0, 0, 1, 0.92])
+plt.show()
+```
+## Static Infection Snapshot
+
+```{python}
+#| label: fig-timeseries-static
+#| fig-cap: "Infection time series, cumulative infections, exposure M/N, and network state."
+# Ensure target_run_id is defined if this chunk is run standalone
+target_run_id = "oo_sim_165_duration"
+
+# Time series and adjacency
+ts_df = get_timeseries(session, target_run_id)
+adj_df = get_adjacency_matrix(session, target_run_id)
+meta_static = session.query(ContagionMetadata).filter_by(run_id=target_run_id).first()
+
+# Exposure matrices (if available)
+M_plot = N_plot = None
+if meta_static and meta_static.exposure_success_blob is not None:
+    M_plot = decompress_array(meta_static.exposure_success_blob)
+    if meta_static.exposure_shape:
+        M_plot = M_plot.reshape(meta_static.exposure_shape)
+if meta_static and meta_static.exposure_failure_blob is not None:
+    N_plot = decompress_array(meta_static.exposure_failure_blob)
+    if meta_static.exposure_shape:
+        N_plot = N_plot.reshape(meta_static.exposure_shape)
+
+# Graph layout
+G = nx.from_pandas_adjacency(adj_df, create_using=nx.DiGraph() if run_metadata.is_directed else nx.Graph())
+pos = nx.spring_layout(G, seed=0, k=0.2)
+node_list = list(G.nodes)
+node_degree = np.array([G.degree(n) for n in node_list])
+
+# Ever infected across all timesteps
+infected_any = (ts_df.max(axis=0) > 0)
+node_colors = ["#E74C3C" if infected_any.get(n, False) else "#D3D3D3" for n in node_list]
+node_sizes = 8 + 2 * node_degree
+
+# Layout: time series, cumulative, M, N, and network
+fig = plt.figure(figsize=(14, 10))
+gs = fig.add_gridspec(2, 3, width_ratios=[2, 1, 1], height_ratios=[1, 1], wspace=0.3, hspace=0.35)
+ax_ts = fig.add_subplot(gs[0, 0])
+ax_cum = fig.add_subplot(gs[0, 1])
+ax_M = fig.add_subplot(gs[1, 0])
+ax_N = fig.add_subplot(gs[1, 1])
+ax_net = fig.add_subplot(gs[:, 2])
+
+# Heatmap of full time series (discrete timesteps on x)
+extent = [0, len(ts_df), 0, ts_df.shape[1]]
+im = ax_ts.imshow(
+    ts_df.to_numpy().T,
+    aspect="auto",
+    cmap="Reds",
+    interpolation="nearest",
+    origin="lower",
+    extent=extent,
+)
+ax_ts.set_ylabel("Node")
+ax_ts.set_title(f"Infection time series (1 = infected) for {target_run_id}")
+plt.colorbar(im, ax=ax_ts, label="Infection state")
+
+# Cumulative infections over time
+ax_cum.plot(np.arange(len(ts_df)), ts_df.sum(axis=1), color="black")
+ax_cum.set_ylabel("# infected")
+ax_cum.set_xlabel("Timestep")
+ax_cum.set_title("Total infected over time")
+
+# Exposure M heatmap (successful infections)
+if M_plot is not None:
+    im_M = ax_M.imshow(M_plot, aspect="auto", cmap="Blues", interpolation="nearest", origin="upper")
+    ax_M.set_title("Exposure successes (M)")
+    ax_M.set_ylabel("Node")
+    ax_M.set_xlabel("Infected neighbors (k)")
+    plt.colorbar(im_M, ax=ax_M, label="count")
+else:
+    ax_M.text(0.5, 0.5, "M not available", ha="center", va="center")
+    ax_M.axis("off")
+
+# Exposure N heatmap (failed infections)
+if N_plot is not None:
+    im_N = ax_N.imshow(N_plot, aspect="auto", cmap="Greens", interpolation="nearest", origin="upper")
+    ax_N.set_title("Exposure failures (N)")
+    ax_N.set_ylabel("Node")
+    ax_N.set_xlabel("Infected neighbors (k)")
+    plt.colorbar(im_N, ax=ax_N, label="count")
+else:
+    ax_N.text(0.5, 0.5, "N not available", ha="center", va="center")
+    ax_N.axis("off")
+
+# Network view
+nx.draw_networkx_edges(G, pos, ax=ax_net, edge_color="#BDC3C7", alpha=0.4, width=0.8)
+nx.draw_networkx_nodes(G, pos, ax=ax_net, node_color=node_colors, node_size=node_sizes, alpha=0.9)
+ax_net.set_title("Network state (red = ever infected)")
+ax_net.axis("off")
+
+plt.tight_layout()
+plt.show()
+```

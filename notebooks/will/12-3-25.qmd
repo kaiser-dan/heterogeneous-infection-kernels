@@ -1,0 +1,92 @@
+---
+title: "Stan Inference Demo"
+format: html
+---
+
+This notebook demonstrates how to load Operation Outbreak simulation data (specifically Sim 165) from the database and run a Stan inference model.
+
+## Setup and Imports
+
+```{python}
+#| label: setup
+
+import sys
+import os
+from pathlib import Path
+import pandas as pd
+import numpy as np
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+import cmdstanpy as csp
+import seaborn as sns
+from scipy.special import logit, expit
+import matplotlib.pyplot as plt
+import networkx as nx
+
+
+from src.data_processing.ORM import ContagionMetadata
+from src.data_processing.database_utils import decompress_array, get_timeseries, get_adjacency_matrix
+
+def cap_exposure_bins(M, N, max_k):
+    """
+    Collapse exposure matrices to `max_k` bins by pooling any counts above the cap
+    into the final bin (>= max_k).
+    """
+    if max_k is None:
+        return M, N
+    if max_k < 1:
+        raise ValueError("max_k must be >= 1")
+
+    def _cap(arr):
+        if arr is None:
+            return None
+        arr = np.asarray(arr)
+        if arr.ndim != 2:
+            raise ValueError("Exposure arrays must be 2D")
+        # Already within the requested cap
+        if arr.shape[1] <= max_k:
+            return arr[:, :max_k]
+        capped = np.zeros((arr.shape[0], max_k), dtype=arr.dtype)
+        if max_k > 1:
+            capped[:, :max_k - 1] = arr[:, :max_k - 1]
+        capped[:, -1] = arr[:, max_k - 1:].sum(axis=1)
+        return capped
+
+    return _cap(M), _cap(N)
+
+# Database connection
+db_path = Path("data") / "contagion.db"
+engine = create_engine(f"sqlite:///{db_path}")
+Session = sessionmaker(bind=engine)
+session = Session()
+```
+
+## Load Data (Sim 165)
+
+We fetch the metadata for Simulation 165 and decompress the $M$ (success) and $N$ (failure) exposure matrices.
+
+```{python}
+#| label: load_data
+target_run_id = "oo_sim_165_duration"
+run_metadata = session.query(ContagionMetadata).filter_by(run_id=target_run_id).first()
+
+M = decompress_array(run_metadata.exposure_success_blob).astype(int)
+N = decompress_array(run_metadata.exposure_failure_blob).astype(int)
+
+# Cap high-k bins to reduce sparsity
+kmax_cap = 20
+M, N = cap_exposure_bins(M, N, max_k=kmax_cap)
+
+print(f"Loaded Run: {run_metadata.run_id}")
+num_nodes, kmax = M.shape
+data = {
+    "V": num_nodes,
+    "kmax": kmax,
+    "K": 2,     # Number of modes
+    "M": M,
+    "N": N,
+    "DEVIATION_SCALE": [1.0, 1.0], # Hyperparameter
+    "REPLICATES": 1000         # Number of replicates
+    # "AVERAGE_SCALE": 2.0   # Unused in mixture model
+}
+```

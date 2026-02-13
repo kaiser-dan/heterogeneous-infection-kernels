@@ -1,17 +1,32 @@
-# Python-generated files
+
+# Data
+data/
+!data/.gitkeep
+# Results
+results/
+_site/
+.quarto/
+.snakemake/
 __pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-.ipynb_checkpoints
+*.pyc
 
-# Virtual environments
-.venv
+# Local Debug Scripts
+debug_*.py
+inspect_parquet.py
 
-# Compiled Stan models (machine dependent)
-build/
+# Editors
+.vscode/
+.DS_Store
 
-# Pytest
-.pytest_cache
+# Environments
+.venv/
+.gemini/
+
+# Stan Build Artifacts
+src/models/*
+!src/models/*.stan
+!src/models/*.py
+!src/models/.gitkeep
+*.hpp
+*.o
+*.d
