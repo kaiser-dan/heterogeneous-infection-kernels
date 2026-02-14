@@ -1,0 +1,376 @@
+---
+title: "Full Twitter Inference Results & Comparison"
+format: html
+---
+
+## 1. Setup
+
+```{python}
+import sys
+from pathlib import Path
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Add project root to path
+def get_project_root():
+    import os
+    current = Path(os.getcwd()).resolve()
+    for parent in [current] + list(current.parents):
+        if (parent / "src").exists():
+            return parent
+    return current
+
+ROOT = get_project_root()
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.data_processing.utils import load_draws_parquet
+import src.fig_styles as fs
+fs.set_publication_style(fs.PALETTE_CUSTOM)
+
+RESULTS_DIR = ROOT / "results/twitter_full"
+OO_RESULTS_DIR = ROOT / "results/oo_sim_165"
+```
+
+## 2. Population Analysis (Sparsity Check)
+
+Before inspecting the kernels, we verify the scale of the dataset.
+
+```{python}
+def check_sparsity(q=1.0):
+    k_path = ROOT / f"results/author_models/simple_k_q{q}_results.npz"
+    if k_path.exists():
+        data = np.load(k_path)
+        m = data['m']
+        n = data['n']
+        v_total = np.sum(m) + np.sum(n)
+        adopters = np.sum(m)
+        percent = (adopters / v_total) * 100
+        print(f"Dataset Scale (q={q}):")
+        print(f"  Total Exposures (V): {int(v_total):,}")
+        print(f"  Total Adoptions: {int(adopters):,}")
+        print(f"  Percent Adopted: {percent:.4f}%")
+        
+check_sparsity(q=1.0)
+```
+
+## 3. Inferred Kernels (Twitter Full)
+
+We plot the kernels for all 4 models: (Monotonic/Non-Monotonic) x (K=1, 2).
+
+```{python}
+#here 
+#
+def plot_twitter_kernels(results_dir, model_name, title):
+    draws_dir = results_dir / f"{model_name}_draws"
+    if not draws_dir.exists():
+        print(f"Results not found for {model_name}")
+        return
+        
+    try:
+        draws = load_draws_parquet(draws_dir)
+        mu = draws['mu'] # [samples, K, kmax]
+        
+        K = mu.shape[1]
+        kmax = mu.shape[2]
+        
+        fig, axes = plt.subplots(1, K, figsize=(fs.WIDTH_DOUBLE, fs.WIDTH_DOUBLE * 0.35), sharey=True)
+        if K == 1: axes = [axes]
+        
+        x = np.arange(1, kmax + 1)
+        
+        for k in range(K):
+            mean = mu[:, k, :].mean(axis=0)
+            lower = np.percentile(mu[:, k, :], 2.5, axis=0)
+            upper = np.percentile(mu[:, k, :], 97.5, axis=0)
+            
+            axes[k].plot(x, mean, marker='o', markersize=3, label='Mean', color='C0')
+            axes[k].fill_between(x, lower, upper, alpha=0.3, color='C0', label='95% CI')
+            axes[k].set_title(f"Component {k+1}")
+            axes[k].set_xlabel("Exposures (k)")
+            axes[k].grid(True, alpha=0.3)
+            
+        axes[0].set_ylabel("Infection Prob")
+        plt.suptitle(f"Twitter Full: {title}")
+        plt.tight_layout()
+        plt.show()
+    except Exception as e:
+        print(f"Error plotting {model_name}: {e}")
+
+# Note: These will only show up as they finish
+plot_twitter_kernels(RESULTS_DIR, "monotonic_K1", "Monotonic K=1")
+plot_twitter_kernels(RESULTS_DIR, "non_monotonic_K1", "Non-Monotonic K=1")
+plot_twitter_kernels(RESULTS_DIR, "monotonic_K2", "Monotonic K=2")
+plot_twitter_kernels(RESULTS_DIR, "non_monotonic_K2", "Non-Monotonic K=2")
+```
+
+## 3. Comparison with Operation Outbreak (Sim 165)
+
+We compare the aggregated Twitter kernels with the OO simulation kernels.
+
+```{python}
+def compare_datasets(twitter_model, oo_model):
+    # Load Twitter
+    t_draws = load_draws_parquet(RESULTS_DIR / f"{twitter_model}_draws")
+    t_mu = t_draws['mu']
+    
+    # Load OO
+    o_draws = load_draws_parquet(OO_RESULTS_DIR / f"{oo_model}_draws")
+    o_mu = o_draws['mu']
+    
+    K = t_mu.shape[1]
+    kmax_t = t_mu.shape[2]
+    kmax_o = o_mu.shape[2]
+    
+    fig, axes = plt.subplots(1, K, figsize=(fs.WIDTH_DOUBLE, fs.WIDTH_DOUBLE * 0.4), sharey=True)
+    if K == 1: axes = [axes]
+    
+    for k in range(K):
+        # Twitter
+        t_mean = t_mu[:, k, :].mean(axis=0)
+        axes[k].plot(np.arange(1, kmax_t+1), t_mean, label='Twitter (Full)', color='red', alpha=0.8)
+        
+        # OO
+        o_mean = o_mu[:, k, :].mean(axis=0)
+        axes[k].plot(np.arange(kmax_o), o_mean, label='OO (Sim 165)', color='blue', alpha=0.8)
+        
+        axes[k].set_title(f"Component {k+1}")
+        axes[k].set_xlabel("Exposures (k)")
+        axes[k].grid(True, alpha=0.2)
+        
+    axes[0].set_ylabel("Prob")
+    axes[0].legend()
+    plt.suptitle("Direct Comparison: Twitter vs Operation Outbreak")
+    plt.show()
+
+```
+
+## 4. Paper Replication (Fig 3 Styling)
+
+We replicate Fig 3 from the paper, comparing Simple (SC) and Complex (CC) contagion models at different $q$ values. We overlay our non-parametric $K=1$ models for comparison.
+
+```{python}
+#hello
+def plot_fig3_replication(q=1.0):
+    author_dir = ROOT / "results/author_models"
+    
+    # helper to load NP draws if they exist
+    def load_np(metric, model):
+        path = ROOT / f"results/twitter_full_{metric}_q{q}/{model}_draws"
+        if path.exists():
+            draws = load_draws_parquet(path)
+            return draws['mu'][:, 0, :]
+        return None
+
+    # Load All Models
+    sc_k = np.load(author_dir / f"simple_k_q{q}_results.npz")
+    cc_kappa = np.load(author_dir / f"complex_kappa_q{q}_results.npz")
+    
+    # NP models
+    mono_k = load_np('k', 'monotonic_K1')
+    non_mono_k = load_np('k', 'non_monotonic_K1')
+    mono_kappa = load_np('kappa', 'monotonic_K1')
+    non_mono_kappa = load_np('kappa', 'non_monotonic_K1')
+    
+    # Setup Figure (2x2)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    
+    def plot_panel(ax, m, n, model_res, np_mono=None, np_non_mono=None, xmax=10, is_prob=True, label_x="k"):
+        x = np.arange(1, len(m) + 1)
+        obs_p = m / (m + n + 1e-9)
+        obs_count = m
+        
+        if is_prob:
+            # Row A: % retweeted
+            # Use separate axis for bars (percent) vs models (prob) or scale them?
+            # The models PREDICT probability. The observed is also probability.
+            # So they are on the same scale.
+            
+            # Observed Bars
+            ax.bar(x[:xmax], obs_p[:xmax], alpha=0.3, color='gray', label='Observed (Bar)', zorder=1)
+            
+            # Parametric (Author)
+            c_mean = model_res['c'].mean(axis=0)
+            ax.plot(x[:xmax], c_mean[:xmax], 'o-', color='black', markerfacecolor='none', markeredgewidth=1.5, markersize=8, label='Author Parametric', zorder=10)
+            
+            # Non-Parametric Monotonic
+            if np_mono is not None:
+                m_mean = np_mono.mean(axis=0)
+                ax.plot(x[:xmax], m_mean[:xmax], 's-', color='blue', markerfacecolor='none', markersize=6, label='NP Monotonic', zorder=5)
+            
+            # Non-Parametric Non-Monotonic
+            if np_non_mono is not None:
+                nm_mean = np_non_mono.mean(axis=0)
+                ax.plot(x[:xmax], nm_mean[:xmax], 'x--', color='red', markersize=6, label='NP Non-Monotonic', zorder=5)
+                
+            ax.set_ylabel("Infection Probability")
+            
+            # Dynamic Y-Limit for Linear Scale
+            # Find max value to set appropriate limit
+            max_val = max(obs_p[:xmax].max(), c_mean[:xmax].max())
+            if np_mono is not None: max_val = max(max_val, m_mean[:xmax].max())
+            ax.set_ylim(0, max_val * 1.2) # Add 20% buffer
+            
+        else:
+            # Row B: Number retweeted
+            ax.bar(x[:xmax], obs_count[:xmax], alpha=0.3, color='gray', label='Observed (Bar)', zorder=1)
+            
+            total_at_risk = m + n
+            # Parametric
+            expected = model_res['c'].mean(axis=0) * total_at_risk
+            ax.plot(x[:xmax], expected[:xmax], 'o-', color='black', markerfacecolor='none', markeredgewidth=1.5, markersize=8, label='Author Parametric', zorder=10)
+            
+            # NP
+            if np_mono is not None:
+                e_mono = np_mono.mean(axis=0) * total_at_risk
+                ax.plot(x[:xmax], e_mono[:xmax], 's-', color='blue', markerfacecolor='none', markersize=6, label='NP Monotonic', zorder=5)
+                
+            if np_non_mono is not None:
+                e_nm = np_non_mono.mean(axis=0) * total_at_risk
+                ax.plot(x[:xmax], e_nm[:xmax], 'x--', color='red', markersize=6, label='NP Non-Monotonic', zorder=5)
+                
+            ax.set_ylabel("Number Retweeted")
+            
+        ax.set_xlabel(label_x)
+        ax.set_xlim(0.5, xmax + 0.5)
+        ax.grid(True, alpha=0.15, zorder=-10)
+
+    # Panel A Left: SC (k) - Prob
+    # Temporarily hiding NP models until re-run completes
+    plot_panel(axes[0, 0], sc_k['m'], sc_k['n'], sc_k, None, None, xmax=15, label_x="k")
+    axes[0, 0].set_title(f"Simple Contagion (k) - q={q}")
+    print(f"DEBUG: q={q} sc_k['m'][:3] = {sc_k['m'][:3]}")
+    
+    # Panel A Right: CC (kappa) - Prob
+    plot_panel(axes[0, 1], cc_kappa['m'], cc_kappa['n'], cc_kappa, None, None, xmax=10, label_x="$\kappa$")
+    axes[0, 1].set_title(f"Complex Contagion ($\kappa$) - q={q}")
+    
+    # Panel B Left: SC (k) - Counts
+    plot_panel(axes[1, 0], sc_k['m'], sc_k['n'], sc_k, None, None, xmax=15, is_prob=False, label_x="k")
+    
+    # Panel B Right: CC (kappa) - Counts
+    plot_panel(axes[1, 1], cc_kappa['m'], cc_kappa['n'], cc_kappa, None, None, xmax=10, is_prob=False, label_x="$\kappa$")
+    
+    axes[0, 0].legend(fontsize='small', frameon=True)
+    
+    plt.suptitle(f"Paper Replication (Fig 3) - All Models - q={q}", fontsize=16)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.show()
+
+# Run for both sensing probabilities
+plot_fig3_replication(q=1.0)
+plot_fig3_replication(q=0.2)
+```
+
+## 5. Sensitivity to Sensing Probability (q)
+
+We compare the non-parametric kernels inferred at $q=1.0$ and $q=0.2$ to see how the assumption of user attention affects the resulting dynamics.
+
+```{python}
+def compare_q_sensitivity(metric='k', model_name="monotonic_K1"):
+    fig, ax = plt.subplots(figsize=(fs.WIDTH_SINGLE, fs.WIDTH_SINGLE * 0.6))
+    
+    for q in [1.0, 0.2]:
+        np_dir = ROOT / f"results/twitter_full_{metric}_q{q}"
+        if not np_dir.exists(): continue
+        
+        draws = load_draws_parquet(np_dir / f"{model_name}_draws")
+        mu = draws['mu'][:, 0, :] # [samples, kmax]
+        
+        x = np.arange(1, mu.shape[1] + 1)
+        mean = mu.mean(axis=0)
+        lower = np.percentile(mu, 2.5, axis=0)
+        upper = np.percentile(mu, 97.5, axis=0)
+        
+        color = 'C0' if q == 1.0 else 'C1'
+        ax.plot(x, mean, marker='o', markersize=3, label=f'q={q}', color=color)
+        ax.fill_between(x, lower, upper, alpha=0.2, color=color)
+        
+    ax.set_title(f"Sensitivity to q ({metric}): {model_name}")
+    ax.set_xlabel(f"Exposures ({metric})")
+    ax.set_ylabel("Infection Prob")
+    ax.set_xlim(0.5, 20.5)
+    ax.set_ylim(-0.005, 0.06)
+    ax.legend()
+    ax.grid(True, alpha=0.2)
+    plt.show()
+
+compare_q_sensitivity(metric='k', model_name="monotonic_K1")
+compare_q_sensitivity(metric='kappa', model_name="monotonic_K1")
+```
+
+## Twitter Time Series
+
+We want to define a probabilistic model for retweets given tweets.
+We seperate this into two parts, first the exposure model. 
+
+They assume that every account you follow produces tweets which are displayed in your timeline. 
+
+The define a matrix $A$ which defines the number of times that user $i$ appeared  
+
+Then they assume that the probability of seeing a tweet in your timeline is independent of the account that produced it and occurs with probabiltiy $q$
+
+They then make the distinction between two types of exposure. The number of toatl exposures $k$ (including retweets or tweets from the same source) and the total number of *unique* exposures $\kappa$ 
+
+
+
+## 5. Model Comparison (BIC)
+
+We compare models using the Bayesian Information Criterion ($BIC = k \ln(n) - 2 \ln(L)$). A lower BIC indicates a better model, balancing goodness-of-fit with simplicity.
+
+```{python}
+import json
+
+def plot_bic_comparison():
+    bic_path = ROOT / "results/twitter_bic_results.json"
+    if not bic_path.exists():
+        print("BIC results not found. Run scripts/compute_twitter_bic.py first.")
+        return
+        
+    with open(bic_path, 'r') as f:
+        bic_data = json.load(f)
+        
+    df = pd.DataFrame(bic_data)
+    
+    metrics = df['metric'].unique()
+    q_vals = df['q'].unique()
+    
+    fig, axes = plt.subplots(len(q_vals), len(metrics), 
+                             figsize=(fs.WIDTH_DOUBLE, 5 * len(q_vals)), 
+                             sharey=False)
+    
+    if len(q_vals) == 1: axes = [axes]
+    
+    colors = ['#3498db', '#e74c3c', '#9b59b6', '#2ecc71', '#f1c40f']
+    
+    for i, q in enumerate(q_vals):
+        for j, metric in enumerate(metrics):
+            ax = axes[i][j]
+            subset = df[(df['q'] == q) & (df['metric'] == metric)]
+            
+            # Sort models for consistent display
+            model_order = ['Simple', 'Complex', 'Simple Mixture (K=2)', 'Non-Param (Mono)', 'Non-Param (Non-Mono)']
+            subset = subset.set_index('model').reindex(model_order).dropna(subset=['bic']).reset_index()
+            
+            bars = ax.bar(subset['model'], subset['bic'], color=colors[:len(subset)])
+            
+            ax.set_title(f"BIC: {metric} (q={q})")
+            ax.set_ylabel("BIC (Lower is Better)")
+            ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
+            ax.grid(True, alpha=0.1, axis='y')
+            
+            # Add value labels
+            for bar in bars:
+                height = bar.get_height()
+                if not np.isnan(height):
+                    ax.text(bar.get_x() + bar.get_width()/2., height,
+                            f'{int(height)}', ha='center', va='bottom', fontsize=8)
+
+    plt.tight_layout()
+    plt.show()
+
+plot_bic_comparison()
+```
+
+##

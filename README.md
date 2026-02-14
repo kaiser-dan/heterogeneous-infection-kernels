@@ -129,11 +129,21 @@ just sweep configs/research_sweep_twitter.yaml
 
 # Run the Operation Outbreak inference sweep
 just sweep configs/research_sweep_oo.yaml
+
+# Run a synthetic-data inference sweep (simulated M/N persisted in data/processed/synthetic)
+just sweep configs/research_sweep_synthetic.yaml
+
+# Run a synthetic simulation-grid sweep + inference-grid sweep
+# (each sim_sweep setting creates a deterministic data/processed/synthetic/<data_name>/ dataset)
+just sweep configs/research_sim_sweep_synthetic.yaml
+
+# Run PPC targets (enable analysis.ppc.enabled in config first)
+uv run snakemake ppc --configfile configs/research_sim_sweep_synthetic.yaml --profile workflow/profiles/local
 ```
 
 Results (posterior samples and summaries) are saved to the `results/` directory.
 
-Raw data are not included in the repository; place them under `data/` if you have access.
+**NOTE**: I can provide the raw data. Unzip the `raw.zip` file in the `data/` directory. 
 
 ## Applying to new data
 

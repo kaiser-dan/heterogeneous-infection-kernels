@@ -16,4 +16,10 @@ try:
 except ImportError:
     pass
 
+try:
+    from . import complexity_measures
+    from .complexity_measures import *
+except ImportError:
+    pass
+
 from . import _logger  # do not bring logger into scope automatically

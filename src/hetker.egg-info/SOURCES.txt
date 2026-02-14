@@ -1,0 +1,14 @@
+LICENSE
+README.md
+pyproject.toml
+src/__init__.py
+src/_logger.py
+src/dynamics.py
+src/model.py
+src/networks.py
+src/hetker.egg-info/PKG-INFO
+src/hetker.egg-info/SOURCES.txt
+src/hetker.egg-info/dependency_links.txt
+src/hetker.egg-info/requires.txt
+src/hetker.egg-info/top_level.txt
+test/test_dynamics.py

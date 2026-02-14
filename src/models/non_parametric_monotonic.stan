@@ -20,7 +20,7 @@ data {
     // HYPERPARAMETER - Dirichlet concentration for increments
     real<lower=0> CONCENTRATION;
 
-    // HYPERPARAMETER - prior location for logit_p (empirical Bayes)
+    // HYPERPARAMETER - prior location for logit_p 
     real LOGIT_P_LOCATION;
 
     // HYPERPARAMETER - prior scale for logit_p

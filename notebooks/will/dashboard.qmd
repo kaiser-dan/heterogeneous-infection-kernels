@@ -88,18 +88,23 @@ def get_data_info(source, data_name):
     """
     bases = [DATA_PROCESSED_BASE / source, DATA_SUMMARIES_BASE / source]
     
+    # Handle known mismatch: data_name might have '_exposures' suffix from config
+    # but directory might not.
+    search_names = [data_name]
+    if source == 'oo' and data_name.endswith('_exposures'):
+        search_names.append(data_name.replace('_exposures', ''))
+        
     for base in bases:
         if not base.exists(): continue
         
-        # 1. Standard Directory Style: sim_165_... / exposures.parquet
-        # (data_name is usually the folder name)
-        d = base / data_name
-        if d.is_dir():
-            # Check for standard names
-            for fname in ["exposures.parquet", "infections.parquet"]:
-                if (d / fname).exists():
-                    id_col = "A" if source == "oo" else "A_array"
-                    return str(d / fname), id_col
+        for name in search_names:
+            d = base / name
+            if d.is_dir():
+                # Check for standard names
+                for fname in ["exposures.parquet", "infections.parquet"]:
+                    if (d / fname).exists():
+                        id_col = "A" if source == "oo" else "A_array"
+                        return str(d / fname), id_col
         
         # 2. Legacy Flat File Style (Fallback if directory missing)
         for name in [data_name, f"{data_name}.parquet", f"{data_name}_exposures.parquet"]:

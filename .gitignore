@@ -30,3 +30,6 @@ src/models/*
 *.hpp
 *.o
 *.d
+
+/.quarto/
+**/*.quarto_ipynb

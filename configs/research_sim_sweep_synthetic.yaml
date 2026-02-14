@@ -1,0 +1,86 @@
+# ============================================================================
+# Research Sweep - Synthetic Simulation Grid + Inference Grid
+# ============================================================================
+name: "research_sim_sweep_synthetic"
+source: "synthetic"
+wandb_enabled: false
+
+synthetic:
+  dataset_name: "sbm_grid"
+  seed: 37
+  kmax: 20
+  graph:
+    type: "sbm"
+    params:
+      n: 256
+      avg_degree: 18
+      epsilon: 0.90
+  contagion:
+    gamma: 0.1
+    tmax: 1000
+    dt: 1
+    initial_infected: 0.1
+    assignment:
+      mode: "block_flip"
+      omega: 0.1
+    kernels:
+      - id: "k1"
+        type: "simple"
+        beta: 0.01
+      - id: "k2"
+        type: "simple"
+        beta: 0.04
+
+# Synthetic simulation sweep (cartesian product over keys below).
+# Keys are dotted paths under `synthetic`.
+sim_sweep:
+  graph.params.epsilon: [0.80, 0.95]
+  contagion.assignment.omega: [0.0, 0.15]
+  contagion.kernels:
+    -
+      - id: "k1"
+        type: "simple"
+        beta: 0.01
+      - id: "k2"
+        type: "simple"
+        beta: 0.03
+    -
+      - id: "k1"
+        type: "simple"
+        beta: 0.01
+      - id: "k2"
+        type: "simple"
+        beta: 0.06
+
+model:
+  stan_file: "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  K: 1
+  concentration: 1.0
+  deviation_scale: 1.0
+  logit_p_location: "empirical"
+  logit_p_scale: 2.0
+  V_max_local: 10000
+
+sweep:
+  K: [1, 2]
+  stan_file: [
+    "src/models/model_simple_contagion.stan",
+    "src/models/model_complex_contagion.stan",
+    "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  ]
+
+analysis:
+  ppc:
+    enabled: false
+    mode: "both"  # non_nested | nested | both
+    draws: 20
+    nested_draws: 5
+    seed: 123
+    non_nested_stats: ["deviance", "neg_loglik", "l1_rate"]
+    nested_statistic: "mahal_non_centrality"
+    simple_match:
+      stan_file: "model_simple_contagion.stan"
+      K: 1
+    nonparam_match:
+      stan_file: "non_parametric_monotonic_empirical_bayes.stan"
+      K: 1

@@ -1,0 +1,65 @@
+# ============================================================================
+# Research Sweep - Daniel-style SBM (epsilon x omega)
+# Based on docs/notes/logs/20251028.qmd setup
+# ============================================================================
+name: "research_sim_sweep_sbm_daniel"
+source: "synthetic"
+wandb_enabled: false
+
+synthetic:
+  dataset_name: "sbm_daniel"
+  seed: 37
+  kmax: 20
+
+  graph:
+    type: "sbm"
+    params:
+      n: 256
+      avg_degree: 18
+      epsilon: 0.95
+
+  contagion:
+    gamma: 0.1
+    tmax: 1000
+    dt: 1
+    initial_infected: 32
+
+    assignment:
+      mode: "block_flip"
+      omega: 0.0
+
+    # Daniel's reference pair uses R0 = 2 and 4 with gamma=0.1, k=18:
+    # beta = R0 * gamma / k
+    kernels:
+      - id: "k1"
+        type: "simple"
+        beta: 0.0111111111  # 2.0 * 0.1 / 18
+      - id: "k2"
+        type: "simple"
+        beta: 0.0222222222  # 4.0 * 0.1 / 18
+
+# Cartesian sweep under `synthetic.*` keys.
+sim_sweep:
+  graph.params.epsilon: [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]
+  contagion.assignment.omega: [0.0, 0.055556, 0.111111, 0.166667, 0.222222, 0.277778, 0.333333, 0.388889, 0.444444, 0.5]
+
+# Keep inference sweep minimal: simple + nonparametric fit per synthetic dataset.
+model:
+  stan_file: "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  K: 1
+  concentration: 1.0
+  deviation_scale: 1.0
+  logit_p_location: "empirical"
+  logit_p_scale: 2.0
+  V_max_local: 10000
+
+sweep:
+  stan_file: [
+    "src/models/model_simple_contagion.stan",
+    "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  ]
+  K: [1]
+
+analysis:
+  ppc:
+    enabled: false

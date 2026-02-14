@@ -1,0 +1,92 @@
+Loading data for sim 165 from data/Blanchard-Thesis-main/data/oo-histories-all.csv...
+Events: 2020543, Contacts: 2010625, Infections: 386
+Building Adjacency Matrix...
+Adjacency Shape: (617, 617)
+Raw Density: 0.0808
+Max Weight: 3242144.5570
+Applying Backbone: disparity (threshold=0.05)...
+
+--- Backbone Degree Distribution ---
+0     117
+1     111
+2      63
+3      50
+4      34
+5      37
+6      26
+7      20
+8      26
+9      28
+10     14
+11     17
+12     12
+13      8
+14      9
+15      7
+16      2
+17     10
+18      2
+19      6
+20      1
+21      2
+22      4
+23      3
+24      1
+27      1
+29      2
+30      1
+32      1
+33      2
+Name: count, dtype: int64
+
+--- Raw Degree Distribution (Weighted > 0) ---
+Mean Raw Degree: 49.84
+Max Raw Degree: 235
+Raw Degree Counts (Head):
+1     53
+2     34
+3     25
+4     20
+5     21
+6     17
+7     10
+8     17
+9     17
+10     9
+Name: count, dtype: int64
+Computing M/N Matrices (Standard)...
+
+--- Standard Pipeline Results (Count of Neighbors) ---
+k     M          N          Total      Prob      
+0     32         124380     124412     0.0003
+1     63         61644      61707      0.0010
+2     53         31276      31329      0.0017
+3     41         14482      14523      0.0028
+4     46         8747       8793       0.0052
+5     34         5080       5114       0.0066
+6     15         3646       3661       0.0041
+7     19         2188       2207       0.0086
+8     9          964        973        0.0092
+9     10         565        575        0.0174
+10    2          116        118        0.0169
+11    1          108        109        0.0092
+12    2          160        162        0.0123
+13    1          237        238        0.0042
+14    3          152        155        0.0194
+15    2          1          3          0.6667
+16    1          1          2          0.5000
+17    0          0          0          0.0000
+18    0          0          0          0.0000
+19    0          0          0          0.0000
+Checking trace for k=14...
+  Users w/ M[14]>0: 3
+  Users w/ N[14]>0: 5
+  Example User (M): 7067
+    Degree in Backbone: 19
+    Weighted Degree (Raw): 192525.49
+Checking trace for k=15...
+  Users w/ M[15]>0: 2
+  Users w/ N[15]>0: 1
+  Example User (M): 7425
+    Degree in Backbone: 17
+    Weighted Degree (Raw): 78142.70

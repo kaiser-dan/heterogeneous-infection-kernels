@@ -1,0 +1,163 @@
+---
+title: "OO Simulation 165: Results Inspection"
+date: 2026-02-06
+format:
+  html:
+    code-fold: show
+jupyter: python3
+---
+
+# Objective
+Visualize the empirical data (M, N matrices) and the inferred infection kernel for OO Simulation 165.
+
+```{python}
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import duckdb
+from pathlib import Path
+import re
+
+plt.rcParams['figure.figsize'] = (10, 6)
+plt.rcParams['axes.grid'] = True
+```
+
+# 1. Load Data
+**Source**: `data/summaries/oo/sim_165_backbone_disparity_exposures.parquet`
+
+```{python}
+#| label: load-data
+DATA_PATH = Path("../../data/summaries/oo/sim_165_backbone_disparity_exposures.parquet")
+M_df = pd.read_parquet(DATA_PATH / "M.parquet")
+N_df = pd.read_parquet(DATA_PATH / "N.parquet")
+
+print(f"M Matrix Shape: {M_df.shape}")
+print(f"N Matrix Shape: {N_df.shape}")
+
+# Filter for valid exposure columns (integers)
+valid_cols = [c for c in M_df.columns if str(c).isdigit()]
+valid_cols = sorted(valid_cols, key=int)
+print(f"Exposure Levels: {valid_cols[:5]} ... {valid_cols[-5:]}")
+```
+
+# 2. Compute Empirical Kernel
+Calculate $P(\text{adopt} | k)$ by summing counts across users.
+
+```{python}
+#| label: compute-empirical
+k_vals = [int(c) for c in valid_cols]
+M_sums = M_df[valid_cols].sum(axis=0).values
+N_sums = N_df[valid_cols].sum(axis=0).values
+
+total = M_sums + N_sums
+with np.errstate(divide='ignore', invalid='ignore'):
+    p_adopt = np.where(total > 0, M_sums / total, np.nan)
+
+# Create DataFrame
+df_emp = pd.DataFrame({
+    'k': k_vals,
+    'M': M_sums,
+    'N': N_sums,
+    'Total': total,
+    'P_adopt': p_adopt
+})
+
+print(df_emp.head(10))
+```
+
+# 3. Load Inferred Model
+**Source**: `results/research_sweep_oo/oo/.../inference_summary.parquet`
+
+```{python}
+#| label: load-inference
+RESULTS_DIR = Path("../../results/research_sweep_oo/oo/sim_165_backbone_disparity_exposures")
+# Debug Paths
+print(f"Current Working Dir: {Path.cwd()}")
+print(f"Results Dir (Resolved): {RESULTS_DIR.resolve()}")
+print(f"Exists: {RESULTS_DIR.exists()}")
+
+# Robust Search: Find ALL summaries first
+metrics_files = list(RESULTS_DIR.rglob("inference_summary.parquet"))
+print(f"Total summaries found: {len(metrics_files)}")
+
+# Filter for non-parametric
+candidates = [p for p in metrics_files if "non_parametric" in str(p)]
+print(f"Non-parametric candidates: {len(candidates)}")
+for c in candidates: print(f" - {c.relative_to(RESULTS_DIR)}")
+
+# Pick the first one (prefer K~1 if possible)
+target_path = None
+# Sort to prefer K~1 if multiple
+candidates.sort(key=lambda p: str(p))
+
+if candidates:
+    sum_path = candidates[0]
+    print(f"\nSelected: {sum_path}")
+    
+    # Load summary
+    con = duckdb.connect()
+    # Look for reconstructed curve (Delta approach) or direct mu
+    query = f"SELECT index, Mean, \"5%\", \"95%\" FROM read_parquet('{sum_path}') WHERE index LIKE 'logit_p%' OR index LIKE 'Delta%'"
+    try:
+        df_res = con.query(query).to_df()
+    except Exception as e:
+        print(f"Error reading parquet: {e}")
+        df_res = pd.DataFrame()
+    
+    if not df_res.empty:
+            # 1. Base prob
+            logit_p = df_res.loc[df_res['index'] == 'logit_p[1]', 'Mean'].values
+            if len(logit_p) > 0:
+                p_base = 1 / (1 + np.exp(-logit_p[0]))
+                
+                # 2. Deltas
+                deltas = df_res[df_res['index'].str.contains('Delta')].copy()
+                # Extract level
+                deltas['level'] = deltas['index'].apply(lambda x: int(x.split(',')[1].strip(']')))
+                deltas = deltas.sort_values('level')
+                
+                # Reconstruct
+                cum_delta = np.cumsum(deltas['Mean'].values)
+                mu_curve = p_base * cum_delta
+                
+                df_model = pd.DataFrame({
+                    'k': deltas['level'],
+                    'P_model': mu_curve
+                })
+```
+
+# 4. Plot Results
+
+```{python}
+#| label: plot-kernel
+fig, ax = plt.subplots(figsize=(12, 6))
+
+# Empirical
+ax.plot(df_emp['k'], df_emp['P_adopt'], 'o', color='black', label='Empirical Data', markersize=8, alpha=0.6)
+ax.bar(df_emp['k'], df_emp['P_adopt'], color='gray', alpha=0.2, width=0.8)
+
+# Model
+if df_model is not None:
+    # Scale model k to match (assuming index alignment)
+    ax.plot(df_model['k'], df_model['P_model'], '-', color='crimson', label='Inferred Kernel', linewidth=3)
+    
+ax.set_xlabel('Exposure (k)')
+ax.set_ylabel('Probability of Adoption')
+ax.set_title(f'Infection Kernel Recovery: Sim 165\nModel: {target_model.name if target_model else "None"}')
+ax.legend()
+ax.set_ylim(-0.05, 1.05)
+
+plt.show()
+```
+
+```{python}
+#| label: plot-counts
+# Check counts too (log scale)
+fig, ax = plt.subplots(figsize=(12, 4))
+ax.bar(df_emp['k'], df_emp['Total'], color='steelblue', alpha=0.7)
+ax.set_yscale('log')
+ax.set_xlabel('Exposure (k)')
+ax.set_ylabel('Count (Log Scale)')
+ax.set_title('Exposure Distribution (N+M)')
+plt.show()
+```

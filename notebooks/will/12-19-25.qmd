@@ -1,0 +1,673 @@
+---
+title: "Model Comparison: JGY-mod vs KT"
+subtitle: "Comparing mixture model implementations on Operation Outbreak data"
+date: 12-19-25
+format:
+  html:
+    grid:
+      body-width: 1200px
+    embed-resources: false
+---
+
+This notebook compares two Stan implementations of the mixture-of-kernels model:
+- **model_JGY-mod.stan**: Original implementation with centered parameterization
+- **model_KT.stan**: Improved implementation with non-centered parameterization and ordered constraints
+
+## Setup and Imports
+
+```{python}
+#| label: setup
+#| output: false
+#| echo: false
+
+import sys
+import os
+from pathlib import Path
+
+# Add project source to path (notebook lives in notebooks/will)
+sys.path.append(
+    os.path.join(
+        '..',  # will -> notebooks
+        '..',  # notebooks -> project root
+    )
+)
+
+import pandas as pd
+import numpy as np
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+import cmdstanpy as csp
+import seaborn as sns
+from scipy.special import logit, expit
+import matplotlib.pyplot as plt
+import networkx as nx
+import arviz as az
+
+import src
+from src.data_processing import ContagionMetadata, get_timeseries, get_adjacency_matrix, decompress_array
+
+# Define project_root for file paths
+project_root = Path(os.path.join('..', '..')).resolve()
+
+# Model configuration
+K = 2
+
+# Database connection
+db_path = project_root / "data" / "contagion.db"
+engine = create_engine(f"sqlite:///{db_path}")
+Session = sessionmaker(bind=engine)
+session = Session()
+
+# Helper function for exposure bin capping
+def cap_exposure_bins(M, N, max_k):
+    """
+    Truncate exposure matrices to keep only the first `max_k` columns.
+    """
+    if max_k is None or max_k <= 0:
+        return M, N
+
+    def _cap(arr):
+        if arr is None:
+            return None
+        arr = np.asarray(arr)
+        return arr[:, :max_k] if arr.shape[1] > max_k else arr
+
+    return _cap(M), _cap(N)
+```
+
+# Part 1: Simulated Data Validation
+
+First, we test both models on simulated data where we know the ground truth kernel. This validates our inference pipeline.
+
+## Generate Simulated Data
+
+```{python}
+#| label: sim-data-generation
+
+# Load network structure from oo_sim_165
+target_run_id = "oo_sim_165_duration"
+adj_df = get_adjacency_matrix(session, target_run_id)
+adj = (adj_df.to_numpy() > 0).astype(int)  # Binarize
+N_nodes = adj.shape[0]
+
+# Simulation parameters (simple contagion)
+gamma = 0.1
+dt = 1.0
+T_steps = 512
+num_seeds = 32
+rep_number = 2.0  # R0 target
+avg_degree = adj.sum() / N_nodes if N_nodes > 0 else 18
+beta = rep_number * gamma / avg_degree
+kmax_sim = int(adj.sum(axis=1).max())
+
+# Ground truth kernel: simple contagion c(ν) = 1 - (1-β)^ν
+c_true = 1 - np.power(1 - beta, np.arange(1, kmax_sim + 1))
+kernels = np.tile(c_true, (N_nodes, 1))
+
+print(f"Network: {N_nodes} nodes, avg degree = {avg_degree:.1f}")
+print(f"β = {beta:.4f}, γ = {gamma}, kmax = {kmax_sim}")
+print(f"Ground truth kernel c(1) = {c_true[0]:.4f}, c(kmax) = {c_true[-1]:.4f}")
+
+# Initial infected state
+rng = np.random.default_rng(123)
+x0 = np.zeros(N_nodes, dtype=int)
+initial_infected = rng.choice(N_nodes, size=min(num_seeds, N_nodes), replace=False)
+x0[initial_infected] = 1
+
+# Run simulation
+print("\nRunning simulation...")
+states = src.heterogeneous_contagion_process(adj, gamma, kernels, x0, tmax=T_steps, dt=dt, random_seed=123)
+M_sim, N_sim = src.get_activations(states.T, adj, kmax_sim)
+
+# Cap to max_k
+max_k_sim = 20
+M_sim_capped, N_sim_capped = cap_exposure_bins(M_sim, N_sim, max_k_sim)
+
+print(f"Simulation complete: {states.sum()} total infections")
+print(f"M shape (capped): {M_sim_capped.shape}, N shape (capped): {N_sim_capped.shape}")
+
+# Visualize
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+# Infection time series
+axes[0].imshow(states, aspect='auto', cmap='Reds', interpolation='nearest')
+axes[0].set_title('Simulated Infection States')
+axes[0].set_xlabel('Node')
+axes[0].set_ylabel('Timestep')
+
+# M matrix
+axes[1].imshow(M_sim_capped, aspect='auto', cmap='Blues', interpolation='nearest')
+axes[1].set_title('Exposure Successes (M)')
+axes[1].set_xlabel('ν (infected neighbors)')
+axes[1].set_ylabel('Node')
+
+# N matrix
+axes[2].imshow(N_sim_capped, aspect='auto', cmap='Oranges', interpolation='nearest')
+axes[2].set_title('Exposure Failures (N)')
+axes[2].set_xlabel('ν (infected neighbors)')
+axes[2].set_ylabel('Node')
+
+plt.tight_layout()
+plt.show()
+```
+
+## Fit Models on Simulated Data
+
+```{python}
+#| label: fit-simulated-models
+#| eval: false
+
+# Prepare data dict
+data_sim = {
+    "V": M_sim_capped.shape[0],
+    "kmax": M_sim_capped.shape[1],
+    "K": K,
+    "M": M_sim_capped,
+    "N": N_sim_capped,
+    "DEVIATION_SCALE": [1.0] * K,
+}
+
+# Fit JGY-mod
+print("Fitting JGY-mod on simulated data...")
+model_jgy_path = project_root / "src" / "models" / "model_JGY-mod.stan"
+model_jgy = csp.CmdStanModel(stan_file=str(model_jgy_path))
+
+data_sim_jgy = data_sim.copy()
+data_sim_jgy["REPLICATES"] = 100
+
+fit_jgy_sim = model_jgy.sample(
+    data=data_sim_jgy,
+    seed=42,
+    chains=4,
+    iter_sampling=1000,
+    iter_warmup=500,
+    adapt_delta=0.95,
+    show_progress=True,
+)
+
+# Fit KT
+print("\nFitting KT on simulated data...")
+model_kt_path = project_root / "src" / "models" / "model_KT.stan"
+model_kt = csp.CmdStanModel(stan_file=str(model_kt_path))
+
+fit_kt_sim = model_kt.sample(
+    data=data_sim,
+    seed=42,
+    chains=4,
+    iter_sampling=1000,
+    iter_warmup=500,
+    adapt_delta=0.95,
+    show_progress=True,
+)
+
+print("\nFits complete!")
+```
+
+## Compare Inferred Kernels vs Ground Truth
+
+```{python}
+#| label: compare-simulated-kernels
+#| eval: false
+#| fig-width: 14
+#| fig-height: 6
+
+# Load fits if not already in memory
+if "fit_jgy_sim" not in globals() or "fit_kt_sim" not in globals():
+    results_root = project_root / "results" / "12-19-25"
+    latest_path = results_root / "latest_sim.json"
+    if not latest_path.exists():
+        raise FileNotFoundError(
+            "Missing simulated results. Run fits or set eval: true in fit-simulated-models cell"
+        )
+
+    with latest_path.open() as f:
+        latest_sim = json.load(f)
+
+    jgy_sim_dir = Path(latest_sim["jgy_mod_sim_dir"])
+    kt_sim_dir = Path(latest_sim["kt_sim_dir"])
+    if not jgy_sim_dir.is_absolute():
+        jgy_sim_dir = project_root / jgy_sim_dir
+    if not kt_sim_dir.is_absolute():
+        kt_sim_dir = project_root / kt_sim_dir
+
+    fit_jgy_sim = load_cmdstan_fit(jgy_sim_dir)
+    fit_kt_sim = load_cmdstan_fit(kt_sim_dir)
+
+# Extract kernels from both models (following pattern from 12-4-25.qmd)
+# JGY-mod: Compute stats on logit scale, then transform
+alpha_k_jgy_sim = fit_jgy_sim.stan_variable('alpha_k')  # shape: (draws, K, kmax)
+c_k_mean_jgy_all = expit(alpha_k_jgy_sim.mean(axis=0))  # shape: (K, kmax)
+c_k_lower_jgy_all = expit(np.percentile(alpha_k_jgy_sim, 2.5, axis=0))
+c_k_upper_jgy_all = expit(np.percentile(alpha_k_jgy_sim, 97.5, axis=0))
+
+# KT: Extract mu (already on probability scale)
+mu_kt_sim = fit_kt_sim.stan_variable('mu')  # shape: (draws, K, kmax)
+mu_mean_kt_all = mu_kt_sim.mean(axis=0)  # shape: (K, kmax)
+mu_lower_kt_all = np.percentile(mu_kt_sim, 2.5, axis=0)
+mu_upper_kt_all = np.percentile(mu_kt_sim, 97.5, axis=0)
+
+kmax_actual_sim = c_k_mean_jgy_all.shape[1]
+nu_axis_sim = np.arange(1, kmax_actual_sim + 1)
+c_true_plot = c_true[:kmax_actual_sim]  # Match dimensions
+
+# Plot
+fig, axes = plt.subplots(2, K, figsize=(14, 8))
+
+for k in range(K):
+    # JGY-mod - plot c_k (actual kernel)
+    c_k_mean_jgy = c_k_mean_jgy_all[k]
+    c_k_lower_jgy = c_k_lower_jgy_all[k]
+    c_k_upper_jgy = c_k_upper_jgy_all[k]
+
+    axes[0, k].plot(nu_axis_sim, c_k_mean_jgy, 'b-', label='Inferred (mean)')
+    axes[0, k].fill_between(nu_axis_sim, c_k_lower_jgy, c_k_upper_jgy,
+                           color='blue', alpha=0.3, label='95% CI')
+    axes[0, k].plot(nu_axis_sim, c_true_plot, 'r--', label='Ground Truth', linewidth=2)
+    axes[0, k].set_title(f'JGY-mod: Mode {k+1}')
+    axes[0, k].set_xlabel('ν (infected neighbors)')
+    axes[0, k].set_ylabel('c_k(ν) [infection probability]')
+    axes[0, k].legend()
+    axes[0, k].grid(alpha=0.3)
+
+    # KT - plot mu (kernel)
+    mu_mean_kt = mu_mean_kt_all[k]
+    mu_lower_kt = mu_lower_kt_all[k]
+    mu_upper_kt = mu_upper_kt_all[k]
+
+    axes[1, k].plot(nu_axis_sim, mu_mean_kt, 'g-', label='Inferred (mean)')
+    axes[1, k].fill_between(nu_axis_sim, mu_lower_kt, mu_upper_kt,
+                           color='green', alpha=0.3, label='95% CI')
+    axes[1, k].plot(nu_axis_sim, c_true_plot, 'r--', label='Ground Truth', linewidth=2)
+    axes[1, k].set_title(f'KT: Mode {k+1}')
+    axes[1, k].set_xlabel('ν (infected neighbors)')
+    axes[1, k].set_ylabel('μ_k(ν) [infection probability]')
+    axes[1, k].legend()
+    axes[1, k].grid(alpha=0.3)
+
+plt.suptitle('Simulated Data: Inferred Kernels vs Ground Truth', fontsize=14)
+plt.tight_layout()
+plt.show()
+```
+
+---
+
+# Part 2: Real Data Analysis
+
+## Load Data
+
+```{python}
+#| label: load-data
+
+# Load Operation Outbreak simulation 165
+target_run_id = "oo_sim_165_duration"
+
+# Get metadata
+run_metadata = session.query(ContagionMetadata).filter_by(run_id=target_run_id).first()
+print(f"Run ID: {run_metadata.run_id}")
+print(f"Nodes: {run_metadata.num_nodes}")
+print(f"Edges: {run_metadata.num_edges}")
+
+# Get timeseries and adjacency matrix
+timeseries_df = get_timeseries(session, target_run_id)
+adj_df = get_adjacency_matrix(session, target_run_id)
+
+# Extract M and N from binary blobs
+if run_metadata.exposure_success_blob is None or run_metadata.exposure_failure_blob is None:
+    raise ValueError(f"No exposure data (M/N matrices) found for run {target_run_id}")
+
+M_full = decompress_array(run_metadata.exposure_success_blob)
+N_full = decompress_array(run_metadata.exposure_failure_blob)
+
+print(f"\nOriginal M shape: {M_full.shape}")
+print(f"Original N shape: {N_full.shape}")
+print(f"Exposure shape from metadata: {run_metadata.exposure_shape}")
+```
+
+## Apply Thresholding
+
+```{python}
+#| label: threshold-data
+
+# Cap exposure bins at max_k
+max_k = 20
+M, N = cap_exposure_bins(M_full, N_full, max_k)
+
+# Filter out low-activity nodes (optional)
+min_total_events = 10
+total_events = M.sum(axis=1) + N.sum(axis=1)
+active_mask = total_events >= min_total_events
+
+M_thresh = M[active_mask]
+N_thresh = N[active_mask]
+
+print(f"After capping at k={max_k}:")
+print(f"  M shape: {M_thresh.shape}")
+print(f"  N shape: {N_thresh.shape}")
+print(f"  Active nodes: {active_mask.sum()} / {len(active_mask)}")
+print(f"  Filtered out: {(~active_mask).sum()} nodes with < {min_total_events} events")
+
+# Visualize exposure distributions
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+axes[0].imshow(M_thresh, aspect='auto', cmap='Blues', interpolation='nearest')
+axes[0].set_title('Successes (M)')
+axes[0].set_xlabel('Number of infected neighbors (ν)')
+axes[0].set_ylabel('Node index')
+
+axes[1].imshow(N_thresh, aspect='auto', cmap='Oranges', interpolation='nearest')
+axes[1].set_title('Failures (N)')
+axes[1].set_xlabel('Number of infected neighbors (ν)')
+axes[1].set_ylabel('Node index')
+
+plt.tight_layout()
+plt.show()
+```
+
+## Model 1: JGY-mod
+
+```{python}
+#| label: fit-jgy-mod
+#| eval: false
+# Prepare data for JGY-mod model
+K = 2  # Number of mixture components
+data_jgy = {
+    "V": M_thresh.shape[0],
+    "kmax": M_thresh.shape[1],
+    "K": K,
+    "M": M_thresh,
+    "N": N_thresh,
+    "DEVIATION_SCALE": [1.0] * K,
+    "REPLICATES": 100,
+}
+
+# Load and compile model
+model_jgy_path = project_root / "src" / "models" / "model_JGY-mod.stan"
+model_jgy = csp.CmdStanModel(stan_file=str(model_jgy_path))
+
+# Fit model
+print("Fitting JGY-mod model...")
+fit_jgy = model_jgy.sample(
+    data=data_jgy,
+    seed=42,
+    chains=4,
+    iter_sampling=1000,
+    iter_warmup=500,
+    adapt_delta=0.95,
+    show_progress=True,
+)
+
+# Diagnostics
+print("\n=== JGY-mod Diagnostics ===")
+print(fit_jgy.diagnose())
+```
+
+## Model 2: KT
+
+```{python}
+#| label: fit-kt
+#| eval: false
+# Prepare data for KT model (same structure, no REPLICATES)
+data_kt = {
+    "V": M_thresh.shape[0],
+    "kmax": M_thresh.shape[1],
+    "K": K,
+    "M": M_thresh,
+    "N": N_thresh,
+    "DEVIATION_SCALE": [1.0] * K,
+}
+
+# Load and compile model
+model_kt_path = project_root / "src" / "models" / "model_KT.stan"
+model_kt = csp.CmdStanModel(stan_file=str(model_kt_path))
+
+# Fit model
+print("Fitting KT model...")
+fit_kt = model_kt.sample(
+    data=data_kt,
+    seed=42,
+    chains=4,
+    iter_sampling=1000,
+    iter_warmup=500,
+    adapt_delta=0.95,
+    show_progress=True,
+)
+
+# Diagnostics
+print("\n=== KT Diagnostics ===")
+print(fit_kt.diagnose())
+```
+
+Run `python scripts/run_stan_inference_12_19_25.py` to generate CmdStan CSV outputs.
+The notebook loads the latest run from `results/12-19-25/latest.json`.
+
+```{python}
+#| label: load-stan-results
+import json
+
+def load_cmdstan_fit(path):
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"CmdStan output not found: {path}")
+
+    if path.is_dir():
+        csv_files = sorted(path.glob("*.csv"))
+        if not csv_files:
+            raise FileNotFoundError(f"No CmdStan CSV files found in {path}")
+        csv_arg = [str(p) for p in csv_files]
+    else:
+        csv_arg = str(path)
+
+    if hasattr(csp, "from_csv"):
+        return csp.from_csv(csv_arg)
+    return csp.CmdStanMCMC.from_csv(csv_arg)
+
+if "fit_jgy" not in globals() or "fit_kt" not in globals():
+    results_root = project_root / "results" / "12-19-25"
+    latest_path = results_root / "latest.json"
+    if not latest_path.exists():
+        raise FileNotFoundError(
+            "Missing results. Run: python scripts/run_stan_inference_12_19_25.py"
+        )
+
+    with latest_path.open() as f:
+        latest = json.load(f)
+
+    jgy_dir = Path(latest["jgy_mod_dir"])
+    kt_dir = Path(latest["kt_dir"])
+    if not jgy_dir.is_absolute():
+        jgy_dir = project_root / jgy_dir
+    if not kt_dir.is_absolute():
+        kt_dir = project_root / kt_dir
+
+    fit_jgy = load_cmdstan_fit(jgy_dir)
+    fit_kt = load_cmdstan_fit(kt_dir)
+```
+
+## Sampling Diagnostics Comparison
+
+```{python}
+#| label: compare-diagnostics
+#hello
+# Extract diagnostics
+def get_diagnostics_summary(fit, model_name):
+    summary = fit.summary()
+
+    # cmdstanpy uses different column names - check what's available
+    # Typical columns: 'Mean', 'StdDev', 'N_Eff', 'N_Eff_per_iter', 'R_hat' or similar
+
+    # Get ESS and Rhat using correct column names
+    # cmdstanpy 1.2+ uses 'ESS_bulk', 'ESS_tail', 'R_hat'
+    if 'ESS_bulk' in summary.columns:
+        ess_bulk = summary['ESS_bulk'].values
+        ess_tail = summary['ESS_tail'].values
+        rhat = summary['R_hat'].values
+    elif 'N_Eff' in summary.columns:
+        # Older cmdstanpy versions
+        ess_bulk = summary['N_Eff'].values
+        ess_tail = summary['N_Eff'].values
+        rhat = summary['R_hat'].values
+    else:
+        # Fallback - try to find similar columns
+        print(f"Available columns: {summary.columns.tolist()}")
+        raise ValueError("Could not find ESS/Rhat columns in summary")
+
+    return {
+        'model': model_name,
+        'min_ess_bulk': ess_bulk.min(),
+        'mean_ess_bulk': ess_bulk.mean(),
+        'min_ess_tail': ess_tail.min(),
+        'mean_ess_tail': ess_tail.mean(),
+        'max_rhat': rhat.max(),
+        'n_rhat_above_1.01': (rhat > 1.01).sum(),
+        'divergences': fit.method_variables()['divergent__'].sum(),
+    }
+
+diag_jgy = get_diagnostics_summary(fit_jgy, 'JGY-mod')
+diag_kt = get_diagnostics_summary(fit_kt, 'KT')
+
+diag_df = pd.DataFrame([diag_jgy, diag_kt])
+print("\n=== Diagnostics Comparison ===")
+print(diag_df.to_string(index=False))
+```
+
+## Inferred Kernels Comparison
+
+```{python}
+#| label: compare-kernels
+#| fig-width: 14
+#| fig-height: 6
+
+# Extract kernel mode means (μ_k) from both models
+# NOTE: JGY-mod stores kernels as alpha_k (logit scale), KT stores as mu (prob scale)
+# Following the pattern from 12-4-25.qmd: compute stats on logit scale, then transform
+
+# JGY-mod: Extract alpha_k (logit scale)
+alpha_k_jgy = fit_jgy.stan_variable('alpha_k')  # shape: (draws, K, kmax)
+
+# Compute statistics on logit scale, then transform
+c_k_mean_jgy_all = expit(alpha_k_jgy.mean(axis=0))  # shape: (K, kmax)
+c_k_lower_jgy_all = expit(np.percentile(alpha_k_jgy, 2.5, axis=0))  # shape: (K, kmax)
+c_k_upper_jgy_all = expit(np.percentile(alpha_k_jgy, 97.5, axis=0))  # shape: (K, kmax)
+
+# KT: Extract mu (already on probability scale)
+mu_kt = fit_kt.stan_variable('mu')  # shape: (draws, K, kmax)
+mu_mean_kt_all = mu_kt.mean(axis=0)  # shape: (K, kmax)
+mu_lower_kt_all = np.percentile(mu_kt, 2.5, axis=0)  # shape: (K, kmax)
+mu_upper_kt_all = np.percentile(mu_kt, 97.5, axis=0)  # shape: (K, kmax)
+
+print(f"JGY alpha_k shape: {alpha_k_jgy.shape}")
+print(f"KT mu shape: {mu_kt.shape}")
+print(f"JGY c_k_mean shape: {c_k_mean_jgy_all.shape}")
+print(f"KT mu_mean shape: {mu_mean_kt_all.shape}")
+
+# Get actual kmax from fitted data (not max_k which was our cap)
+kmax_actual = c_k_mean_jgy_all.shape[1]
+
+# Plot comparison
+fig, axes = plt.subplots(2, K, figsize=(14, 8))
+nu_axis = np.arange(1, kmax_actual + 1)
+
+for k in range(K):
+    # JGY-mod - plot c_k (actual kernel on probability scale)
+    c_k_mean_jgy = c_k_mean_jgy_all[k]
+    c_k_lower_jgy = c_k_lower_jgy_all[k]
+    c_k_upper_jgy = c_k_upper_jgy_all[k]
+
+    axes[0, k].plot(nu_axis, c_k_mean_jgy, color='blue', label='Mean')
+    axes[0, k].fill_between(nu_axis, c_k_lower_jgy, c_k_upper_jgy,
+                           color='blue', alpha=0.3, label='95% CI')
+    axes[0, k].set_title(f'JGY-mod: Mode {k+1}')
+    axes[0, k].set_xlabel('ν (infected neighbors)')
+    axes[0, k].set_ylabel('c_k(ν) [infection probability]')
+    axes[0, k].legend()
+    axes[0, k].grid(alpha=0.3)
+
+    # KT - plot mu (kernel on probability scale)
+    mu_mean_kt = mu_mean_kt_all[k]
+    mu_lower_kt = mu_lower_kt_all[k]
+    mu_upper_kt = mu_upper_kt_all[k]
+
+    axes[1, k].plot(nu_axis, mu_mean_kt, color='green', label='Mean')
+    axes[1, k].fill_between(nu_axis, mu_lower_kt, mu_upper_kt,
+                           color='green', alpha=0.3, label='95% CI')
+    axes[1, k].set_title(f'KT: Mode {k+1}')
+    axes[1, k].set_xlabel('ν (infected neighbors)')
+    axes[1, k].set_ylabel('μ_k(ν) [infection probability]')
+    axes[1, k].legend()
+    axes[1, k].grid(alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+## Mixture Weights Comparison
+
+```{python}
+#| label: compare-mixture-weights
+#| fig-width: 12
+#| fig-height: 5
+
+# Extract mixture weights π[i]
+pi_jgy = fit_jgy.stan_variable('pi')  # shape: (draws, V, K)
+pi_kt = fit_kt.stan_variable('pi')    # shape: (draws, V, K)
+
+# Compute mean mixture weights per node
+pi_mean_jgy = pi_jgy.mean(axis=0)  # shape: (V, K)
+pi_mean_kt = pi_kt.mean(axis=0)    # shape: (V, K)
+
+# Plot comparison
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+# JGY-mod
+im1 = axes[0].imshow(pi_mean_jgy, aspect='auto', cmap='viridis',
+                     interpolation='nearest', vmin=0, vmax=1)
+axes[0].set_title('JGY-mod: Mean mixture weights π[i]')
+axes[0].set_xlabel('Mixture component k')
+axes[0].set_ylabel('Node index')
+axes[0].set_xticks(range(K))
+axes[0].set_xticklabels([f'k={k+1}' for k in range(K)])
+plt.colorbar(im1, ax=axes[0], label='π[i,k]')
+
+# KT
+im2 = axes[1].imshow(pi_mean_kt, aspect='auto', cmap='viridis',
+                     interpolation='nearest', vmin=0, vmax=1)
+axes[1].set_title('KT: Mean mixture weights π[i]')
+axes[1].set_xlabel('Mixture component k')
+axes[1].set_ylabel('Node index')
+axes[1].set_xticks(range(K))
+axes[1].set_xticklabels([f'k={k+1}' for k in range(K)])
+plt.colorbar(im2, ax=axes[1], label='π[i,k]')
+
+plt.tight_layout()
+plt.show()
+
+# Print summary statistics
+print("\n=== Mixture Weight Statistics ===")
+print(f"JGY-mod: π[:,0] mean = {pi_mean_jgy[:, 0].mean():.3f}, std = {pi_mean_jgy[:, 0].std():.3f}")
+print(f"KT:      π[:,0] mean = {pi_mean_kt[:, 0].mean():.3f}, std = {pi_mean_kt[:, 0].std():.3f}")
+```
+
+## Summary
+
+```{python}
+#| label: summary
+#| echo: false
+
+print("\n" + "="*60)
+print("MODEL COMPARISON SUMMARY")
+print("="*60)
+
+print("\n1. SAMPLING EFFICIENCY:")
+print(f"   JGY-mod: ESS_bulk = {diag_jgy['mean_ess_bulk']:.0f}, divergences = {diag_jgy['divergences']}")
+print(f"   KT:      ESS_bulk = {diag_kt['mean_ess_bulk']:.0f}, divergences = {diag_kt['divergences']}")
+
+print("\n2. CONVERGENCE:")
+print(f"   JGY-mod: max R-hat = {diag_jgy['max_rhat']:.4f}, n(R-hat > 1.01) = {diag_jgy['n_rhat_above_1.01']}")
+print(f"   KT:      max R-hat = {diag_kt['max_rhat']:.4f}, n(R-hat > 1.01) = {diag_kt['n_rhat_above_1.01']}")
+
+print("\n3. KEY OBSERVATIONS:")
+print("   - Non-centered parameterization (KT) should show better ESS")
+print("   - Ordered constraints (KT) should prevent label switching")
+print("   - Both models should infer similar kernel shapes if converged")
+print("\n" + "="*60)
+``` -->

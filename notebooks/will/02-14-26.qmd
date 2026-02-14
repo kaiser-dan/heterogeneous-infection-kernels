@@ -1,0 +1,165 @@
+---
+title: "SBM Sweep: L1 and Malahbois Complexity"
+date: "2026-02-14"
+format: html
+---
+
+```{python}
+#| label: setup
+#| warning: false
+import sys
+sys.path.insert(0, "../..")
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from src.networks import sbm
+from src.complexity_measures.malahbois import compute_mahalanobis_decomposed
+```
+
+## Located Source (Daniel Sandbox)
+
+- `origin/daniel-sandbox:src/hetker/networks.py`
+- `origin/daniel-sandbox:workflow/scripts/contagion/simulate_contagion.py`
+- `origin/daniel-sandbox:workflow/scripts/analyses/measure_complexity.py`
+- `origin/daniel-sandbox:config/ex06.csv`
+- `origin/daniel-sandbox:docs/notes/logs/20251120.qmd` (complexity heatmap pattern)
+
+## To-Do List
+
+- [x] Extract Mahalanobis code into reusable module (`src/complexity_measures/malahbois.py`).
+- [x] Identify prior sweep + heatmap provenance from `daniel-sandbox`.
+- [x] Create a new dated notebook scaffold in `notebooks/will/`.
+- [ ] Add Snakemake config for simulated SBM/R0 sweep in `configs/`.
+- [ ] Add sweep execution + result collection for both metrics.
+- [ ] Plug sweep outputs into this notebook and replace prototype data path.
+- [ ] Validate runtime, convergence, and reproducibility settings.
+
+## Prototype Dual-Metric Sweep
+
+This is a lightweight prototype to compare metric behavior before wiring full Snakemake inference.
+
+```{python}
+#| label: prototype-sweep
+def simple_kernel(beta: float, kmax: int) -> np.ndarray:
+    nu = np.arange(1, kmax + 1, dtype=float)
+    return 1.0 - (1.0 - beta) ** nu
+
+
+def beta_from_r0(r0: float, gamma: float, avg_degree: float) -> float:
+    return float(np.clip((r0 * gamma) / avg_degree, 1e-6, 1.0 - 1e-6))
+
+
+def mix_kernels_blockwise(
+    n: int,
+    kmax: int,
+    omega: float,
+    c1: np.ndarray,
+    c2: np.ndarray,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    kernels = np.zeros((n, kmax), dtype=float)
+    split = n // 2
+    draws = rng.random(n)
+    for i in range(n):
+        if i < split:
+            kernels[i] = c1 if draws[i] >= omega else c2
+        else:
+            kernels[i] = c2 if draws[i] >= omega else c1
+    return kernels
+
+
+def fit_best_simple_beta(kernel: np.ndarray, grid_size: int = 2000) -> tuple[float, np.ndarray]:
+    k = kernel.shape[0]
+    beta_grid = np.linspace(1e-6, 1.0 - 1e-6, grid_size)
+    nu = np.arange(1, k + 1, dtype=float)
+    candidates = 1.0 - np.power((1.0 - beta_grid[:, None]), nu[None, :])
+    l1 = np.mean(np.abs(candidates - kernel[None, :]), axis=1)
+    idx = int(np.argmin(l1))
+    beta_hat = float(beta_grid[idx])
+    return beta_hat, candidates[idx]
+
+
+N = 256
+AVG_DEGREE = 18
+GAMMA = 0.1
+R0_1 = 1.0
+OMEGA = 0.0
+SEED = 37
+
+EPSILONS = np.round(np.linspace(0.05, 0.95, 10), 2)
+R0_2S = np.round(np.linspace(1.1, 4.0, 20), 2)
+
+rng = np.random.default_rng(SEED)
+rows = []
+
+for epsilon in EPSILONS:
+    A = np.asarray(sbm(N, AVG_DEGREE, float(epsilon), seed=SEED))
+    kmax = int(np.max(A.sum(axis=1)))
+    beta1 = beta_from_r0(R0_1, GAMMA, AVG_DEGREE)
+
+    for r0_2 in R0_2S:
+        beta2 = beta_from_r0(float(r0_2), GAMMA, AVG_DEGREE)
+        c1 = simple_kernel(beta1, kmax)
+        c2 = simple_kernel(beta2, kmax)
+
+        kernel_samples = mix_kernels_blockwise(
+            n=N,
+            kmax=kmax,
+            omega=OMEGA,
+            c1=c1,
+            c2=c2,
+            rng=rng,
+        )
+        kernel_mean = kernel_samples.mean(axis=0)
+
+        beta_hat, kernel_fit = fit_best_simple_beta(kernel_mean)
+        l1_complexity = float(np.mean(np.abs(kernel_mean - kernel_fit)))
+
+        rho_samples = np.full(kernel_samples.shape[0], beta_hat, dtype=float)
+        _, _, malahbois_lambda, _ = compute_mahalanobis_decomposed(kernel_samples, rho_samples)
+
+        rows.append(
+            {
+                "epsilon": float(epsilon),
+                "R0_2": float(r0_2),
+                "kmax": kmax,
+                "l1_complexity": l1_complexity,
+                "malahbois_complexity": float(malahbois_lambda),
+            }
+        )
+
+df_metrics = pd.DataFrame(rows)
+df_metrics.head()
+```
+
+```{python}
+#| label: fig-dual-heatmap
+#| fig-cap: "Prototype heatmaps comparing L1 and Malahbois complexity over epsilon and R0_2."
+fig, axes = plt.subplots(1, 2, figsize=(14, 5), constrained_layout=True)
+
+sns.heatmap(
+    df_metrics.pivot(index="R0_2", columns="epsilon", values="l1_complexity"),
+    cmap="viridis",
+    ax=axes[0],
+)
+axes[0].set_title("L1 Complexity")
+axes[0].set_xlabel(r"$\epsilon$")
+axes[0].set_ylabel(r"$R_0^{(2)}$")
+
+sns.heatmap(
+    df_metrics.pivot(index="R0_2", columns="epsilon", values="malahbois_complexity"),
+    cmap="magma",
+    ax=axes[1],
+)
+axes[1].set_title("Malahbois Complexity (lambda)")
+axes[1].set_xlabel(r"$\epsilon$")
+axes[1].set_ylabel(r"$R_0^{(2)}$")
+```
+
+## Notes
+
+- This notebook currently uses a kernel-level prototype sweep (fast) to compare metric surfaces.
+- Next step is swapping this to Snakemake-produced inferred-kernel outputs from simulated contagion data.

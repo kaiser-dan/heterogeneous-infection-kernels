@@ -9,10 +9,21 @@ This notebook demonstrates how to load Operation Outbreak simulation data (speci
 
 ```{python}
 #| label: setup
+#| output: false
+#| echo: false
 
 import sys
 import os
 from pathlib import Path
+
+# Add project source to path (notebook lives in notebooks/will)
+sys.path.append(
+    os.path.join(
+        '..',  # will -> notebooks
+        '..',  # notebooks -> project root
+    )
+)
+
 import pandas as pd
 import numpy as np
 from sqlalchemy import create_engine
@@ -23,9 +34,11 @@ from scipy.special import logit, expit
 import matplotlib.pyplot as plt
 import networkx as nx
 
+import src
+from src.data_processing import ContagionMetadata, get_timeseries, get_adjacency_matrix, decompress_array
 
-from src.data_processing.ORM import ContagionMetadata
-from src.data_processing.database_utils import decompress_array, get_timeseries, get_adjacency_matrix
+# Define project_root for file paths
+project_root = Path(os.path.join('..', '..')).resolve()
 
 def cap_exposure_bins(M, N, max_k):
     """
@@ -55,7 +68,7 @@ def cap_exposure_bins(M, N, max_k):
     return _cap(M), _cap(N)
 
 # Database connection
-db_path = Path("data") / "contagion.db"
+db_path = project_root / "data" / "contagion.db"
 engine = create_engine(f"sqlite:///{db_path}")
 Session = sessionmaker(bind=engine)
 session = Session()

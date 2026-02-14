@@ -1,0 +1,399 @@
+---
+title: "Simulated Data Validation: JGY-mod vs KT"
+subtitle: "Testing mixture models on ER random graph with known ground truth"
+date: 12-20-26
+format:
+  html:
+    grid:
+      body-width: 1200px
+    embed-resources: false
+---
+
+This notebook tests both Stan mixture model implementations on simulated data where we know the ground truth kernel. We use a small Erdős-Rényi random graph (200 nodes) so inference runs quickly with caching enabled. This validates that both models can recover the true infection probability function.
+
+## Setup and Imports
+
+```{python}
+#| label: setup
+#| output: false
+#| echo: false
+
+import sys
+import os
+from pathlib import Path
+
+# Add project source to path (notebook lives in notebooks/will)
+sys.path.append(
+    os.path.join(
+        '..',  # will -> notebooks
+        '..',  # notebooks -> project root
+    )
+)
+
+import pandas as pd
+import numpy as np
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+import cmdstanpy as csp
+import seaborn as sns
+from scipy.special import logit, expit
+import matplotlib.pyplot as plt
+import networkx as nx
+import arviz as az
+
+import src
+
+# Define project_root for file paths
+project_root = Path(os.path.join('..', '..')).resolve()
+
+# Model configuration
+K = 2  # Number of mixture components
+
+# Helper function for exposure bin capping
+def cap_exposure_bins(M, N, max_k):
+    """
+    Truncate exposure matrices to keep only the first `max_k` columns.
+    """
+    if max_k is None or max_k <= 0:
+        return M, N
+
+    def _cap(arr):
+        if arr is None:
+            return None
+        arr = np.asarray(arr)
+        return arr[:, :max_k] if arr.shape[1] > max_k else arr
+
+    return _cap(M), _cap(N)
+```
+
+## Generate Simulated Data
+
+We simulate a heterogeneous contagion process on a simple Erdős-Rényi random graph with a known ground truth kernel.
+
+```{python}
+#| label: sim-data-generation
+
+# Generate ER random graph
+N_nodes = 200
+avg_degree = 10
+p_edge = avg_degree / (N_nodes - 1)
+
+print(f"Generating ER graph: N={N_nodes}, avg_degree={avg_degree}, p={p_edge:.4f}")
+G = nx.erdos_renyi_graph(N_nodes, p_edge, seed=42)
+adj = nx.to_numpy_array(G).astype(int)
+actual_avg_degree = adj.sum() / N_nodes
+
+print(f"Generated graph: {N_nodes} nodes, actual avg degree = {actual_avg_degree:.1f}")
+
+# Simulation parameters (simple contagion)
+gamma = 0.1
+dt = 1.0
+T_steps = 200
+num_seeds = 10
+rep_number = 2.0  # R0 target
+beta = rep_number * gamma / actual_avg_degree + 0.1
+kmax_sim = int(adj.sum(axis=1).max())
+
+# Ground truth kernel: simple contagion c(ν) = 1 - (1-β)^ν
+c_true = 1 - np.power(1 - beta, np.arange(1, kmax_sim + 1))
+kernels = np.tile(c_true, (N_nodes, 1))
+
+print(f"Network: {N_nodes} nodes, avg degree = {avg_degree:.1f}")
+print(f"β = {beta:.4f}, γ = {gamma}, kmax = {kmax_sim}")
+print(f"Ground truth kernel c(1) = {c_true[0]:.4f}, c(kmax) = {c_true[-1]:.4f}")
+
+# Initial infected state
+rng = np.random.default_rng(123)
+x0 = np.zeros(N_nodes, dtype=int)
+initial_infected = rng.choice(N_nodes, size=min(num_seeds, N_nodes), replace=False)
+x0[initial_infected] = 1
+
+# Run simulation
+print("\nRunning simulation...")
+states = src.heterogeneous_contagion_process(adj, gamma, kernels, x0, tmax=T_steps, dt=dt, random_seed=123)
+M_sim, N_sim = src.get_activations(states.T, adj, kmax_sim)
+
+# Cap to max_k
+max_k_sim = 20
+M_sim_capped, N_sim_capped = cap_exposure_bins(M_sim, N_sim, max_k_sim)
+
+print(f"Simulation complete: {states.sum()} total infections")
+print(f"M shape (capped): {M_sim_capped.shape}, N shape (capped): {N_sim_capped.shape}")
+```
+
+## Visualize Simulated Data
+
+```{python}
+#| label: visualize-sim
+#| fig-width: 15
+#| fig-height: 4
+
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+# Infection time series
+axes[0].imshow(states, aspect='auto', cmap='Reds', interpolation='nearest')
+axes[0].set_title('Simulated Infection States')
+axes[0].set_xlabel('Node')
+axes[0].set_ylabel('Timestep')
+
+# M matrix
+axes[1].imshow(M_sim_capped, aspect='auto', cmap='Blues', interpolation='nearest')
+axes[1].set_title('Exposure Successes (M)')
+axes[1].set_xlabel('ν (infected neighbors)')
+axes[1].set_ylabel('Node')
+
+# N matrix
+axes[2].imshow(N_sim_capped, aspect='auto', cmap='Oranges', interpolation='nearest')
+axes[2].set_title('Exposure Failures (N)')
+axes[2].set_xlabel('ν (infected neighbors)')
+axes[2].set_ylabel('Node')
+
+plt.tight_layout()
+plt.show()
+```
+
+## Fit JGY-mod Model
+
+```{python}
+#| label: fit-jgy-mod
+#| cache: true
+
+# Prepare data dict
+data_sim_jgy = {
+    "V": M_sim_capped.shape[0],
+    "kmax": M_sim_capped.shape[1],
+    "K": K,
+    "M": M_sim_capped,
+    "N": N_sim_capped,
+    "DEVIATION_SCALE": [1.0] * K,
+    "REPLICATES": 100,
+}
+
+# Load and compile model
+model_jgy_path = project_root / "src" / "models" / "model_JGY-mod.stan"
+model_jgy = csp.CmdStanModel(stan_file=str(model_jgy_path))
+
+# Fit model
+print("Fitting JGY-mod on simulated data...")
+fit_jgy_sim = model_jgy.sample(
+    data=data_sim_jgy,
+    seed=42,
+    chains=2,
+    iter_sampling=500,
+    iter_warmup=250,
+    adapt_delta=0.9,
+    show_progress=True,
+)
+
+print("\n=== JGY-mod Diagnostics ===")
+print(fit_jgy_sim.diagnose())
+```
+
+## Fit KT Model
+
+```{python}
+#| label: fit-kt
+#| cache: true
+
+# Prepare data dict (no REPLICATES for KT)
+data_sim_kt = {
+    "V": M_sim_capped.shape[0],
+    "kmax": M_sim_capped.shape[1],
+    "K": K,
+    "M": M_sim_capped,
+    "N": N_sim_capped,
+    "DEVIATION_SCALE": [1.0] * K,
+}
+
+# Load and compile model
+model_kt_path = project_root / "src" / "models" / "model_KT.stan"
+model_kt = csp.CmdStanModel(stan_file=str(model_kt_path))
+
+# Fit model
+print("Fitting KT on simulated data...")
+fit_kt_sim = model_kt.sample(
+    data=data_sim_kt,
+    seed=42,
+    chains=2,
+    iter_sampling=500,
+    iter_warmup=250,
+    adapt_delta=0.9,
+    show_progress=True,
+)
+
+print("\n=== KT Diagnostics ===")
+print(fit_kt_sim.diagnose())
+```
+
+## Sampling Diagnostics Comparison
+
+```{python}
+#| label: compare-diagnostics
+
+def get_diagnostics_summary(fit, model_name):
+    summary = fit.summary()
+
+    # Get ESS and Rhat using correct column names
+    if 'ESS_bulk' in summary.columns:
+        ess_bulk = summary['ESS_bulk'].values
+        ess_tail = summary['ESS_tail'].values
+        rhat = summary['R_hat'].values
+    elif 'N_Eff' in summary.columns:
+        ess_bulk = summary['N_Eff'].values
+        ess_tail = summary['N_Eff'].values
+        rhat = summary['R_hat'].values
+    else:
+        print(f"Available columns: {summary.columns.tolist()}")
+        raise ValueError("Could not find ESS/Rhat columns in summary")
+
+    return {
+        'model': model_name,
+        'min_ess_bulk': ess_bulk.min(),
+        'mean_ess_bulk': ess_bulk.mean(),
+        'min_ess_tail': ess_tail.min(),
+        'mean_ess_tail': ess_tail.mean(),
+        'max_rhat': rhat.max(),
+        'n_rhat_above_1.01': (rhat > 1.01).sum(),
+        'divergences': fit.method_variables()['divergent__'].sum(),
+    }
+
+diag_jgy = get_diagnostics_summary(fit_jgy_sim, 'JGY-mod')
+diag_kt = get_diagnostics_summary(fit_kt_sim, 'KT')
+
+diag_df = pd.DataFrame([diag_jgy, diag_kt])
+print("\n=== Diagnostics Comparison ===")
+print(diag_df.to_string(index=False))
+```
+
+## Compare Inferred Kernels vs Ground Truth
+
+```{python}
+#| label: compare-kernels
+#| fig-width: 14
+#| fig-height: 6
+
+# Extract mu from both models
+mu_jgy_sim = fit_jgy_sim.stan_variable('mu')
+mu_kt_sim = fit_kt_sim.stan_variable('mu')
+
+kmax_actual = mu_jgy_sim.shape[2]
+nu_axis = np.arange(1, kmax_actual + 1)
+c_true_plot = c_true[:kmax_actual]  # Match dimensions
+
+print(f"JGY mu shape: {mu_jgy_sim.shape}")
+print(f"KT mu shape: {mu_kt_sim.shape}")
+
+# Plot
+fig, axes = plt.subplots(2, K, figsize=(14, 8))
+
+for k in range(K):
+    # JGY-mod
+    mu_mean_jgy = mu_jgy_sim[:, k, :].mean(axis=0)
+    mu_lower_jgy = np.percentile(mu_jgy_sim[:, k, :], 2.5, axis=0)
+    mu_upper_jgy = np.percentile(mu_jgy_sim[:, k, :], 97.5, axis=0)
+
+    axes[0, k].plot(nu_axis, mu_mean_jgy, 'b-', label='Inferred (mean)')
+    axes[0, k].fill_between(nu_axis, mu_lower_jgy, mu_upper_jgy,
+                           color='blue', alpha=0.3, label='95% CI')
+    axes[0, k].plot(nu_axis, c_true_plot, 'r--', label='Ground Truth', linewidth=2)
+    axes[0, k].set_title(f'JGY-mod: Mode {k+1}')
+    axes[0, k].set_xlabel('ν (infected neighbors)')
+    axes[0, k].set_ylabel('μ_k(ν)')
+    axes[0, k].legend()
+    axes[0, k].grid(alpha=0.3)
+
+    # KT
+    mu_mean_kt = mu_kt_sim[:, k, :].mean(axis=0)
+    mu_lower_kt = np.percentile(mu_kt_sim[:, k, :], 2.5, axis=0)
+    mu_upper_kt = np.percentile(mu_kt_sim[:, k, :], 97.5, axis=0)
+
+    axes[1, k].plot(nu_axis, mu_mean_kt, 'g-', label='Inferred (mean)')
+    axes[1, k].fill_between(nu_axis, mu_lower_kt, mu_upper_kt,
+                           color='green', alpha=0.3, label='95% CI')
+    axes[1, k].plot(nu_axis, c_true_plot, 'r--', label='Ground Truth', linewidth=2)
+    axes[1, k].set_title(f'KT: Mode {k+1}')
+    axes[1, k].set_xlabel('ν (infected neighbors)')
+    axes[1, k].set_ylabel('μ_k(ν)')
+    axes[1, k].legend()
+    axes[1, k].grid(alpha=0.3)
+
+plt.suptitle('Simulated Data: Inferred Kernels vs Ground Truth', fontsize=14)
+plt.tight_layout()
+plt.show()
+```
+
+## Mixture Weights Comparison
+
+```{python}
+#| label: compare-mixture-weights
+#| fig-width: 12
+#| fig-height: 5
+
+# Extract mixture weights π[i]
+pi_jgy = fit_jgy_sim.stan_variable('pi')  # shape: (draws, V, K)
+pi_kt = fit_kt_sim.stan_variable('pi')    # shape: (draws, V, K)
+
+# Compute mean mixture weights per node
+pi_mean_jgy = pi_jgy.mean(axis=0)  # shape: (V, K)
+pi_mean_kt = pi_kt.mean(axis=0)    # shape: (V, K)
+
+# Plot comparison
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+# JGY-mod
+im1 = axes[0].imshow(pi_mean_jgy, aspect='auto', cmap='viridis',
+                     interpolation='nearest', vmin=0, vmax=1)
+axes[0].set_title('JGY-mod: Mean mixture weights π[i]')
+axes[0].set_xlabel('Mixture component k')
+axes[0].set_ylabel('Node index')
+axes[0].set_xticks(range(K))
+axes[0].set_xticklabels([f'k={k+1}' for k in range(K)])
+plt.colorbar(im1, ax=axes[0], label='π[i,k]')
+
+# KT
+im2 = axes[1].imshow(pi_mean_kt, aspect='auto', cmap='viridis',
+                     interpolation='nearest', vmin=0, vmax=1)
+axes[1].set_title('KT: Mean mixture weights π[i]')
+axes[1].set_xlabel('Mixture component k')
+axes[1].set_ylabel('Node index')
+axes[1].set_xticks(range(K))
+axes[1].set_xticklabels([f'k={k+1}' for k in range(K)])
+plt.colorbar(im2, ax=axes[1], label='π[i,k]')
+
+plt.tight_layout()
+plt.show()
+
+# Print summary statistics
+print("\n=== Mixture Weight Statistics ===")
+print(f"JGY-mod: π[:,0] mean = {pi_mean_jgy[:, 0].mean():.3f}, std = {pi_mean_jgy[:, 0].std():.3f}")
+print(f"KT:      π[:,0] mean = {pi_mean_kt[:, 0].mean():.3f}, std = {pi_mean_kt[:, 0].std():.3f}")
+```
+
+## Summary
+
+```{python}
+#| label: summary
+#| echo: false
+
+print("\n" + "="*60)
+print("MODEL COMPARISON SUMMARY (SIMULATED DATA)")
+print("="*60)
+
+print("\n1. GROUND TRUTH:")
+print(f"   Kernel: c(ν) = 1 - (1-β)^ν")
+print(f"   β = {beta:.4f}, c(1) = {c_true[0]:.4f}")
+
+print("\n2. SAMPLING EFFICIENCY:")
+print(f"   JGY-mod: ESS_bulk = {diag_jgy['mean_ess_bulk']:.0f}, divergences = {diag_jgy['divergences']}")
+print(f"   KT:      ESS_bulk = {diag_kt['mean_ess_bulk']:.0f}, divergences = {diag_kt['divergences']}")
+
+print("\n3. CONVERGENCE:")
+print(f"   JGY-mod: max R-hat = {diag_jgy['max_rhat']:.4f}, n(R-hat > 1.01) = {diag_jgy['n_rhat_above_1.01']}")
+print(f"   KT:      max R-hat = {diag_kt['max_rhat']:.4f}, n(R-hat > 1.01) = {diag_kt['n_rhat_above_1.01']}")
+
+print("\n4. KEY OBSERVATIONS:")
+print("   - Both models should recover the ground truth kernel shape")
+print("   - KT should show better ESS due to non-centered parameterization")
+print("   - KT should prevent label switching with ordered constraints")
+print("\n" + "="*60)
+```

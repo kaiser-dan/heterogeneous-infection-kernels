@@ -1,0 +1,22 @@
+---
+title: "Heterogeneous Infection Kernels"
+subtitle: "Research Notebooks"
+---
+
+## Overview
+
+This website contains research notebooks exploring heterogeneous infection kernels for epidemic modeling. We focus on social contagion across Twitter and Operation Outbreak datasets.
+
+## Research Notes
+
+Navigate using the sidebar to view notebooks organized by date. All research notes are cached and frozen to ensure reproducible results over time.
+
+- **Dashboard**: [Interactive Dashboard](dashboard.qmd)
+- **Latest Analysis**: [01-23-26](01-23-26.qmd)
+- **Previous Discussions**: [01-22-26](01-22-26.qmd)
+
+## Project Information
+
+**Author**: Will  
+**Project**: Heterogeneous Infection Kernels  
+**Repository**: [View on GitHub](../../)

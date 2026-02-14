@@ -1,0 +1,55 @@
+project:
+  type: website
+  output-dir: _site
+  render:
+    - "*.qmd"
+    - "!stan_inference_demo.qmd"  # excluded: has simulation bug
+    - "!dashboard.qmd"            # excluded: interactive shiny app
+    - "!12-3-25.qmd"             # excluded: imports removed ContagionMetadata
+    - "!12-4-25.qmd"             # excluded: imports removed ContagionMetadata
+    - "!12-19-25.qmd"            # excluded: imports removed ContagionMetadata
+
+freeze: auto
+
+website:
+  title: "Heterogeneous Infection Kernels"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+  sidebar:
+    style: "docked"
+    search: true
+    contents:
+      - section: "Research Notes"
+        contents: auto
+
+execute:
+  cache: true
+
+format:
+  html:
+    code-fold: true
+    code-summary: "Show code"
+    code-tools:
+      source: true
+      toggle: true
+      caption: "Code"
+    code-link: true
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    theme: cosmo
+    other-links:
+      - text: "Project Repository"
+        href: "https://github.com/kaiser-dan/heterogeneous-infection-kernels"
+        icon: github
+
+jupyter: python3
+
+# Global metadata
+author: "Will"
+bibliographystyle: "american-physics-society"
+reference-location: margin
+citation-location: margin

@@ -1,6 +1,11 @@
 ---
 title: "Stan Inference Demo with Capped and Uncapped Exposures"
-format: html
+format: 
+  html:
+    grid:
+      body-width: 1200px
+    embed-resources: true
+  pdf: default
 ---
 
 This notebook demonstrates running a Stan inference model on both simulated and real-world contagion data. We compare the results of using two different types of exposure matrices:
@@ -11,15 +16,19 @@ This notebook demonstrates running a Stan inference model on both simulated and 
 
 ```{python}
 #| label: setup
+#| output: false
+#| echo: false
 import sys
 import os
 from pathlib import Path
 
-# Relative project root (notebook lives in notebooks/will)
-notebook_dir = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
-project_root = notebook_dir.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.append(str(project_root))
+# Add project source to path (notebook lives in notebooks/will)
+sys.path.append(
+    os.path.join(
+        '..',  # will -> notebooks
+        '..',  # notebooks -> project root
+    )
+)
 
 import pandas as pd
 import numpy as np
@@ -31,10 +40,12 @@ from scipy.special import logit, expit
 import matplotlib.pyplot as plt
 import networkx as nx
 
-from src.data_processing.ORM import ContagionMetadata
-from src.data_processing.database_utils import get_timeseries, get_adjacency_matrix
+import src
+from src.data_processing import ContagionMetadata, get_timeseries, get_adjacency_matrix
 from src.data_processing.operation_outbreak import compute_exposure_counts_from_timeseries
-from src.dynamics import heterogeneous_contagion_process, get_activations
+
+# Define project_root for file paths
+project_root = Path(os.path.join('..', '..')).resolve()
 
 # --- Helper Functions ---
 
@@ -130,8 +141,8 @@ initial_infected = rng.choice(N_nodes, size=min(num_seeds, N_nodes), replace=Fal
 x0[initial_infected] = 1
 
 # Run simulation
-states = heterogeneous_contagion_process(adj, gamma, kernels, x0, tmax=T_steps, dt=dt, random_seed=123)
-M_sim_uncapped, N_sim_uncapped = get_activations(states.T, adj, kmax_sim)
+states = src.heterogeneous_contagion_process(adj, gamma, kernels, x0, tmax=T_steps, dt=dt, random_seed=123)
+M_sim_uncapped, N_sim_uncapped = src.get_activations(states.T, adj, kmax_sim)
 
 # Create bin-capped matrices
 kmax_bin_cap = 20
@@ -508,6 +519,46 @@ plt.tight_layout()
 plt.show()
 ```
 
+So looking at @fig-real-thresh-mix-pi our theory seems to be correct. The second mixture component contains mostly the unactivated nodes. So what if we only include nodes which are *eventually* activated? 
+
+
+```{python}
+#| label: fig-real-graph
+#| fig-cap: "Infection time series (ever-infected nodes) and thresholded adjacency subgraph."
+# Plot the infection time series for ever-infected nodes and the thresholded subgraph.
+
+# Ensure active-node data
+infected_nodes = ts_df_real.columns[(ts_df_real > 0).any(axis=0)]
+ts_real_active = ts_df_real[infected_nodes]
+adj_real_active = adj_df_real.loc[infected_nodes, infected_nodes]
+adj_bin_active = (adj_real_active.to_numpy() > 0).astype(int)
+G_active = nx.from_numpy_array(adj_bin_active)
+
+fig = plt.figure(figsize=(14, 6))
+gs = fig.add_gridspec(1, 2, width_ratios=[2, 1], wspace=0.3)
+
+# Left: infection time series heatmap (time x nodes)
+ax_ts = fig.add_subplot(gs[0, 0])
+im = ax_ts.imshow(ts_real_active.to_numpy(), aspect="auto", cmap="Reds", interpolation="nearest", origin="lower")
+ax_ts.set_title("Infection Time Series (active nodes)")
+ax_ts.set_xlabel("Node (index in active set)")
+ax_ts.set_ylabel("Timestep")
+plt.colorbar(im, ax=ax_ts, label="Infection state")
+
+# Right: thresholded adjacency subgraph
+ax_net = fig.add_subplot(gs[0, 1])
+pos = nx.spring_layout(G_active, seed=1, k=0.2)
+nx.draw_networkx_edges(G_active, pos, ax=ax_net, edge_color="#BDC3C7", alpha=0.4, width=0.8)
+nx.draw_networkx_nodes(G_active, pos, ax=ax_net, node_color="#E74C3C", node_size=8 + 2 * np.array([G_active.degree(n) for n in G_active.nodes()]))
+ax_net.set_title("Thresholded adjacency (active nodes)")
+ax_net.axis("off")
+
+plt.tight_layout()
+plt.show()
+```
+
+The graph here seems to make sense. We are indeed only getting a subset of nodes which are eventually infected and the graph seems to make sense? So what else is going wrong? 
+
 ## Thresholded, K=2 on Ever-Infected Subset
 
 ```{python}
@@ -629,46 +680,4 @@ plt.tight_layout(rect=[0, 0.03, 1, 0.92])
 plt.show()
 ```
 
-```{python}
-#| label: fig-real-graph
-#| fig-cap: "Infection time series (ever-infected nodes) and thresholded adjacency subgraph."
-# Plot the infection time series for ever-infected nodes and the thresholded subgraph.
 
-# Ensure active-node data
-infected_nodes = ts_df_real.columns[(ts_df_real > 0).any(axis=0)]
-ts_real_active = ts_df_real[infected_nodes]
-adj_real_active = adj_df_real.loc[infected_nodes, infected_nodes]
-adj_bin_active = (adj_real_active.to_numpy() > 0).astype(int)
-G_active = nx.from_numpy_array(adj_bin_active)
-
-fig = plt.figure(figsize=(14, 6))
-gs = fig.add_gridspec(1, 2, width_ratios=[2, 1], wspace=0.3)
-
-# Left: infection time series heatmap (time x nodes)
-ax_ts = fig.add_subplot(gs[0, 0])
-im = ax_ts.imshow(ts_real_active.to_numpy(), aspect="auto", cmap="Reds", interpolation="nearest", origin="lower")
-ax_ts.set_title("Infection Time Series (active nodes)")
-ax_ts.set_xlabel("Node (index in active set)")
-ax_ts.set_ylabel("Timestep")
-plt.colorbar(im, ax=ax_ts, label="Infection state")
-
-# Right: thresholded adjacency subgraph
-ax_net = fig.add_subplot(gs[0, 1])
-pos = nx.spring_layout(G_active, seed=1, k=0.2)
-nx.draw_networkx_edges(G_active, pos, ax=ax_net, edge_color="#BDC3C7", alpha=0.4, width=0.8)
-nx.draw_networkx_nodes(G_active, pos, ax=ax_net, node_color="#E74C3C", node_size=8 + 2 * np.array([G_active.degree(n) for n in G_active.nodes()]))
-ax_net.set_title("Thresholded adjacency (active nodes)")
-ax_net.axis("off")
-
-plt.tight_layout()
-plt.show()
-```
-
-So looking at @fig-real-thresh-mix-pi our theory seems to be correct. The second mixture component contains mostly the unactivated nodes. So what if we only include nodes which are *eventually* activated? 
-
-### Only Activated Nodes
-
-```{python}
-#| label: real-thresh-mixture-only-activated
-    
-```

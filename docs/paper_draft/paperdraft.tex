@@ -1,0 +1,173 @@
+\documentclass[10pt,aps,pre,twocolumn,nopacs,final,letterpaper,superscriptaddress,longbibliography]{revtex4-2}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amsfonts,amssymb}
+\usepackage{graphicx}
+\usepackage{bm}
+\usepackage{hyperref}
+\usepackage[ruled]{algorithm2e}
+\usepackage{xcolor}
+\usepackage{quotes}
+\definecolor{goodblue}{RGB}{0, 91, 187}
+\urlstyle{same}
+\hypersetup{
+  colorlinks=true,
+  allcolors=goodblue,
+  urlcolor=goodblue,
+  citecolor=goodblue,
+  pdfborder={0 0 0},
+  breaklinks=true,
+}
+%%% Macros
+\newcommand{\boldA}{\bm{A}}
+\newcommand{\boldQ}{\bm{Q}}
+\newcommand{\boldX}{\bm{X}}
+\newcommand{\bbN}{\mathbb{N}}
+\newcommand{\boldx}{\bm{x}}
+\newcommand{\boldc}{\bm{c}}
+\newcommand{\boldq}{\bm{q}}
+\newcommand{\boldone}{\bm{1}}
+\newcommand{\ER}{Erd\H os-R\'enyi }
+
+\begin{document}
+\title{The complexity of contagion: nonlinearity and correlated heterogeneity}
+
+\begin{abstract}
+
+\end{abstract}
+
+\maketitle
+
+\section{Introduction} %LHD happy to write this to explain the origin of the project and the big research questions.
+
+\begin{itemize}
+    \item Models of epidemiological contagion are often modeled as simple contagion processes, based on a mechanistic understanding that a single infected individual can infect an un-infected individual.
+    \item Talk about system-level biases emerging from uncertainty (St-Onge and H\'ebert-Dufresne)
+\end{itemize}
+
+\section{Results}
+
+\subsection{The contagion model}
+
+We consider a susceptible-infected-susceptible (SIS) contagion model, where susceptible nodes get infected via infected neighbors, and heal spontaneously. more specifically, we use a heterogeneous neighborhood-based contagion model, which is an extension of the model presented in Ref.~\cite{landry_reconstructing_2024}. Here, we allow each agent to have different rules of contagion spread.
+
+More formally, given an undirected, simple, unweighted network $G = (V, E)$ with $N = |V|$ nodes and $M=|E|$ edges, for a node $i$, we define its neighborhood as $\eta_i = \{j \mid \forall (i, j)\in E\}$. The number of neighbors is, by definition, equal to the degree of node $i$.
+
+We describe the discrete-time network SIS model as follows.
+For each time $t=0, 1,\dots, T$, an infected node $i$ can heal spontaneously with probability $\gamma_i$, and be infected with probability $c_i(\nu_i)$, where $c_i\mapsto[0, 1]$ is the \textit{contagion function} for node $i$, and $\nu_i$ is the number of infected neighbors.
+As in Ref.~\cite{landry_reconstructing_2024}, we write this function as a contagion vector $\boldc = [c_0, \dots, c_{N-1}]^T$  in nonparametric form, where $c_\nu$ denotes the probability of infection by $\nu$ infected neighbors and $N$ is the number of nodes.
+The heterogeneity of the contagion function can capture, for instance, different immune responses characteristic of different ages, or different communities.
+We can capture this by rewriting the contagion function as a hierarchical model $c(\nu, \theta) = c(\nu \mid \theta)P(\theta)$, where $\theta$ represents additional function parameters which make be contingent upon demographic characteristics.
+
+Other things:
+\begin{itemize}
+    \item Our initial model is on a 2-community SBM with fixed mean degree, but one could (1) vary the relative community sizes and (2) add more than 2 communities. For example, in the three community case, you could arrange them in a line or a ring (both of which would be very interesting!)
+    \item Would it be valuable to also look at contagion kernels conditioned on degree? Is this a special case of the $\theta$? I think it's different, because it's a structural property, although if the adjacency matrix is fixed, it's effectively the same.
+\end{itemize}
+
+\subsection{Contagion kernel inference}
+
+Similar, to Ref.~\cite{landry_reconstructing_2024}, we use a Bayesian approach for inferring the contagion kernels. However, unlike Ref.~\cite{landry_reconstructing_2024}, we presume that the network itself is known and we must only infer the individual infection kernels.
+There is a twist however: we infer the kernel using three different models: (1) a misspecified single-kernel model, (2) an individual kernel model, and (3) a hierarchical kernel model.
+
+To-do:
+\begin{itemize}
+    \item The single-contagion-function model is pretty straightforward from Ref.~\cite{landry_reconstructing_2024}, and the individual kernel model is also straightforward (but needs much more data to faithfully estimate), but I haven't had a chance to write down the hierarchical model.
+    \item Does it make sense to have some analysis on reconstructing the adjacency matrix from heterogeneous kernels? Or is that beyond the scope of this paper?
+    \item It would be cool to get some analytical results relating the complexity of the contagion, the community structure and different contagion kernels.
+\end{itemize}
+
+
+\subsection{Potential model}
+
+\begin{itemize}
+    \item \textbf{Goal}: Understand variations in kernels. Can we get complex contagion from a mixture of kernels that look simple? 
+    \item \textbf{Idea}: Each node gets its own kernel, but we pool across nodes. 
+\end{itemize}
+
+\textbf{Proposed model.}
+Let $c_i(\nu)$ be the kernel for node $i$.
+We know from previous work~\cite{landry_reconstructing_2024} that the likelihood of series of states $\bm{X}$ is proportional to
+\begin{multline}
+    \log P(\bm{X}\mid \bm{A}, \theta) \propto \sum_{i=1}^N \sum_{\nu=0}^{k_i} m_{i\nu} \log c_i(\nu)\\ +  \sum_{i=1}^N \sum_{\nu=0}^{k_i} n_{i\nu} \log \bigl[1 - c_i(\nu)\bigr]
+\end{multline}
+where $k_i$ is the degree of node $i$, and where $m_{i\nu}$ and $n_{i\nu}$ are the number of infection events occurring and failing to occur around node $i$ when it has $\nu$ infected neighbors.
+The resulting matrices, $\bm{M}$ and $\bm{N}$, fully summarize the dynamics and are the only inputs required for inference.
+
+In previous work, we made the simplifying assumption $c_i(\nu) = c(\nu)$ for all nodes $i=1,...,N$.
+The proposed innovation for this paper is to model the heterogeneity of $\{c_i(\nu)\}_{i=1,...,N}$ more carefully.
+
+We'll begin by putting this variable on a logit scale to allow for more flexible modeling
+\begin{equation}
+    \mathrm{logit}\ c_i(\nu) = \alpha_i(\nu),
+\end{equation}
+where $\alpha_i(\nu)\in\mathbb{R}$ is an intercept and now the main target of inference.
+Then, we remove the assumption that every node has the same kernel and instead estimate the distribution of individual kernels using a hierarchical model where intercepts are random.
+
+For example, we could model
+\begin{equation}
+    \alpha_i(\nu)\sim\mathrm{Normal}\bigl(\mu_\alpha(\nu), \sigma_\alpha\bigr)
+\end{equation}
+with further priors on the hyperparameters $\mu_\alpha$ and $\sigma_\alpha$.
+(The normal distribution encourages clustering of the intercepts---a ridge regression of sorts. But the intercepts need not follow a normal distribution even if that's the prior. We can also use a different prior if this fits the data poorly.)
+To complete the model, we need priors on the hyperparameters.
+A simple prior on $\sigma_\alpha$ can be used, e.g., an exponential or Cauchy distribution with fixed hyperparameters.
+The prior on $\mu_\alpha(\nu)$ can also be pretty generic, or we could enforce non-decreasing (average) intercepts with $\Delta\sim\mathrm{Dirichlet}(k_{\max})$ and
+\begin{equation}
+    \mu_\alpha(\nu) = \mathrm{logit}\left[\sum_{j=0}^{\nu} \Delta_j\right].
+\end{equation}
+(That is: We sample spacings between the average kernels, and the average is just a cumulative sum of the spacings. The logit transformation is necessary to work on the scale of the intercepts. )
+
+
+The upshot is that this framework is easily extendable.
+For example, we can bring in node features like degrees with
+\begin{equation}
+    \mathrm{logit}\ c_i(\nu) = \alpha_i(\nu) + \bm{x}_i^T\bm{\beta}
+\end{equation}
+where $\bm{x}_i = [x^{(i)}_1, ... x^{(i)}_q]$ is a vector of $q$ features for node $i$, and $\bm{\beta}$ are regression coefficients, to be inferred.
+The rest of the model is unchanged.
+(Note: We're essentially doing a logistic regression with random intercepts on the matrices $\bm{M}$ and $\bm{N}$.)
+
+
+We can also write mixture versions, where nodes can be assigned one of many kernels.
+This is the scenario where a node behaves differently depending on the situation, and we don't get to observe the kernel that was chosen.
+We'd have many vectors of intercepts $\bm{\alpha}_1,...,\bm{\alpha}_K$, and
+\begin{equation}
+    \alpha_i(\nu) = \sum_{\ell=1}^K \pi_{i,\ell} \alpha_\ell (\nu)
+\end{equation}
+where $\bm{\pi}_i$ is drawn from a Dirichlet distribution and is different for every node.
+(Again: the Dirichlet would have shared hyperparameters across nodes to enable pooling.)
+In this case, a separate mixture for every node is probably too overparametrized; hence, the idea would be to introduce $K$ kernels. 
+A specific node $i$ picks its kernel according to its personalized probability vector $\bm{\pi}_i$.
+And this probability can depend on the feature of node $i$ if need be.
+The model is otherwise the same.
+
+
+
+\subsection{Case studies}
+
+\subsubsection{Exploring empirical populations with SynthPops}
+
+Big picture plan:
+\begin{itemize}
+    \item Collect age-mixing matrices from Mistry et al.~\cite{mistry_inferring_2021} and generate realizations of these matrices with \href{https://github.com/synthpops/synthpops}{SynthPops}.
+    \item Get estimations of the infection probability for different age-classes.
+    \item Measure contagion complexity for different strains and different cities?
+    \item Is there an interesting question that can be answered by measuring the "complexity" of contagion across different empirical settings?
+\end{itemize}
+
+\section{Discussion}
+
+Some ideas:
+\begin{itemize}
+    \item 
+\end{itemize}
+
+
+\section*{Data availability}
+
+All code used to generate the results in this study are available on \href{https://github.com/nwlandry/heterogeneous-complex-network-reconstruction}{Github} \cite{zenodo}
+
+\acknowledgments{N.W.L. acknowledges support from the University of Virginia Prominence-to-Preeminence (P2PE) STEM Targeted Initiatives Fund, SIF176A Contagion Science.}
+
+\bibliography{references}
+\end{document}

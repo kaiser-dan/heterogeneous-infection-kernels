@@ -1,0 +1,419 @@
+---
+title: "Twitter Contagion Analysis"
+date: "2026-01-22"
+format:
+  html:
+    code-fold: true
+    toc: true
+    theme: cosmo
+jupyter: python3
+---
+
+# Introduction
+
+We analyze the **Connected vs. Spontaneous** nature of the Twitter cascades. 
+
+::: {.callout-note}
+**Observation**: Many users adopt the hashtag without a visible path from the source bot in the available dataset.
+**Hypothesis**: These "Spontaneous" infections are likely due to **unobserved edges** (e.g., User-User followers not crawled) or **external discovery** (Search, Trending Topics), as the data collection (see *S3 Appendix*) focused on the Bot ego-networks and Keyword Streaming.
+:::
+
+```{python}
+#| label: setup
+#| output: false
+import sys
+from pathlib import Path
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import networkx as nx
+import matplotlib.animation as animation
+from IPython.display import HTML, Image
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+# Add project root to path
+REPO_ROOT = Path("../..").resolve()
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+# Adjust imports
+from src.data_processing.ORM import TwitterMetadata, NodeMapping
+from src.data_processing.database_utils import get_adjacency_matrix, get_timeseries, decompress_array
+
+# Connect to DB
+db_path = REPO_ROOT / "data/contagion.db"
+engine = create_engine(f"sqlite:///{db_path}")
+Session = sessionmaker(bind=engine)
+session = Session()
+
+# Helper to load a run
+def load_run(run_id):
+    meta = session.query(TwitterMetadata).filter_by(run_id=run_id).first()
+    if not meta:
+        return None
+    adj = get_adjacency_matrix(session, run_id)
+    ts = get_timeseries(session, run_id)
+    node_types = {}
+    mappings = session.query(NodeMapping).filter_by(run_id=run_id).all()
+    for m in mappings:
+        node_types[str(m.original_id)] = m.node_type
+
+    # Load M and N matrices
+    M_df = None
+    N_df = None
+    if meta.exposure_success_blob:
+        success_arr = decompress_array(meta.exposure_success_blob)
+        M_df = pd.DataFrame(success_arr, index=adj.index)
+    if meta.exposure_failure_blob:
+        fail_arr = decompress_array(meta.exposure_failure_blob)
+        N_df = pd.DataFrame(fail_arr, index=adj.index)
+
+    return {"meta": meta, "adj": adj, "ts": ts, "node_types": node_types, "M": M_df, "N": N_df}
+
+# Fetch runs
+runs = session.query(TwitterMetadata).filter(TwitterMetadata.cascade_id != -1).all()
+target_run = max(runs, key=lambda r: r.num_nodes)
+data = load_run(target_run.run_id)
+```
+
+```{python}
+#| label: connectivity
+# Extract data from dictionary for easier access
+adj = data['adj']
+ts = data['ts']
+
+dict(data['meta'].__dict__) # Force load
+bot_id_raw = data['meta'].source_bot_id
+
+# Align ID types
+# nodes in adj are likely strings or ints depending on loading
+node_list = adj.index.tolist()
+source_bot = None
+
+# Try int/str matching
+candidates = [bot_id_raw, str(bot_id_raw), int(bot_id_raw) if str(bot_id_raw).isdigit() else -999]
+for c in candidates:
+    if c in data['adj'].index:
+        source_bot = c
+        break
+
+if source_bot is None:
+    # Try finding node with type 'bot'
+    print("Warning: Source Bot ID not found in Adjacency Index directly. Inspecting types...")
+    for n, t in data['node_types'].items():
+        if t == 'bot':
+            # Just pick the first bot found if source is missing?
+            # Or try to fuzzy match?
+            # Let's fallback to checking if the explicit source ID is in the "original_id" map
+            if str(n) == str(bot_id_raw):
+                # We need the INDEX in adjacency, which might be mapped?
+                # In this load function, adj index IS original_id.
+                pass
+
+    # Fallback: Pick the node with highest Out-Degree if source not found?
+    # No, that's risky.
+    print(f"FAILED to find source bot {bot_id_raw} in graph.")
+    connected_nodes = set()
+else:
+    # Build Graph
+    G = nx.from_pandas_adjacency(adj, create_using=nx.DiGraph)
+    connected_nodes = nx.descendants(G, source_bot) | {source_bot}
+
+# Classify
+is_connected = ts.columns.isin(connected_nodes)
+connected_ts = ts.loc[:, is_connected]
+disconnected_ts = ts.loc[:, ~is_connected]
+
+print(f"Total Nodes: {len(ts.columns)}")
+print(f"Connected to Source ({source_bot}): {len(connected_ts.columns)} ({len(connected_ts.columns)/len(ts.columns):.1%})")
+print(f"Disconnected (Spontaneous): {len(disconnected_ts.columns)}")
+```
+
+## Adoption Curves by Segment
+
+```{python}
+#| label: plot-bise
+# Cumulative sum over time
+conn_curve = connected_ts.sum(axis=1)
+disc_curve = disconnected_ts.sum(axis=1)
+
+plt.figure(figsize=(10, 5))
+plt.plot(conn_curve.index, conn_curve.values, label='Network Driven (Connected)', marker='o', markersize=2)
+plt.plot(disc_curve.index, disc_curve.values, label='Spontaneous/Unobserved (Disconnected)', linestyle='--')
+plt.title(f"Adoption Dynamics: {target_run.run_id}")
+plt.xlabel("Time")
+plt.ylabel("Cumulative Adoptions")
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
+```
+
+## Exposure Matrices (Filtered)
+
+These matrices ($M$ and $N$) exclude 0-dose exposures, consistent with the paper's "Target User" methodology.
+
+```{python}
+#| label: plot-matrices
+M = data['M']
+N = data['N']
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+if M is not None:
+    # Drop empty columns if any, or just show first K
+    # Filter out rows with 0 sum to make it readable?
+    # Or just plot.
+    im1 = ax1.imshow(M.values[:100], aspect='auto', interpolation='nearest', cmap='viridis')
+    ax1.set_title("M Matrix (Successes) - Top 100 Users")
+    ax1.set_xlabel("Dose (Active Neighbors)")
+    ax1.set_ylabel("User Index")
+    plt.colorbar(im1, ax=ax1)
+
+if N is not None:
+    im2 = ax2.imshow(N.values[:100], aspect='auto', interpolation='nearest', cmap='magma')
+    ax2.set_title("N Matrix (Failures) - Top 100 Users")
+    ax2.set_xlabel("Dose (Active Neighbors)")
+    plt.colorbar(im2, ax=ax2)
+
+plt.tight_layout()
+plt.show()
+
+# Show sums
+print("Total Successes (M):", M.sum().sum())
+print("Total Failures (N):", N.sum().sum())
+```
+
+The dashed line represents adoptions that cannot be explained by the observed follower graph, confirming significant **missing data** or **external influence**.
+
+
+# Operation Outbreak: Simulation 165 Analysis
+
+We apply the mixture models to the Operation Outbreak Simulation 165 data, pruned to focus on significant interactions (weighted duration > 60s).
+
+## Inferred Kernels
+
+```{python}
+#| label: oo-results-kernels
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.special import expit
+
+def plot_inferred_kernels(results_path, title):
+    data = np.load(results_path)
+    # Both models should have mu or alpha_k
+    if 'mu' in data:
+        mu = data['mu'] # (draws, K, kmax)
+    elif 'alpha_k' in data:
+        # JGY-mod used alpha_k
+        mu = expit(data['alpha_k'])
+    else:
+        print(f"No kernel parameters found in {results_path}")
+        return
+
+    K = mu.shape[1]
+    kmax = mu.shape[2]
+    nu_axis = np.arange(kmax)
+
+    fig, axes = plt.subplots(1, K, figsize=(10, 4), sharey=True)
+    if K == 1: axes = [axes]
+    
+    for k in range(K):
+        mean = mu[:, k, :].mean(axis=0)
+        lower = np.percentile(mu[:, k, :], 2.5, axis=0)
+        upper = np.percentile(mu[:, k, :], 97.5, axis=0)
+        
+        axes[k].plot(nu_axis, mean, label='Mean')
+        axes[k].fill_between(nu_axis, lower, upper, alpha=0.3)
+        axes[k].set_title(f"Component {k+1}")
+        axes[k].set_xlabel("Infected Neighbors (ν)")
+    
+    axes[0].set_ylabel("Infection Prob μ(ν)")
+    plt.suptitle(title)
+    plt.tight_layout()
+    plt.show()
+
+# Load results (assuming script finished)
+import os
+results_dir = REPO_ROOT / "results" / "oo_sim_165"
+if results_dir.exists():
+    plot_inferred_kernels(results_dir / "JGY-mod_draws.npz", "JGY-mod: Inferred Kernels (K=2)")
+    plot_inferred_kernels(results_dir / "finite_mixture_draws.npz", "Finite Mixture: Inferred Kernels (K=2)")
+else:
+    print("Results directory not found. Please run the inference script.")
+```
+
+## Network Structure
+
+Visualization of the pruned contact network (threshold > 60).
+
+```{python}
+#| label: oo-network-viz
+import networkx as nx
+
+def plot_oo_network(sim_id, threshold=60):
+    # Load raw for viz (or load from DB if available)
+    oo_data_dir = REPO_ROOT / "data" / "Blanchard-Thesis-main" / "data"
+    histories = pd.read_csv(oo_data_dir / "oo-histories-all.csv", low_memory=False)
+    histories["user_id"] = histories["user_id"].astype(str)
+    histories["peer_id"] = histories["peer_id"].astype(str)
+    
+    from src.data_processing.operation_outbreak import contact_adjacency
+    adj = contact_adjacency(histories, sim_id, weight="duration", directed=False)
+    
+    # Prune
+    adj_pruned = adj.copy()
+    adj_pruned[adj_pruned <= threshold] = 0
+    
+    G = nx.from_pandas_adjacency(adj_pruned)
+    # Remove isolated nodes for clean viz
+    G.remove_nodes_from(list(nx.isolates(G)))
+    
+    plt.figure(figsize=(10, 10))
+    pos = nx.spring_layout(G, k=0.15, seed=42)
+    nx.draw_networkx(G, pos, with_labels=False, node_size=20, edge_color='gray', alpha=0.5)
+    plt.title(f"OO Sim {sim_id} Network (Duration > {threshold}s)")
+    plt.axis('off')
+    plt.show()
+
+plot_oo_network(165)
+```
+
+## Exposure Time Series
+
+Aggregated infection dynamics over time.
+
+```{python}
+#| label: oo-timeseries
+def plot_oo_timeseries(sim_id):
+    oo_data_dir = REPO_ROOT / "data" / "Blanchard-Thesis-main" / "data"
+    histories = pd.read_csv(oo_data_dir / "oo-histories-all.csv", low_memory=False)
+    histories["user_id"] = histories["user_id"].astype(str)
+    infections = histories[histories["type"] == "infection"].copy()
+    
+    from src.data_processing.operation_outbreak import infection_time_series
+    ts = infection_time_series(infections, sim_id, freq="1H")
+    
+    plt.figure(figsize=(12, 4))
+    plt.plot(ts.index, ts.sum(axis=1), color='red')
+    plt.title(f"Infection Time Series: OO Sim {sim_id}")
+    plt.xlabel("Time")
+    plt.ylabel("Cumulative Infections")
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
+plot_oo_timeseries(165)
+```
+
+# Dataset-wide Exposure Distributions
+
+We aggregate the exposure counts ($k$ and $\kappa$) across all users and all 8 interventions to visualize the global frequency of social reinforcement.
+
+```{python}
+#| label: global-exposure-stats
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+def get_global_distributions(session):
+    # Fetch all aggregated runs
+    aggregated_runs = session.query(TwitterMetadata).filter(TwitterMetadata.cascade_id == -1).all()
+    
+    k_success_total = None
+    k_failure_total = None
+    kappa_success_total = None
+    kappa_failure_total = None
+    
+    for run in aggregated_runs:
+        # k matrices (total exposures)
+        if run.exposure_k_success_blob:
+            m_k = decompress_array(run.exposure_k_success_blob).sum(axis=0)
+            k_success_total = m_k if k_success_total is None else k_success_total + m_k
+        if run.exposure_k_failure_blob:
+            n_k = decompress_array(run.exposure_k_failure_blob).sum(axis=0)
+            k_failure_total = n_k if k_failure_total is None else k_failure_total + n_k
+            
+        # kappa matrices (unique sources)
+        if run.exposure_kappa_success_blob:
+            m_kappa = decompress_array(run.exposure_kappa_success_blob).sum(axis=0)
+            kappa_success_total = m_kappa if kappa_success_total is None else kappa_success_total + m_kappa
+        if run.exposure_kappa_failure_blob:
+            n_kappa = decompress_array(run.exposure_kappa_failure_blob).sum(axis=0)
+            kappa_failure_total = n_kappa if kappa_failure_total is None else kappa_failure_total + n_kappa
+
+    return {
+        "k_success": k_success_total,
+        "k_failure": k_failure_total,
+        "kappa_success": kappa_success_total,
+        "kappa_failure": kappa_failure_total
+    }
+
+distros = get_global_distributions(session)
+
+def plot_dist(data_success, data_failure, title, xlabel):
+    plt.figure(figsize=(10, 5))
+    
+    # Use index 1 onwards because 0 usually means no exposure
+    x = np.arange(len(data_success))
+    
+    plt.bar(x[1:], data_failure[1:], alpha=0.5, label='Failures (N)', color='gray')
+    plt.bar(x[1:], data_success[1:], alpha=0.8, label='Successes (M)', color='red')
+    
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel("Frequency (Log Scale)")
+    plt.yscale('log')
+    plt.xticks(x[1:])
+    plt.legend()
+    plt.grid(True, which="both", ls="-", alpha=0.2)
+    plt.show()
+
+if distros["k_success"] is not None:
+    plot_dist(distros["k_success"], distros["k_failure"], 
+              "Global Distribution of Total Exposures (k)", "Number of Exposures (k)")
+
+if distros["kappa_success"] is not None:
+    plot_dist(distros["kappa_success"], distros["kappa_failure"], 
+              "Global Distribution of Unique Sources (κ)", "Number of Unique Sources (κ)")
+```
+
+## Empirical Infection Kernels (Dose-Response)
+
+While the frequency plots above show the raw counts of reinforcement, we are primarily interested in the **Infection Probability** $P(\text{retweet} | \kappa)$. This defines the kernel of the contagion process.
+
+```{python}
+#| label: dose-response-plots
+#| fig-cap: "Empirical Infection Kernels (Dose-Response)"
+
+def plot_dose_response(success, failure, title, xlabel, color='blue'):
+    plt.figure(figsize=(10, 5))
+    
+    # Avoid division by zero
+    total = success + failure
+    mask = total > 0
+    
+    x = np.arange(len(success))
+    prob = np.zeros_like(x, dtype=float)
+    prob[mask] = success[mask] / total[mask]
+    
+    # Plot with error bars (naive binomial confidence)
+    stderr = np.zeros_like(x, dtype=float)
+    stderr[mask] = np.sqrt(prob[mask] * (1 - prob[mask]) / total[mask])
+    
+    plt.errorbar(x[1:], prob[1:], yerr=stderr[1:], fmt='-o', color=color, capsize=5, label='Empirical $P(infection)$')
+    
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel("Probability of Retweet")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.show()
+
+if distros["k_success"] is not None:
+    plot_dose_response(distros["k_success"], distros["k_failure"], 
+                      "Infection Probability vs. Total Exposures (k)", "Number of Exposures (k)", color='tab:blue')
+
+if distros["kappa_success"] is not None:
+    plot_dose_response(distros["kappa_success"], distros["kappa_failure"], 
+                      "Infection Probability vs. Unique Sources (κ)", "Number of Unique Sources (κ)", color='tab:red')
+```

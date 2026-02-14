@@ -10,16 +10,20 @@ This notebook demonstrates how to load Operation Outbreak simulation data (speci
 
 ```{python}
 #| label: setup
+#| output: false
+#| echo: false
 
 import sys
 import os
 from pathlib import Path
 
-# Add project root to sys.path
-# The notebook is in notebooks/will, so the project root is two levels up.
-project_root = Path.cwd().parent.parent
-if str(project_root) not in sys.path:
-    sys.path.append(str(project_root))
+# Add project source to path (notebook lives in notebooks/will)
+sys.path.append(
+    os.path.join(
+        '..',  # will -> notebooks
+        '..',  # notebooks -> project root
+    )
+)
 
 import pandas as pd
 import numpy as np
@@ -31,9 +35,11 @@ from scipy.special import logit, expit
 import matplotlib.pyplot as plt
 import networkx as nx
 
+import src
+from src.data_processing import ContagionMetadata, get_timeseries, get_adjacency_matrix, decompress_array
 
-from src.data_processing.ORM import ContagionMetadata
-from src.data_processing.database_utils import decompress_array, get_timeseries, get_adjacency_matrix
+# Define project_root for file paths
+project_root = Path(os.path.join('..', '..')).resolve()
 
 def cap_exposure_bins(M, N, max_k):
     """
@@ -252,7 +258,6 @@ Generate synthetic M/N from a simulated contagion on the same network and run th
 ```{python}
 #| label: simulate-dynamics-and-fit
 #| fig-cap: "Simulated contagion (heatmap + cumulative + network) and quick Stan fit."
-from src.dynamics import heterogeneous_contagion_process, get_activations
 
 # Use the same run_id's network
 target_run_id = "oo_sim_165_duration"
@@ -280,10 +285,10 @@ x0 = np.zeros(N_nodes, dtype=int)
 x0[rng.choice(N_nodes, size=min(3, N_nodes), replace=False)] = 1
 
 # Simulate states over time (T x N)
-states = heterogeneous_contagion_process(adj, gamma, c_kernel, x0, tmin=0, tmax=T_steps, dt=dt, random_seed=123)
+states = src.heterogeneous_contagion_process(adj, gamma, c_kernel, x0, tmin=0, tmax=T_steps, dt=dt, random_seed=123)
 
 # Compute M and N from simulated states
-M_sim, N_sim = get_activations(states.T, adj, kmax_sim)
+M_sim, N_sim = src.get_activations(states.T, adj, kmax_sim)
 # Cap high-k bins
 kmax_sim_cap = 20
 M_sim, N_sim = cap_exposure_bins(M_sim, N_sim, max_k=kmax_sim_cap)

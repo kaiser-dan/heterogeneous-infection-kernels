@@ -1,0 +1,23 @@
+---
+title: "2-10-26"
+format: html
+---
+
+## Research Sweeps
+
+**Status**: Running on VACC (Job IDs: 2739489-2739496)
+
+**Configuration**:
+- **Sweep Script**: `scripts/sweep_scripts/run_research_sweep.py`
+- **Config**: `configs/research_sweep_oo.yaml`
+- **Output**: `results/research_sweep_oo/`
+
+**Models**:
+- Simple Contagion (K=1, K=2)
+- Complex Contagion (K=1, K=2)
+- Monotonic Empirical Bayes (K=1, K=2)
+- Non-Monotonic (K=1, K=2)
+
+**Data**:
+- Operation Outbreak Simulation 165
+- Backbone: Disparity (threshold=0.3)

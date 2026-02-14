@@ -1,0 +1,182 @@
+---
+title: "Data Verification & Reproducibility"
+format: html
+---
+
+```{python}
+import pandas as pd
+import matplotlib.pyplot as plt
+from pathlib import Path
+import os
+import json
+import duckdb
+import numpy as np
+
+# 1. Robust Project Root Detection
+def get_project_root():
+    current = Path(os.getcwd()).resolve()
+    for parent in [current] + list(current.parents):
+        if (parent / "src").exists() or (parent / "data").exists():
+            return parent
+    return current
+
+ROOT = get_project_root()
+AUTHOR_JSON = ROOT / "data/processed/twitter/author_results_q1.json"
+TWITTER_DATA_DIR = ROOT / "data/processed/twitter"
+
+print(f"Project ROOT: {ROOT}")
+print(f"Loading Ground Truth from: {AUTHOR_JSON}")
+
+# 2. Load Author Results
+with open(AUTHOR_JSON, 'r') as f:
+    author_data = json.load(f)
+
+# Author's Histograms (PDFs)
+# shared = adoptions exactly at k
+# exposed = users whose total final exposure was exactly k
+author_shared = {int(k): float(v) for k, v in author_data['shared'].items()}
+author_exposed = {int(k): float(v) for k, v in author_data['exposed'].items()}
+
+# 3. Aggregate Our Parquet Files
+con = duckdb.connect()
+m_files = str(TWITTER_DATA_DIR / "*/M_kappa_q1.0.parquet")
+n_files = str(TWITTER_DATA_DIR / "*/N_kappa_q1.0.parquet")
+
+cols = [str(k) for k in range(1, 21)]
+sum_stmt = ", ".join([f'SUM("{c}") as "{c}"' for c in cols])
+
+print(f"Aggregating subdirectories in: {TWITTER_DATA_DIR}")
+m_agg = con.execute(f"SELECT {sum_stmt} FROM read_parquet('{m_files}')").df().iloc[0]
+n_agg = con.execute(f"SELECT {sum_stmt} FROM read_parquet('{n_files}')").df().iloc[0]
+
+# Definitions:
+# m_ours[k] = Users who adopted exactly at k
+# n_risk[k] = Users who reached k but haven't adopted (Survivor set)
+m_ours = {int(k): float(m_agg[str(k)]) for k in range(1, 21)}
+n_risk = {int(k): float(n_agg[str(k)]) for k in range(1, 21)}
+
+# Derive our Exposure Histogram (T) algebraically from survival set:
+# Exposed with final total k = Adopters(k) + Censored(k)
+# Censored(k) = Survivors(k) - Survivors(k+1)
+our_exposed_pdf = {}
+for k in range(1, 20):
+    censored_at_k = n_risk[k] - n_risk.get(k+1, 0)
+    our_exposed_pdf[k] = m_ours[k] + censored_at_k
+our_exposed_pdf[20] = m_ours[20] + n_risk[20]
+
+# 4. Final Comparison Plots
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+
+ks = list(range(1, 21)) # Focus on early k for clarity
+
+# Plot M: Incidence (Adoptions)
+ax1.bar([k-0.2 for k in ks], [author_shared.get(k, 0) for k in ks], width=0.4, label='Author Shared', color='gray', alpha=0.5)
+ax1.bar([k+0.2 for k in ks], [m_ours.get(k, 0) for k in ks], width=0.4, label='Our Incidence (M)', color='blue', alpha=0.8)
+ax1.set_title("Adoption Events (M) - 100% Match Proof")
+ax1.set_xlabel("k")
+ax1.set_ylabel("Count")
+ax1.legend()
+
+# Plot T: Exposure Histogram
+ax2.bar([k-0.2 for k in ks], [author_exposed.get(k, 0) for k in ks], width=0.4, label='Author Exposed', color='gray', alpha=0.5)
+ax2.bar([k+0.2 for k in ks], [our_exposed_pdf.get(k, 0) for k in ks], width=0.4, label='Our Exposure PDF (T)', color='green', alpha=0.8)
+ax2.set_title("Exposure Distribution (T) - Population Logic Proof")
+ax2.set_xlabel("k")
+ax2.set_ylabel("Count")
+ax2.legend()
+
+plt.tight_layout()
+plt.show()
+
+# 5. Visual Explanation: Smooth vs Jagged
+plt.figure(figsize=(10, 4))
+plt.plot(ks, [n_risk[k] + m_ours[k] for k in ks], marker='o', color='red', label='Smooth Risk Set (Denominator)')
+plt.bar(ks, [our_exposed_pdf[k] for k in ks], alpha=0.3, color='green', label='Jagged Event Counts (Numerator)')
+plt.title("Visual Intuition: Why some plots look 'Smooth'")
+plt.xlabel("k")
+plt.ylabel("Count")
+plt.legend()
+plt.show()
+
+print(f"Total Adoptions (M) at k=1: Our={m_ours[1]}, Author={author_shared[1]}")
+```
+
+## Backboning Threshold Analysis for OO Sim 165
+
+```{python}
+import sys
+sys.path.insert(0, str(ROOT / "src/data_processing"))
+from operation_outbreak import contact_adjacency, apply_backbone
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Load sim 165 contact data
+histories_path = ROOT / "data/raw/operation_outbreak/oo-histories-all.csv"
+all_events = pd.read_csv(histories_path, low_memory=False)
+sim_165_events = all_events[all_events["sim_id"] == 165].copy()
+histories = sim_165_events[sim_165_events["type"] == "contact"].copy()
+
+# Build raw adjacency
+adj_raw = contact_adjacency(histories, 165)
+print(f"Raw network: {len(adj_raw)} nodes, {adj_raw.sum().sum() / 2:.0f} edges")
+print(f"Raw max degree: {adj_raw.sum(axis=1).max()}")
+print(f"Raw mean degree: {adj_raw.sum(axis=1).mean():.2f}")
+
+# Test different thresholds
+thresholds = np.linspace(0.0, 0.5, 21)
+results = []
+
+
+for threshold in thresholds:
+    if threshold == 0.0:
+        # No backboning
+        adj_bb = adj_raw
+    else:
+        adj_bb = apply_backbone(adj_raw.copy(), method="metric", threshold=threshold)
+    
+    degrees = adj_bb.sum(axis=1)
+    topo_degrees = (adj_bb > 0).sum(axis=1)
+    
+    results.append({
+        'threshold': threshold,
+        'max_degree': degrees.max(),
+        'mean_degree': degrees.mean(),
+        'max_topo_degree': topo_degrees.max(),
+        'mean_topo_degree': topo_degrees.mean(),
+        'num_edges': adj_bb.sum().sum() / 2
+    })
+
+results_df = pd.DataFrame(results)
+
+# Plot
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+axes[0].plot(results_df['threshold'], results_df['max_topo_degree'], 'o-', color='darkred')
+axes[0].axhline(y=20, color='gray', linestyle='--', label='Target max degree = 20')
+axes[0].set_xlabel('Backbone Threshold')
+axes[0].set_ylabel('Max Topological Degree')
+axes[0].set_title('Max Topo. Degree vs Threshold')
+axes[0].legend()
+axes[0].grid(True, alpha=0.3)
+
+axes[1].plot(results_df['threshold'], results_df['mean_topo_degree'], 'o-', color='darkblue')
+axes[1].set_xlabel('Backbone Threshold')
+axes[1].set_ylabel('Mean Topological Degree')
+axes[1].set_title('Mean Topo. Degree vs Threshold')
+axes[1].grid(True, alpha=0.3)
+
+axes[2].plot(results_df['threshold'], results_df['num_edges'], 'o-', color='darkgreen')
+axes[2].set_xlabel('Backbone Threshold')
+axes[2].set_ylabel('Number of Edges')
+axes[2].set_title('Edge Count vs Threshold')
+axes[2].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# Find threshold closest to max_degree = 20
+target_threshold = results_df.iloc[(results_df['max_topo_degree'] - 20).abs().argsort()[:1]]
+print(f"\nRecommended threshold for max_degree ≈ 20:")
+print(target_threshold.to_string(index=False))
+```

@@ -1,0 +1,322 @@
+---
+title: "Fixed Twitter Inference Results & Comparison"
+format: html
+---
+
+## Setup & Verification
+
+```{python}
+import sys
+from pathlib import Path
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Add project root to path
+def get_project_root():
+    import os
+    current = Path(os.getcwd()).resolve()
+    for parent in [current] + list(current.parents):
+        if (parent / "src").exists():
+            return parent
+    return current
+
+ROOT = get_project_root()
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.data_processing.utils import load_draws_parquet
+import src.fig_styles as fs
+fs.set_publication_style(fs.PALETTE_CUSTOM)
+
+RESULTS_DIR = ROOT / "results"
+```
+
+## Verify Simple Contagion Models (Debug q=0.2 Issue)
+
+First, let's check if the q=0.2 simple contagion model is actually different from q=1.0:
+
+```{python}
+def verify_sc_models():
+    """Check that q=0.2 and q=1.0 simple contagion models are different"""
+
+    sc_02 = np.load(RESULTS_DIR / "author_models/simple_k_q0.2_results.npz")
+    sc_10 = np.load(RESULTS_DIR / "author_models/simple_k_q1.0_results.npz")
+
+    print("=== Simple Contagion Model Verification ===\n")
+
+    # Check M (adopters) - should be same
+    print(f"M[1] (Adopters at k=1):")
+    print(f"  q=0.2: {sc_02['m'][0]:.2f}")
+    print(f"  q=1.0: {sc_10['m'][0]:.2f}")
+    print(f"  Match: {np.allclose(sc_02['m'], sc_10['m'])}")
+
+    # Check N (non-adopters) - should be different!
+    print(f"\nN[1] (Non-adopters at k=1):")
+    print(f"  q=0.2: {sc_02['n'][0]:.2f}")
+    print(f"  q=1.0: {sc_10['n'][0]:.2f}")
+    print(f"  Ratio (q0.2/q1.0): {sc_02['n'][0] / sc_10['n'][0]:.2f}")
+
+    # Check inferred parameter c (infection probability)
+    c_02_mean = sc_02['c'].mean(axis=0)
+    c_10_mean = sc_10['c'].mean(axis=0)
+
+    print(f"\nInferred ρ(k=1):")
+    print(f"  q=0.2: {c_02_mean[0]:.6f}")
+    print(f"  q=1.0: {c_10_mean[0]:.6f}")
+    print(f"  Ratio (q0.2/q1.0): {c_02_mean[0] / c_10_mean[0]:.2f}")
+
+    # Plot comparison
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+    # Panel 1: M
+    x = np.arange(1, 11)
+    axes[0].plot(x, sc_02['m'][:10], 'o-', label='q=0.2')
+    axes[0].plot(x, sc_10['m'][:10], 's-', label='q=1.0')
+    axes[0].set_xlabel('k')
+    axes[0].set_ylabel('M (Adopters)')
+    axes[0].set_title('Adopters Should Match')
+    axes[0].legend()
+    axes[0].grid(alpha=0.3)
+
+    # Panel 2: N
+    axes[1].plot(x, sc_02['n'][:10], 'o-', label='q=0.2')
+    axes[1].plot(x, sc_10['n'][:10], 's-', label='q=1.0')
+    axes[1].set_xlabel('k')
+    axes[1].set_ylabel('N (Non-adopters)')
+    axes[1].set_title('Non-adopters Should Differ')
+    axes[1].legend()
+    axes[1].grid(alpha=0.3)
+
+    # Panel 3: c (kernel)
+    axes[2].plot(x, c_02_mean[:10], 'o-', label='q=0.2')
+    axes[2].plot(x, c_10_mean[:10], 's-', label='q=1.0')
+    axes[2].set_xlabel('k')
+    axes[2].set_ylabel('ρ(k)')
+    axes[2].set_title('Inferred Kernels')
+    axes[2].legend()
+    axes[2].grid(alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+    # Check if models are suspiciously similar
+    if np.allclose(c_02_mean, c_10_mean, rtol=0.01):
+        print("\n⚠️  WARNING: q=0.2 and q=1.0 kernels are nearly identical!")
+        print("   This suggests q=0.2 model may be using q=1.0 data.")
+    else:
+        print("\n✓ Models are different as expected.")
+
+verify_sc_models()
+```
+
+## Fixed Replication Plot (All Models)
+
+Now plot with ALL models included - parametric (simple & complex) AND non-parametric (monotonic & non-monotonic):
+
+```{python}
+def plot_fig3_replication_FIXED(q=1.0):
+    """
+    Fixed version that:
+    1. Loads ALL models (parametric + NP)
+    2. Plots them together for comparison
+    3. Works for both k and kappa metrics
+    """
+    author_dir = RESULTS_DIR / "author_models"
+
+    # Helper to load NP draws
+    def load_np(metric, model):
+        path = RESULTS_DIR / f"twitter_full_{metric}_q{q}/{model}_draws"
+        if path.exists():
+            draws = load_draws_parquet(path)
+            return draws['mu'][:, 0, :]  # [samples, kmax]
+        else:
+            print(f"Warning: {path} not found")
+            return None
+
+    # Load Parametric Models
+    sc_k_file = author_dir / f"simple_k_q{q}_results.npz"
+    cc_kappa_file = author_dir / f"complex_kappa_q{q}_results.npz"
+
+    if not sc_k_file.exists() or not cc_kappa_file.exists():
+        print(f"Missing parametric models for q={q}")
+        return
+
+    sc_k = np.load(sc_k_file)
+    cc_kappa = np.load(cc_kappa_file)
+
+    # Load NP models for k metric
+    mono_k = load_np('k', 'monotonic_K1')
+    non_mono_k = load_np('k', 'non_monotonic_K1')
+
+    # Load NP models for kappa metric
+    mono_kappa = load_np('kappa', 'monotonic_K1')
+    non_mono_kappa = load_np('kappa', 'non_monotonic_K1')
+
+    # Setup Figure (2x2)
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    def plot_panel(ax, m, n, model_res, np_mono=None, np_non_mono=None,
+                   xmax=10, is_prob=True, label_x="k"):
+        """
+        Plot observed data (bars) + parametric model (circles) + NP models (squares/x)
+        """
+        x = np.arange(1, len(m) + 1)
+        obs_p = m / (m + n + 1e-9)
+        obs_count = m
+        total_at_risk = m + n
+
+        if is_prob:
+            # Row A: Infection Probability
+            # Observed Bars
+            ax.bar(x[:xmax], obs_p[:xmax], alpha=0.3, color='gray',
+                   label='Observed', zorder=1)
+
+            # Parametric (Author)
+            c_mean = model_res['c'].mean(axis=0)
+            ax.plot(x[:xmax], c_mean[:xmax], 'o-', color='black',
+                   markerfacecolor='none', markeredgewidth=1.5, markersize=8,
+                   label='Parametric (Author)', zorder=10)
+
+            # Non-Parametric Monotonic
+            if np_mono is not None:
+                m_mean = np_mono.mean(axis=0)
+                ax.plot(x[:xmax], m_mean[:xmax], 's-', color='blue',
+                       markerfacecolor='none', markersize=6,
+                       label='NP Monotonic', zorder=5)
+
+            # Non-Parametric Non-Monotonic
+            if np_non_mono is not None:
+                nm_mean = np_non_mono.mean(axis=0)
+                ax.plot(x[:xmax], nm_mean[:xmax], '^--', color='red',
+                       markersize=6, label='NP Non-Monotonic', zorder=5)
+
+            ax.set_ylabel("Infection Probability ρ(k)")
+
+            # Dynamic Y-Limit
+            max_val = obs_p[:xmax].max()
+            if np_mono is not None:
+                max_val = max(max_val, m_mean[:xmax].max())
+            if np_non_mono is not None:
+                max_val = max(max_val, nm_mean[:xmax].max())
+            ax.set_ylim(0, max_val * 1.3)
+
+        else:
+            # Row B: Number Retweeted
+            ax.bar(x[:xmax], obs_count[:xmax], alpha=0.3, color='gray',
+                   label='Observed', zorder=1)
+
+            # Parametric prediction
+            expected = model_res['c'].mean(axis=0) * total_at_risk
+            ax.plot(x[:xmax], expected[:xmax], 'o-', color='black',
+                   markerfacecolor='none', markeredgewidth=1.5, markersize=8,
+                   label='Parametric', zorder=10)
+
+            # NP predictions
+            if np_mono is not None:
+                e_mono = np_mono.mean(axis=0) * total_at_risk
+                ax.plot(x[:xmax], e_mono[:xmax], 's-', color='blue',
+                       markerfacecolor='none', markersize=6,
+                       label='NP Monotonic', zorder=5)
+
+            if np_non_mono is not None:
+                e_nm = np_non_mono.mean(axis=0) * total_at_risk
+                ax.plot(x[:xmax], e_nm[:xmax], '^--', color='red',
+                       markersize=6, label='NP Non-Monotonic', zorder=5)
+
+            ax.set_ylabel("Number Retweeted")
+
+        ax.set_xlabel(label_x)
+        ax.set_xlim(0.5, xmax + 0.5)
+        ax.grid(True, alpha=0.15, zorder=-10)
+
+    # Panel A Left: SC (k) - Probability
+    plot_panel(axes[0, 0], sc_k['m'], sc_k['n'], sc_k,
+               mono_k, non_mono_k, xmax=15, label_x="k")
+    axes[0, 0].set_title(f"Simple Contagion (k) - q={q}")
+
+    # Panel A Right: CC (kappa) - Probability
+    plot_panel(axes[0, 1], cc_kappa['m'], cc_kappa['n'], cc_kappa,
+               mono_kappa, non_mono_kappa, xmax=10, label_x="κ")
+    axes[0, 1].set_title(f"Complex Contagion (κ) - q={q}")
+
+    # Panel B Left: SC (k) - Counts
+    plot_panel(axes[1, 0], sc_k['m'], sc_k['n'], sc_k,
+               mono_k, non_mono_k, xmax=15, is_prob=False, label_x="k")
+
+    # Panel B Right: CC (kappa) - Counts
+    plot_panel(axes[1, 1], cc_kappa['m'], cc_kappa['n'], cc_kappa,
+               mono_kappa, non_mono_kappa, xmax=10, is_prob=False, label_x="κ")
+
+    axes[0, 0].legend(fontsize='small', frameon=True, loc='upper left')
+
+    plt.suptitle(f"Twitter Contagion: All Models - q={q}", fontsize=16, y=0.995)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.98])
+    plt.show()
+
+# Run for both q values
+print("=" * 60)
+print("Plotting q=1.0 (No Smoothing)")
+print("=" * 60)
+plot_fig3_replication_FIXED(q=1.0)
+
+print("\n" + "=" * 60)
+print("Plotting q=0.2 (Heavy Smoothing)")
+print("=" * 60)
+plot_fig3_replication_FIXED(q=0.2)
+```
+
+## Diagnostic: Check if q=0.2 Simple Model is Wrong
+
+If the q=0.2 parametric line doesn't match the data, check if it's using the wrong kernel:
+
+```{python}
+def diagnose_sc_mismatch(q=0.2):
+    """
+    Compare the parametric prediction with observed data to see if there's a mismatch
+    """
+    sc = np.load(RESULTS_DIR / f"author_models/simple_k_q{q}_results.npz")
+
+    m = sc['m']
+    n = sc['n']
+    obs_p = m / (m + n + 1e-9)
+    pred_p = sc['c'].mean(axis=0)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    x = np.arange(1, 11)
+
+    # Panel 1: Direct comparison
+    axes[0].bar(x, obs_p[:10], alpha=0.3, label='Observed')
+    axes[0].plot(x, pred_p[:10], 'o-', color='red', label='Parametric Fit')
+    axes[0].set_xlabel('k')
+    axes[0].set_ylabel('ρ(k)')
+    axes[0].set_title(f'q={q}: Observed vs Fitted')
+    axes[0].legend()
+    axes[0].grid(alpha=0.3)
+
+    # Panel 2: Residuals
+    residuals = obs_p[:10] - pred_p[:10]
+    axes[1].bar(x, residuals, color='red', alpha=0.5)
+    axes[1].axhline(0, color='black', linestyle='--', alpha=0.5)
+    axes[1].set_xlabel('k')
+    axes[1].set_ylabel('Residual (Obs - Pred)')
+    axes[1].set_title('Fit Quality')
+    axes[1].grid(alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+    # Compute RMSE
+    rmse = np.sqrt(np.mean(residuals**2))
+    print(f"\nRMSE: {rmse:.6f}")
+
+    if rmse > 0.001:
+        print("⚠️  Large residuals suggest poor fit or wrong data!")
+    else:
+        print("✓ Fit looks reasonable")
+
+diagnose_sc_mismatch(q=0.2)
+diagnose_sc_mismatch(q=1.0)
+```
+

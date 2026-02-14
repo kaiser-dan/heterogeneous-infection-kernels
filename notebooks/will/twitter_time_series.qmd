@@ -1,0 +1,237 @@
+---
+title: "Twitter Cascade Time Series Deep Dive"
+format: html
+---
+
+## 1. Environment Setup & Data Loading
+
+We load the raw Twitter data using the existing pipeline logic.
+
+```{python}
+import sys
+from pathlib import Path
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import networkx as nx
+from typing import Dict, List, Set, Tuple
+import matplotlib.animation as animation
+from IPython.display import HTML
+import datetime
+
+# Add project root to path
+def get_project_root():
+    import os
+    current = Path(os.getcwd()).resolve()
+    for parent in [current] + list(current.parents):
+        if (parent / "src").exists():
+            return parent
+    return current
+
+ROOT = get_project_root()
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.data_processing.process_twitter import load_data, categorize_tweets_by_intervention, categorize_retweets_by_intervention
+
+# Configuration
+DATA_DIR = ROOT / "data/raw/twitter"
+
+print(f"Loading data from {DATA_DIR}...")
+id2bot_tweet, id2retweets, edges = load_data(DATA_DIR)
+print(f"Loaded {len(id2bot_tweet)} bot tweets, {len(id2retweets)} retweet cascades, and {len(edges)} edges.")
+
+# Categorize
+intervention2tweets = categorize_tweets_by_intervention(id2bot_tweet)
+intervention2user_retweets, intervention2bot_retweets = categorize_retweets_by_intervention(
+    intervention2tweets, id2retweets
+)
+
+# Print Summary
+summary = []
+for intv, tweets in intervention2tweets.items():
+    user_rts = len(intervention2user_retweets[intv])
+    bot_rts = len(intervention2bot_retweets[intv])
+    summary.append({'Intervention': intv, 'Seed Tweets': len(tweets), 'User Retweets': user_rts, 'Bot Retweets': bot_rts})
+
+summary_df = pd.DataFrame(summary)
+summary_df
+```
+
+## 2. Cascade Reconstruction
+
+We build a temporal graph for a selected intervention.
+We define **Infection** as a retweet event and **Exposure** as following someone who has already tweeted/retweeted.
+
+```{python}
+TARGET_INTERVENTION = 'BanksySF'
+from src.data_processing.process_twitter import BOT_IDS as GLOBAL_BOT_IDS
+
+bot_ids = set(GLOBAL_BOT_IDS)
+
+def get_cascade_data(intervention):
+
+    # 1. Get all bot seeds and their followers
+    seeds = intervention2tweets[intervention]
+    # Build bot-follower graph from 'edges'
+    # Filter edges to only those following these bots
+    bot_ids = set(t['user']['id'] for t in seeds)
+    relevant_edges = edges[edges['bot_id'].isin(bot_ids)]
+    
+    # 2. Get all retweets in these cascades
+    user_rts = intervention2user_retweets[intervention]
+    bot_rts = intervention2bot_retweets[intervention]
+    all_rts = user_rts + bot_rts
+    
+    # 3. Build the graph
+    G = nx.DiGraph()
+    
+    # A. Add Bot Seeds
+    for s in seeds:
+        G.add_node(s['user']['id'], type='bot', screen_name=s['user']['screen_name'], created_at=s['created_at'])
+        
+    # B. Add Followers (Potential Susceptibles)
+    for _, row in relevant_edges.iterrows():
+        G.add_edge(row['bot_id'], row['account_id'], type='follow')
+        
+    # C. Add Retweet Events (Chain of Infection)
+    events = []
+    # Original tweets are time 0
+    for s in seeds:
+        events.append({
+            'time': pd.to_datetime(s['created_at']),
+            'user_id': s['user']['id'],
+            'type': 'seed',
+            'source_id': None
+        })
+        
+    for rt in all_rts:
+        child_id = rt['user']['id']
+        parent_id = rt['retweeted_status']['user']['id']
+        rt_time = pd.to_datetime(rt['created_at'])
+        
+        events.append({
+            'time': rt_time,
+            'user_id': child_id,
+            'type': 'retweet',
+            'source_id': parent_id
+        })
+        # Infer a follow edge if they retweeted them
+        G.add_edge(parent_id, child_id, type='retweet_link')
+
+    return G, sorted(events, key=lambda x: x['time'])
+
+G_full, events = get_cascade_data(TARGET_INTERVENTION)
+print(f"Full Graph: {G_full.number_of_nodes()} nodes, {G_full.number_of_edges()} edges")
+print(f"Total events: {len(events)}")
+```
+
+## 3. Temporal Animation (GIF)
+
+We select the largest single component to visualize effectively.
+
+```{python}
+# Find the largest component in the retweet graph (ignoring static follow edges for a cleaner tree viz)
+retweet_subgraph = nx.DiGraph([(u, v) for u, v, d in G_full.edges(data=True) if d['type'] != 'follow'])
+components = sorted(nx.weakly_connected_components(retweet_subgraph), key=len, reverse=True)
+largest_nodes = components[0]
+G_sub = G_full.subgraph(largest_nodes).copy()
+
+# Add a few followers of the nodes in the component to show 'Exposures'
+# To keep it small, only add neighbors of the root or first few adopters
+root_id = [n for n, d in G_sub.in_degree() if d == 0][0]
+followers = [v for u, v, d in G_full.edges(data=True) if u in largest_nodes and d['type'] == 'follow']
+# Subsample followers for clarity
+np.random.seed(42)
+sampled_followers = list(np.random.choice(followers, min(len(followers), 50), replace=False))
+G_viz = G_full.subgraph(list(largest_nodes) + sampled_followers).copy()
+
+# Animation Setup
+pos = nx.spring_layout(G_viz, k=0.1, iterations=50, seed=42)
+fig, ax = plt.subplots(figsize=(12, 12))
+
+def update(frame):
+    ax.clear()
+    ax.set_axis_off()
+    
+    current_time = events[frame]['time']
+    ax.set_title(f"Intervention: {TARGET_INTERVENTION}\nTime: {current_time}", fontsize=15)
+    
+    # Identify states
+    infected = {e['user_id'] for e in events[:frame+1]}
+    # Exposed = Uninfected neighbors of infected nodes
+    exposed = set()
+    for inf in infected:
+        for neighbor in G_full.neighbors(inf):
+            if neighbor not in infected:
+                exposed.add(neighbor)
+                
+    # Node colors
+    colors = []
+    sizes = []
+    for n in G_viz.nodes():
+        if n in infected:
+            colors.append('red')
+            sizes.append(100 if n in bot_ids else 50)
+        elif n in exposed:
+            colors.append('orange')
+            sizes.append(30)
+        else:
+            colors.append('lightblue')
+            sizes.append(20)
+            
+    nx.draw_networkx_edges(G_viz, pos, alpha=0.1, edge_color='gray', ax=ax)
+    
+    # Draw edges where both nodes are active
+    active_edges = [(u, v) for u, v in G_viz.edges() if u in infected and v in infected]
+    nx.draw_networkx_edges(G_viz, pos, edgelist=active_edges, alpha=0.5, edge_color='red', ax=ax)
+    
+    nx.draw_networkx_nodes(G_viz, pos, node_color=colors, node_size=sizes, ax=ax)
+
+# Generate small preview
+print("Generating animation preview...")
+update(min(50, len(events)-1))
+plt.show()
+
+# To save as GIF:
+# ani = animation.FuncAnimation(fig, update, frames=range(0, len(events), 5), interval=100)
+# ani.save('cascade.gif', writer='imagemagick')
+```
+
+## 4. Time Series of Infections vs Exposures
+
+```{python}
+def compute_time_series(events, total_G):
+    times = []
+    infections = []
+    exposures = []
+    
+    infected = set()
+    exposed = set()
+    
+    for e in events:
+        infected.add(e['user_id'])
+        # Any neighbor of this newly infected node is now exposed
+        for neighbor in total_G.neighbors(e['user_id']):
+            if neighbor not in infected:
+                exposed.add(neighbor)
+        
+        times.append(e['time'])
+        infections.append(len(infected))
+        exposures.append(len(exposed))
+        
+    return pd.DataFrame({'time': times, 'infections': infections, 'exposures': exposures})
+
+ts_df = compute_time_series(events, G_full)
+
+plt.figure(figsize=(10, 5))
+plt.plot(ts_df['time'], ts_df['infections'], label='Cumulative Infections (Retweets)', color='red')
+plt.plot(ts_df['time'], ts_df['exposures'], label='Cumulative Exposures (Neighbors)', color='orange')
+plt.title(f"Temporal Dynamics: {TARGET_INTERVENTION}")
+plt.xlabel("Time")
+plt.ylabel("Count")
+plt.legend()
+plt.yscale('log')
+plt.grid(True, alpha=0.3)
+plt.show()
+```

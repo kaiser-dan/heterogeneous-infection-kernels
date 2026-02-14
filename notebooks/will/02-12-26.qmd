@@ -1,0 +1,330 @@
+---
+title: "Simplicity Test: Mahalanobis Distance from Simple Contagion"
+date: "2026-02-12"
+format: html
+---
+
+```{python}
+#| label: setup
+#| echo: false
+import sys
+sys.path.insert(0, "../..")
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy import stats
+from pathlib import Path
+from src.fig_styles import set_publication_style, PALETTE_MUTED, WIDTH_SINGLE, WIDTH_DOUBLE, HEIGHT_STD
+
+set_publication_style()
+
+RESULTS = Path("../../results/simplicity_test")
+```
+
+## Setup
+
+We have a kernel $c(\nu)$ which gives the probability of infection when a node has $\nu$ infected neighbors. The model works in logit space:
+
+- $c_i(\nu) = \text{logit}^{-1}(\alpha_{i,\nu})$ — individual node $i$'s kernel
+- $\boldsymbol{\alpha}_i \sim \mathcal{N}(\boldsymbol{\mu}, \boldsymbol{\Sigma})$ — individual kernels are drawn from kernel modes in logit space
+- $\boldsymbol{\mu}$ is the kernel mode (shared across nodes in a component), $\boldsymbol{\alpha}_i$ is node $i$'s kernel
+- Inference gives a posterior $P(\boldsymbol{\mu} \mid \mathbf{M}, \mathbf{N})$
+## Measuring Simplicity
+
+We want a measure of simplicity, how well does the non-parametric posterior match a simple contagion process?
+
+For simple contagion the kernel mode follows a geometric form: $\boldsymbol{\mu}_{\text{sc}}(\nu) = 1 - (1 - \beta)^\nu$, where each infected neighbor transmits independently with probability $\beta$.
+
+We fit both a non-parametric model and a parametric simple contagion model to the same data, then ask: how far apart are the inferred kernel modes?
+
+
+### Attempt 1: Central Mahalanobis Distance
+
+[**Mahalanobis distance**](https://en.wikipedia.org/wiki/Mahalanobis_distance): For each MCMC sample $s$ from the non-parametric posterior over kernel modes:
+
+
+$$
+D_M^{(s)} = \left(\boldsymbol{\alpha}^{(s)} - \boldsymbol{\mu}_{\text{sc}}\right)^\top \boldsymbol{\Sigma}^{-1} \left(\boldsymbol{\alpha}^{(s)} - \boldsymbol{\mu}_{\text{sc}}\right)
+$$
+
+We can define
+
+$\mathbf{z} = \boldsymbol{\Sigma}^{-1/2} (\boldsymbol{\alpha}^{(s)} - \boldsymbol{\mu}_{\text{sc}})$ as the z-scored distance vector. It measures the number of standard deviations a point $\boldsymbol{\alpha}^{(s)}$ is from the simple contagion reference $\boldsymbol{\mu}_{\text{sc}}$. By performing a Cholesky decomposition we decorrelate so that each of the elements $z_i^{(s)}$ are approximately independent and identically distributed.
+
+This means that we can write the Mahalanobis distance:
+
+$D_M^{(s)} = \mathbf{z}^{\top} \mathbf{z} = \sum_{i=1}^k (z_i^{(s)})^2$ which is a sum of squared standard normal variables.
+This means that $D_M^{(s)}$ follows a chi-squared distribution with $k$ degrees of freedom.
+
+So we can test the null hypothesis that the non-parametric posterior is consistent with simple contagion by comparing the observed $D_M$ to the chi-squared distribution with $k$ degrees of freedom.
+The null hypothesis that $\boldsymbol{\alpha}^{(s)} \sim \mathcal{N}(\boldsymbol{\mu}_{\text{sc}}, \boldsymbol{\Sigma})$ is equivalent to testing that $D_M^{(s)} \sim \chi^2_k$.
+
+$$H_0:  \boldsymbol{\alpha}^{(s)} \sim \mathcal{N}(\boldsymbol{\mu}_{\text{sc}}, \boldsymbol{\Sigma}) \implies D_M^{(s)} \sim \chi^2_k$$
+$$H_1:  \boldsymbol{\alpha}^{(s)} \not\sim \mathcal{N}(\boldsymbol{\mu}_{\text{sc}}, \boldsymbol{\Sigma}) \implies D_M^{(s)} \not\sim \chi^2_k$$
+
+Okay let me tell you right now: This does not work. When we run this test on our inferred kernels, we *always* reject the null hypothesis, even when the non-parametric kernel fits the data. This is likely due to a lack of statistical power in the non-parametric model. We need a *lot* of data in order for the non-parametric model to fit the data closely enough for the test to not be rejected.
+
+
+<!-- TODO - Plot data for centered Mahalanobis distance -->
+
+### Attempt 2: Non-Central Mahalanobis Distance
+
+
+Let's assume that our kernel mode does not match. I'll tweak my generative model. Let's assume that our kernel mode is drawn from a gaussian with some offset: $\boldsymbol{\alpha} \sim \mathcal{N}(\bar{\boldsymbol{\alpha}}, \boldsymbol{\Sigma})$ where $\bar{\boldsymbol{\alpha}} = \boldsymbol{\mu}_{\text{sc}} + \boldsymbol{\lambda}$ for some offset $\boldsymbol{\lambda}$. I can then write my Mahalanobis distance as a sum of two terms, **spread**, the distance around $\bar{\boldsymbol{\alpha}}$ and **offset** (the distance between the null hypothesis $\boldsymbol{\mu}_{\text{sc}}$ and the alternative hypothesis $\bar{\boldsymbol{\alpha}}$):
+
+$$
+D_M^{(s)} = \underbrace{(\boldsymbol{\alpha}^{(s)} - \bar{\boldsymbol{\alpha}})^\top \boldsymbol{\Sigma}^{-1} (\boldsymbol{\alpha}^{(s)} - \bar{\boldsymbol{\alpha}})}_{\text{spread} \;\sim\; \chi^2_k} \;+\; \underbrace{(\bar{\boldsymbol{\alpha}} - \boldsymbol{\mu}_{\text{sc}})^\top \boldsymbol{\Sigma}^{-1} (\bar{\boldsymbol{\alpha}} - \boldsymbol{\mu}_{\text{sc}})}_{\lambda \;(\text{non-centrality})} \;+\; \text{cross terms}
+$$
+
+Here we want to test $\lambda$ the size of the offset, the squared Mahalanobis distance of the non-parametric posterior mean from the simple contagion reference.
+
+So $D_M \sim \chi^2_k(\lambda)$ — a **non-central** chi-squared. Using a central $\chi^2$ as the reference fails because it ignores $\lambda$.
+
+**Calibrated test**:
+
+This would be the proposal:
+
+1. Fit a non-parametric model to the data
+2. Fit a simple contagion model to the data
+3. Calculate $\hat{\boldsymbol{\alpha}} = 1/N_s \sum_s \boldsymbol{\alpha}^{(s)}$
+4. Calculate $\hat{\lambda} = \|\hat{\boldsymbol{\alpha}} - \boldsymbol{\mu}_{\text{sc}}\|_{\boldsymbol{\Sigma}}^2$
+5. Calculate $D_M^{(s)} = \|\boldsymbol{\alpha}^{(s)} - \boldsymbol{\mu}_{\text{sc}}\|_{\boldsymbol{\Sigma}}^2$
+
+Where $\|\mathbf{x}\|_{\boldsymbol{\Sigma}}^2 = \mathbf{x}^\top \boldsymbol{\Sigma}^{-1} \mathbf{x}$
+
+Then our distribution of Mahalanobis distances should follow a non-central chi-squared distribution with $k$ degrees of freedom and non-centrality parameter $\lambda$.
+
+- $H_0$: $D_M \sim \chi^2_k(\lambda)$ — data is consistent with simple contagion
+- $H_1$: $D_M$ is stochastically larger — kernel departs from simple contagion
+
+## Experiments
+
+All experiments use SIS dynamics on a 2-block SBM. 
+
+- **Experiment 1 (null):** All nodes share the same simple contagion kernel ($\beta = 0.08$).
+- **Experiment 2 (complex):** All nodes share a moderate sigmoid kernel ($\rho_l = 0.02$, $\rho_h = 0.50$, $w = 1.5$, $k_0 = 4$).
+- **Experiment 3 (heterogeneous):** Block 1 has $\beta_1 = 0.04$, Block 2 has $\beta_2 = 0.20$. Fitted with a *single-component* (K=1) non-parametric model, a-la Daniel and Katerina's results. 
+
+```{python}
+#| label: load-metadata
+import json
+
+with open(RESULTS / "metadata.json") as f:
+    meta = json.load(f)
+
+print(f"V={meta['V']}, kmax={meta['kmax']}, γ={meta['GAMMA']}, T={meta['TMAX']}")
+print(f"Exp 1: β={meta['BETA']} (homogeneous simple contagion)")
+print(f"Exp 2: ρ_l={meta['RHO_L']}, ρ_h={meta['RHO_H']}, w={meta['W']}, k0={meta['K0']} (sigmoid)")
+print(f"Exp 3: β₁={meta['BETA_1']}, β₂={meta['BETA_2']} (two-block mixture)")
+```
+
+## Load Posterior Samples
+
+```{python}
+#| label: load-posteriors
+def load_mu_samples(experiment, model):
+    """Load non-parametric kernel mode posterior samples (mu[1] for K=1)."""
+    path = RESULTS / experiment / model / "posterior_samples.parquet"
+    draws = pd.read_parquet(path)
+    mu_cols = sorted([c for c in draws.columns if c.startswith("mu[1,")],
+                     key=lambda c: int(c.split(",")[1].rstrip("]")))
+    mu_samples = draws[mu_cols].values
+    return mu_samples, draws
+
+def load_rho_samples(experiment):
+    """Load simple contagion rho posterior samples."""
+    path = RESULTS / experiment / "simple_contagion" / "posterior_samples.parquet"
+    draws = pd.read_parquet(path)
+    rho = draws["rho[1]"].values
+    return rho
+
+# Non-parametric monotonic posteriors
+mu_np_exp1, _ = load_mu_samples("experiment_1_homogeneous", "non_parametric_monotonic")
+mu_np_exp2, _ = load_mu_samples("experiment_2_sigmoid", "non_parametric_monotonic")
+mu_np_exp3, _ = load_mu_samples("experiment_3_mixture", "non_parametric_monotonic")
+
+# Simple contagion rho posteriors
+rho_exp1 = load_rho_samples("experiment_1_homogeneous")
+rho_exp2 = load_rho_samples("experiment_2_sigmoid")
+rho_exp3 = load_rho_samples("experiment_3_mixture")
+
+kmax = meta["kmax"]
+nu = np.arange(1, kmax + 1)
+
+print(f"Loaded {mu_np_exp1.shape[0]} samples per experiment (kmax={kmax})")
+print(f"  Exp 1: ρ̂ = {rho_exp1.mean():.4f} (truth: {meta['BETA']})")
+print(f"  Exp 2: ρ̂ = {rho_exp2.mean():.4f} (best simple fit to sigmoid)")
+print(f"  Exp 3: ρ̂ = {rho_exp3.mean():.4f} (best simple fit to mixture)")
+```
+
+## Compute Mahalanobis Distances
+
+```{python}
+#| label: mahalanobis
+def compute_mahalanobis_decomposed(mu_samples, rho_samples):
+    """
+    Compute Mahalanobis distance and decompose into spread + offset.
+
+    Returns:
+        D_total: per-sample D_M (distance from SC reference)
+        D_centered: per-sample D_M centered on posterior mean (~chi2_k)
+        lam: non-centrality parameter (offset of posterior mean from SC ref)
+        mu_sc: simple contagion reference kernel
+    """
+    n_samples, k = mu_samples.shape
+    nu = np.arange(1, k + 1)
+
+    mu_bar = mu_samples.mean(axis=0)
+    Sigma = np.cov(mu_samples, rowvar=False)
+    Sigma += 1e-8 * np.eye(k)
+    L = np.linalg.cholesky(Sigma)
+
+    rho_hat = np.mean(rho_samples)
+    mu_sc = 1.0 - (1.0 - rho_hat) ** nu
+
+    # Offset (non-centrality parameter)
+    z_offset = np.linalg.solve(L, mu_bar - mu_sc)
+    lam = z_offset @ z_offset
+
+    D_total = np.zeros(n_samples)
+    D_centered = np.zeros(n_samples)
+    for s in range(n_samples):
+        z_total = np.linalg.solve(L, mu_samples[s] - mu_sc)
+        D_total[s] = z_total @ z_total
+        z_cent = np.linalg.solve(L, mu_samples[s] - mu_bar)
+        D_centered[s] = z_cent @ z_cent
+
+    return D_total, D_centered, lam, mu_sc
+
+D_t1, D_c1, lam1, mu_sc1 = compute_mahalanobis_decomposed(mu_np_exp1, rho_exp1)
+D_t2, D_c2, lam2, mu_sc2 = compute_mahalanobis_decomposed(mu_np_exp2, rho_exp2)
+D_t3, D_c3, lam3, mu_sc3 = compute_mahalanobis_decomposed(mu_np_exp3, rho_exp3)
+
+print(f"{'Experiment':<20} {'λ (offset)':>10} {'Median D_total':>15} {'Median D_centered':>18}")
+print("-" * 65)
+for label, lam, Dt, Dc in [("Exp 1 (simple)", lam1, D_t1, D_c1),
+                             ("Exp 2 (sigmoid)", lam2, D_t2, D_c2),
+                             ("Exp 3 (mixture)", lam3, D_t3, D_c3)]:
+    print(f"{label:<20} {lam:>10.1f} {np.median(Dt):>15.1f} {np.median(Dc):>18.1f}")
+print(f"\nχ²({kmax}) median = {stats.chi2.median(kmax):.1f}")
+```
+
+
+### Validation: Centered D_M follows χ²(k)
+
+First let's make sure that the distance to the posterior mean follows a centered chi-squared distribution $\chi^2_k$. We know this is true because the kernel modes are drawn from a Gaussian.
+
+```{python}
+#| label: validation-centered
+print(f"{'Experiment':<20} {'Median D_centered':>18} {'χ²(k) median':>13} {'KS p-value':>12}")
+print("-" * 65)
+for label, Dc in [("Exp 1 (simple)", D_c1), ("Exp 2 (sigmoid)", D_c2), ("Exp 3 (mixture)", D_c3)]:
+    ks = stats.kstest(Dc, lambda x: stats.chi2.cdf(x, kmax))
+    print(f"{label:<20} {np.median(Dc):>18.1f} {stats.chi2.median(kmax):>13.1f} {ks.pvalue:>12.4f}")
+```
+
+## Plots
+
+### Inferred Kernels vs Ground Truth
+
+```{python}
+#| label: fig-kernels
+#| fig-cap: "Posterior kernel modes (non-parametric, shaded 90% CI) vs. ground truth kernels."
+fig, axes = plt.subplots(1, 3, figsize=(WIDTH_DOUBLE * 1.3, HEIGHT_STD), sharey=True)
+
+# Ground truth kernels
+gt_simple = 1.0 - (1.0 - meta["BETA"]) ** nu
+gt_sigmoid = meta["RHO_L"] + (meta["RHO_H"] - meta["RHO_L"]) / (1.0 + np.exp(-meta["W"] * (nu - meta["K0"])))
+gt_b1 = 1.0 - (1.0 - meta["BETA_1"]) ** nu
+gt_b2 = 1.0 - (1.0 - meta["BETA_2"]) ** nu
+
+# Experiment 1
+mu_mean1 = mu_np_exp1.mean(axis=0)
+mu_lo1, mu_hi1 = np.percentile(mu_np_exp1, 5, axis=0), np.percentile(mu_np_exp1, 95, axis=0)
+axes[0].fill_between(nu, mu_lo1, mu_hi1, alpha=0.3, color=PALETTE_MUTED[0])
+axes[0].plot(nu, mu_mean1, "-", color=PALETTE_MUTED[0], linewidth=2, label="Non-parametric")
+axes[0].plot(nu, gt_simple, "--", color="black", linewidth=1.5, label=f"Truth ($\\beta={meta['BETA']}$)")
+axes[0].plot(nu, mu_sc1, ":", color=PALETTE_MUTED[6], linewidth=1.5, label="Simple fit")
+axes[0].set_xlabel("$\\nu$")
+axes[0].set_ylabel("$P(\\mathrm{infection} \\mid \\nu)$")
+axes[0].set_title("Exp 1: Simple Contagion")
+axes[0].legend(fontsize=7)
+
+# Experiment 2
+mu_mean2 = mu_np_exp2.mean(axis=0)
+mu_lo2, mu_hi2 = np.percentile(mu_np_exp2, 5, axis=0), np.percentile(mu_np_exp2, 95, axis=0)
+axes[1].fill_between(nu, mu_lo2, mu_hi2, alpha=0.3, color=PALETTE_MUTED[6])
+axes[1].plot(nu, mu_mean2, "-", color=PALETTE_MUTED[6], linewidth=2, label="Non-parametric")
+axes[1].plot(nu, gt_sigmoid, "--", color="black", linewidth=1.5, label="Truth (sigmoid)")
+axes[1].plot(nu, mu_sc2, ":", color=PALETTE_MUTED[0], linewidth=1.5, label="Simple fit")
+axes[1].set_xlabel("$\\nu$")
+axes[1].set_title("Exp 2: Sigmoid")
+axes[1].legend(fontsize=7)
+
+# Experiment 3
+mu_mean3 = mu_np_exp3.mean(axis=0)
+mu_lo3, mu_hi3 = np.percentile(mu_np_exp3, 5, axis=0), np.percentile(mu_np_exp3, 95, axis=0)
+axes[2].fill_between(nu, mu_lo3, mu_hi3, alpha=0.3, color=PALETTE_MUTED[3])
+axes[2].plot(nu, mu_mean3, "-", color=PALETTE_MUTED[3], linewidth=2, label="Non-parametric")
+axes[2].plot(nu, gt_b1, "--", color="gray", linewidth=1, label=f"Block 1 ($\\beta_1={meta['BETA_1']}$)")
+axes[2].plot(nu, gt_b2, "--", color="black", linewidth=1, label=f"Block 2 ($\\beta_2={meta['BETA_2']}$)")
+axes[2].plot(nu, mu_sc3, ":", color=PALETTE_MUTED[0], linewidth=1.5, label="Simple fit")
+axes[2].set_xlabel("$\\nu$")
+axes[2].set_title("Exp 3: Two-Block Mixture")
+axes[2].legend(fontsize=7)
+
+plt.tight_layout()
+plt.show()
+```
+
+### Non-Centrality (Offset) as Simplicity Index
+
+```{python}
+#| label: fig-lambda-bar
+#| fig-cap: "Non-centrality parameter λ: the squared Mahalanobis offset of the non-parametric posterior mean from the simple contagion reference."
+fig, ax = plt.subplots(figsize=(WIDTH_SINGLE, HEIGHT_STD * 0.7))
+
+experiments = ["Exp 1:\nSimple", "Exp 2:\nSigmoid", "Exp 3:\nMixture"]
+lambdas = [lam1, lam2, lam3]
+colors = [PALETTE_MUTED[0], PALETTE_MUTED[6], PALETTE_MUTED[3]]
+
+bars = ax.bar(experiments, lambdas, color=colors, edgecolor="white", width=0.5)
+
+for bar, l in zip(bars, lambdas):
+    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(lambdas)*0.02,
+            f"{l:.0f}", ha="center", va="bottom", fontsize=10)
+
+ax.set_ylabel("$\\lambda$ (non-centrality)")
+ax.set_title("Simplicity Index: Offset from Simple Contagion")
+ax.set_yscale("log")
+
+plt.tight_layout()
+plt.show()
+```
+
+
+## Attempt 3: Posterior Predictive Check 
+
+There is one huge obvious problem with Attempt 2: We need a reference fit to data which was geneated with a simple contagion. This is fine for our simulations but for real wrold data we don't have the counterfactual. So what do we do? 
+
+Here is where the posterior predictive check coems to the rescue. 
+
+For each experiment independently:
+
+- Fit the SC to get $\hat{\beta}$.
+- Ask: If a SC with this $\beta$ *where* actually used to generate the data, what would we expect the distribution of $\lambda$ to look like?
+
+    - To do this we can simulate data from the SC model with $\beta = \hat{\beta}$:
+      $M_i,N_i = \text{SIS}(G, \beta,\gamma,T)$
+    - We fit the non-paramteric model to each simulated dataset and record $\lambda_i$ for each.
+    - This gives a null distribution for $\lambda$ under the hypothesis that the data was generated by a simple contagion.
+
+There are two ways to use this.
+
+**Option A: Full non-parametric null** Run $R$  get $\{\lambda^{(1)}_{\text{null}}, \dots, \lambda^{(R)}_{\text{null}}\}$, compute $p_{\text{ppc}} = \frac{1}{R} \sum_r \mathbb{1}[\lambda^{(r)}_{\text{null}} \geq \lambda_{\text{obs}}]$. No distributional assumptions, but you need $R \sim 50$ replicates which means $\sim 100$ Stan fits.
+
+**$\chi^2$ Null**: We already know from Attempt 2 that $D_M^{(s)} \sim \chi^2_k(\lambda)$. The whole problem was we didn't know $\lambda$ under the null. So use a small number of PPC replicates ($R \sim 10$) just to estimate $\lambda_0 = \text{median}(\lambda^{(r)}_{\text{null}})$. Then test the observed $D_M^{(s)}$ against $\chi^2_k(\lambda_0)$ directly with a KS test. This is essentially Attempt 2 but with $\lambda_0$ coming from PPC instead of from ground truth data.
+
+The $\chi^2$ version is $\sim 5\times$ cheaper but assumes $\boldsymbol{\Sigma}$ is known (it's estimated from the same MCMC samples, so there's some optimism in the tails). For a first pass it should be fine. The full empirical null is the honest version for the paper.
+

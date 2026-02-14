@@ -1,0 +1,117 @@
+---
+title: "Networkbackboning test"
+format: 
+  html:
+    grid:
+      body-width: 1200px
+    embed-resources: true
+  pdf: default
+---
+
+## Setup and Imports
+
+```{python}
+#| label: setup
+#| output: false
+#| echo: false
+import sys
+import os
+from pathlib import Path
+
+# Add project source to path (notebook lives in notebooks/will)
+sys.path.append(
+    os.path.join(
+        '..',  # will -> notebooks
+        '..',  # notebooks -> project root
+    )
+)
+
+import pandas as pd
+import numpy as np
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+import cmdstanpy as csp
+import seaborn as sns
+from scipy.special import logit, expit
+import matplotlib.pyplot as plt
+import networkx as nx
+
+import src
+from src.data_processing import get_adjacency_matrix
+
+# Define project_root for file paths
+project_root = Path(os.path.join('..', '..')).resolve()
+
+# --- Helper Functions ---
+
+def cap_exposure_bins(M, N, max_k):
+    """
+    Truncate exposure matrices to keep only the first `max_k` columns; any bins
+    beyond `max_k` are dropped (no pooling into a final bin).
+    """
+    if max_k is None or max_k <= 0:
+        return M, N
+
+    def _cap(arr):
+        if arr is None:
+            return None
+        arr = np.asarray(arr)
+        # If already at or below cap, leave unchanged; otherwise drop extra columns.
+        return arr[:, :max_k] if arr.shape[1] > max_k else arr
+
+    return _cap(M), _cap(N)
+
+def plot_kernels(fit, ground_truth, kmax, title, ax):
+    """Plots the inferred kernel, CI, and optional ground truth."""
+    alpha_k_samples = fit.stan_variable('alpha_k')
+    c_k_mean = expit(np.mean(alpha_k_samples, axis=0)[0])
+    c_k_lower = expit(np.percentile(alpha_k_samples, 2.5, axis=0)[0])
+    c_k_upper = expit(np.percentile(alpha_k_samples, 97.5, axis=0)[0])
+    kmax_available = c_k_mean.shape[0]
+    kmax_plot = min(kmax if kmax is not None else kmax_available, kmax_available)
+    
+    x_axis = range(kmax_plot)
+    ax.plot(x_axis, c_k_mean[:kmax_plot], label='Inferred Kernel (MAP)', color='blue')
+    ax.fill_between(x_axis, c_k_lower[:kmax_plot], c_k_upper[:kmax_plot], color='blue', alpha=0.2, label='95% CI')
+    
+    if ground_truth is not None:
+        ax.plot(x_axis, ground_truth[:kmax_plot], label='Ground Truth', color='red', linestyle='dashed')
+
+    ax.set_title(title)
+    ax.set_xlabel(r"$\nu$")
+    ax.set_ylabel(r"$c(\nu)$")
+    ax.legend()
+
+# --- Database and Model Setup ---
+db_path = project_root / "data" / "contagion.db"
+engine = create_engine(f"sqlite:///{db_path}")
+Session = sessionmaker(bind=engine)
+session = Session()
+
+stan_file_path = project_root / "src" / "models" / "model_JGY-mod.stan"
+model = csp.CmdStanModel(stan_file=str(stan_file_path))
+
+# --- Stan Sampling Configuration ---
+STAN_SAMPLING_CONFIG = {
+    "seed": 37,
+    "chains": 1, 
+    "iter_sampling": 70,
+    "iter_warmup": 20,
+    "show_progress": False, 
+    "show_console": False
+}
+```
+
+# Part 1: Simulated Data Analysis
+
+First, we generate data from a known contagion process. This allows us to validate our inference method by comparing the inferred kernel to the ground truth.
+
+## Generate Simulation Data
+
+```{python}
+#load the data for OO sim 165 from the database
+target_run_id = "oo_sim_165_duration"
+adj_df = get_adjacency_matrix(session, target_run_id)
+```
+
+## Visualize Simulated Outbreak and Exposure Matrices
