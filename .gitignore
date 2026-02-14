@@ -21,6 +21,7 @@ inspect_parquet.py
 # Environments
 .venv/
 .gemini/
+*.egg-info/
 
 # Stan Build Artifacts
 src/models/*
