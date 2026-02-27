@@ -1,0 +1,113 @@
+---
+title: "Monsted Fig 3 Replication"
+date: "2026-02-27"
+format: html
+---
+
+```{python}
+#| label: setup
+#| warning: false
+import sys
+sys.path.insert(0, "../..")
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.lines as mlines
+from pathlib import Path
+
+DERIVED = Path("../../data/derived")
+RESULTS = Path("../../results/author_models")
+```
+
+## Monsted et al. (2017) Figure 3 — Three-Way Comparison
+
+Bars = transcribed observed values from paper. Circles = transcribed model
+predictions. Blue squares = author precomputed at q=0.20
+(`simple_k/kappa_q0.2_results.npz`). Red diamonds = our recomputed values
+at q=0.192 (SSE-optimal).
+
+```{python}
+#| label: fig-monsted
+#| fig-cap: "Monsted Fig 3 recreation: paper observed (bars), paper prediction (circles), author precomputed q=0.20 (blue squares), ours q=0.192 (red diamonds)."
+
+transcribed = pd.read_csv(DERIVED / "monsted_fig3_transcribed.csv", comment='#')
+computed    = pd.read_csv(DERIVED / "monsted_fig3_our_computed.csv")
+
+sc_npz = np.load(RESULTS / "simple_k_q0.2_results.npz")
+cc_npz = np.load(RESULTS / "simple_kappa_q0.2_results.npz")
+author = {
+    ('A', 'SC'): 100 * sc_npz['m'] / sc_npz['n'],
+    ('B', 'SC'): sc_npz['m'],
+    ('A', 'CC'): 100 * cc_npz['m'] / cc_npz['n'],
+    ('B', 'CC'): cc_npz['m'],
+}
+
+fig, axes = plt.subplots(2, 2, figsize=(7.5, 6.0))
+layout = [
+    ('A', 'SC', axes[0, 0], 7, '% retweeted',     None),
+    ('A', 'CC', axes[0, 1], 8, None,               None),
+    ('B', 'SC', axes[1, 0], 7, 'Number retweeted', 'k'),
+    ('B', 'CC', axes[1, 1], 8, None,               r'$\kappa$'),
+]
+
+for panel, model, ax, kmax, ylabel, xlabel in layout:
+    t  = transcribed[(transcribed['panel'] == panel) & (transcribed['model'] == model)]
+    c  = computed[(computed['model'] == model) & (computed['k'] <= kmax)]
+    xs = t['x'].values
+    obs  = t['observed'].values
+    pred = t['prediction'].values
+    auth_vals = author[(panel, model)][:kmax]
+    if panel == 'A':
+        our_vals = c.set_index('k')['pct_retweeted'].reindex(range(1, kmax + 1)).values
+    else:
+        our_vals = c.set_index('k')['N_adopted'].reindex(range(1, kmax + 1)).values
+
+    ax.bar(xs, obs, color='#b0b0b0', width=0.65, edgecolor='#555555', linewidth=0.6, zorder=2)
+    ax.scatter(xs, pred, s=55, facecolors='white', edgecolors='black', linewidths=1.2, zorder=4)
+    ax.scatter(xs, auth_vals, s=38, marker='s', color='#2980b9', zorder=5)
+    ax.scatter(xs, our_vals, s=32, marker='D', color='#c0392b', zorder=6)
+
+    ax.set_xlim(0.25, kmax + 0.75)
+    ax.set_xticks(range(1, kmax + 1))
+    ax.tick_params(axis='both', labelsize=8)
+    if xlabel:
+        ax.set_xlabel(xlabel, fontsize=10)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=9)
+    if panel == 'A':
+        ax.set_ylim(0, 0.065)
+    else:
+        ax.set_ylim(0, 58)
+    if model == 'CC':
+        ax.set_facecolor('#ebebeb')
+
+axes[0, 0].set_title('Simple contagion', fontsize=10, pad=6)
+axes[0, 1].set_title('Complex contagion', fontsize=10, pad=6)
+for ax, label in zip(axes[:, 0], ['A', 'B']):
+    ax.text(-0.22, 1.08, label, transform=ax.transAxes,
+            fontsize=13, fontweight='bold', va='top', ha='left')
+
+bar_h    = plt.Rectangle((0, 0), 1, 1, fc='#b0b0b0', ec='#555555', lw=0.6)
+circle_h = mlines.Line2D([], [], marker='o', color='black', markerfacecolor='white',
+                          markersize=7, linestyle='None')
+auth_h   = mlines.Line2D([], [], marker='s', color='#2980b9', markersize=6, linestyle='None')
+our_h    = mlines.Line2D([], [], marker='D', color='#c0392b', markersize=5, linestyle='None')
+for ax in axes[0, :]:
+    ax.legend(handles=[bar_h, circle_h, auth_h, our_h],
+              labels=['Observed', 'Prediction', 'Author (q=0.20)', 'Ours (q=0.192)'],
+              fontsize=7, loc='upper left', framealpha=0.85,
+              handlelength=1.2, handletextpad=0.5)
+
+plt.tight_layout(h_pad=1.2, w_pad=0.8)
+fig.savefig("figures/monsted_fig3_recreation.png", dpi=200, bbox_inches='tight')
+plt.show()
+```
+
+## Mismatch Table (q = 0.192)
+
+```{python}
+#| label: tbl-mismatch
+cmp = pd.read_csv(DERIVED / "monsted_fig3_comparison.csv")
+cmp.style.format({'ours': '{:.5f}', 'delta': '{:.5f}', 'pct_err': '{:.1f}'})
+```
