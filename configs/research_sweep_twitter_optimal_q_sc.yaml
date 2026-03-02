@@ -1,0 +1,38 @@
+# ============================================================================
+# Research Sweep - Twitter Full Data at Optimal q Values
+# ============================================================================
+# Only the 2 optimal pairs from Monsted replication:
+#   SC: q=0.192, metric=k
+#   CC: q=0.18, metric=kappa
+#
+# Since Snakemake sweep does a cartesian product, we split into two
+# separate config files to avoid cross-combinations.
+# This file handles SC (q=0.192, metric=k).
+# See research_sweep_twitter_optimal_q_cc.yaml for CC.
+# ============================================================================
+name: "research_sweep_twitter_optimal_q_sc"
+
+data_config: "configs/default_data_prep.yaml"
+source: "twitter"
+wandb_enabled: false
+
+# Fixed data parameters for SC
+q: 0.192
+exposure_metric: "k"
+
+model:
+  stan_file: "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  K: 1
+  concentration: 1.0
+  deviation_scale: 1.0
+  logit_p_location: "empirical"
+  logit_p_scale: 2.0
+  V_max_local: 500
+
+sweep:
+  K: [1, 2]
+  stan_file: [
+    "src/models/non_parametric_non_monotonic.stan",
+    "src/models/model_simple_contagion.stan",
+    "src/models/model_complex_contagion.stan"
+  ]

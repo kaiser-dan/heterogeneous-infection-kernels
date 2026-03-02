@@ -4,6 +4,7 @@ import cmdstanpy
 import argparse
 import yaml
 import json
+import re
 from pathlib import Path
 import wandb
 import os
@@ -66,6 +67,177 @@ def generate_stan_matrices_oo(ir_path, config):
     M = np.zeros((V_mock, kmax), dtype=float)
     N = np.zeros((V_mock, kmax), dtype=float)
     return M, N
+
+
+def _default_output_config():
+    return {
+        "posterior_mode": "full",  # full | compact | minimal
+        "posterior_thin": None,
+        "posterior_keep_regex": [
+            r"^lp__$",
+            r"^rho(\[|$)",
+            r"^mu\[\d+,\d+\]$",
+            r"^rho_l(\[|$)",
+            r"^rho_h(\[|$)",
+            r"^w(\[|$)",
+            r"^k0(\[|$)",
+        ],
+        "posterior_float32": None,
+        "parquet_compression": "zstd",
+        "kernel_ci_level": 0.90,
+        "kernel_map_bins": 128,
+        "write_kernel_draws": False,
+        "kernel_draws_thin": 1,
+    }
+
+
+def _resolve_output_config(config):
+    output_cfg = dict(_default_output_config())
+    output_cfg.update(config.get("output", {}))
+
+    mode = str(output_cfg.get("posterior_mode", "full")).lower()
+    if mode not in {"full", "compact", "minimal"}:
+        raise ValueError("output.posterior_mode must be one of: full, compact, minimal")
+    output_cfg["posterior_mode"] = mode
+
+    if output_cfg["posterior_thin"] is None:
+        output_cfg["posterior_thin"] = {"full": 1, "compact": 5, "minimal": 20}[mode]
+    output_cfg["posterior_thin"] = max(1, int(output_cfg["posterior_thin"]))
+
+    if output_cfg["posterior_float32"] is None:
+        output_cfg["posterior_float32"] = mode != "full"
+    output_cfg["posterior_float32"] = bool(output_cfg["posterior_float32"])
+
+    output_cfg["kernel_draws_thin"] = max(1, int(output_cfg.get("kernel_draws_thin", 1)))
+    output_cfg["kernel_ci_level"] = float(output_cfg.get("kernel_ci_level", 0.90))
+    if not (0.0 < output_cfg["kernel_ci_level"] < 1.0):
+        raise ValueError("output.kernel_ci_level must be in (0, 1).")
+    output_cfg["kernel_map_bins"] = max(10, int(output_cfg.get("kernel_map_bins", 128)))
+    return output_cfg
+
+
+def _filter_posterior_draws(draws_df, output_cfg):
+    mode = output_cfg["posterior_mode"]
+    if mode == "full":
+        selected = draws_df.copy()
+    else:
+        patterns = [re.compile(p) for p in output_cfg["posterior_keep_regex"]]
+        keep_cols = [c for c in draws_df.columns if any(p.search(c) for p in patterns)]
+        if not keep_cols and "lp__" in draws_df.columns:
+            keep_cols = ["lp__"]
+        selected = draws_df.loc[:, keep_cols].copy()
+
+    thin = output_cfg["posterior_thin"]
+    if thin > 1:
+        selected = selected.iloc[::thin, :].reset_index(drop=True)
+
+    if output_cfg["posterior_float32"]:
+        for col in selected.columns:
+            if pd.api.types.is_float_dtype(selected[col]):
+                selected[col] = selected[col].astype(np.float32)
+    return selected
+
+
+def _marginal_map(samples, bins):
+    x = np.asarray(samples, dtype=float).reshape(-1)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return np.nan
+    if np.allclose(x, x[0]):
+        return float(x[0])
+    n_bins = min(int(bins), max(20, int(np.sqrt(x.size))))
+    hist, edges = np.histogram(x, bins=n_bins)
+    idx = int(np.argmax(hist))
+    return float(0.5 * (edges[idx] + edges[idx + 1]))
+
+
+def _extract_kernel_draws(fit, kmax):
+    try:
+        mu = np.asarray(fit.stan_variable("mu"), dtype=float)
+        if mu.ndim == 2:
+            mu = mu[:, None, :]
+        if mu.ndim == 3:
+            km = min(int(kmax), int(mu.shape[2]))
+            return mu[:, :, :km], "mu"
+    except Exception:
+        pass
+
+    try:
+        rho = np.asarray(fit.stan_variable("rho"), dtype=float)
+        if rho.ndim == 1:
+            rho = rho[:, None]
+        if rho.ndim == 2:
+            nu = np.arange(1, int(kmax) + 1, dtype=float)[None, None, :]
+            kernels = 1.0 - np.power((1.0 - rho[:, :, None]), nu)
+            return kernels, "rho"
+    except Exception:
+        pass
+
+    try:
+        rho_l = np.asarray(fit.stan_variable("rho_l"), dtype=float)
+        rho_h = np.asarray(fit.stan_variable("rho_h"), dtype=float)
+        w = np.asarray(fit.stan_variable("w"), dtype=float)
+        k0 = np.asarray(fit.stan_variable("k0"), dtype=float)
+        params = [rho_l, rho_h, w, k0]
+        params = [p[:, None] if p.ndim == 1 else p for p in params]
+        if all(p.ndim == 2 for p in params):
+            k_components = min(p.shape[1] for p in params)
+            rho_l, rho_h, w, k0 = [p[:, :k_components] for p in params]
+            nu = np.arange(1, int(kmax) + 1, dtype=float)[None, None, :]
+            kernels = rho_l[:, :, None] + (rho_h - rho_l)[:, :, None] / (
+                1.0 + np.exp(-w[:, :, None] * (nu - k0[:, :, None]))
+            )
+            return kernels, "sigmoid"
+    except Exception:
+        pass
+
+    return None, None
+
+
+def _build_kernel_output_tables(kernel_draws, source, output_cfg):
+    n_draws, k_components, kmax = kernel_draws.shape
+    ci_half = (1.0 - output_cfg["kernel_ci_level"]) / 2.0
+    ci_low = 100.0 * ci_half
+    ci_high = 100.0 * (1.0 - ci_half)
+
+    summary_rows = []
+    draws_rows = []
+    keep_draws = bool(output_cfg.get("write_kernel_draws", False))
+    draws_thin = output_cfg["kernel_draws_thin"]
+
+    for k in range(k_components):
+        for nu_idx in range(kmax):
+            samples = kernel_draws[:, k, nu_idx]
+            finite = samples[np.isfinite(samples)]
+            summary_rows.append(
+                {
+                    "component": int(k + 1),
+                    "nu": int(nu_idx + 1),
+                    "mean": float(np.nanmean(samples)),
+                    "median": float(np.nanmedian(samples)),
+                    "map_marginal": _marginal_map(samples, bins=output_cfg["kernel_map_bins"]),
+                    "ci_low": float(np.percentile(finite, ci_low)) if finite.size > 0 else np.nan,
+                    "ci_high": float(np.percentile(finite, ci_high)) if finite.size > 0 else np.nan,
+                    "n_draws": int(finite.size),
+                    "source_param": source,
+                }
+            )
+            if keep_draws:
+                for draw_idx in range(0, n_draws, draws_thin):
+                    draws_rows.append(
+                        {
+                            "draw": int(draw_idx),
+                            "component": int(k + 1),
+                            "nu": int(nu_idx + 1),
+                            "value": float(kernel_draws[draw_idx, k, nu_idx]),
+                            "source_param": source,
+                        }
+                    )
+
+    summary_df = pd.DataFrame(summary_rows)
+    draws_df = pd.DataFrame(draws_rows) if keep_draws else None
+    return summary_df, draws_df
+
 
 def run_stan_inference(summary_path, output_dir, instance_params, config_path=None):
     with open(config_path, 'r') as f:
@@ -272,9 +444,38 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
         wandb.init(project="heterogeneous-infection-kernels", name=f"{config['name']}_{output_dir.name}", config=config)
     
     fit = model.sample(data=stan_data, iter_sampling=500, iter_warmup=500, chains=1)
-    
-    fit.summary().to_parquet(output_dir / "inference_summary.parquet")
-    fit.draws_pd().to_parquet(output_dir / "posterior_samples.parquet")
+
+    output_cfg = _resolve_output_config(config)
+    parquet_compression = output_cfg.get("parquet_compression", "zstd")
+
+    fit.summary().to_parquet(output_dir / "inference_summary.parquet", compression=parquet_compression)
+
+    kernel_draws, kernel_source = _extract_kernel_draws(fit, kmax=kmax)
+    if kernel_draws is not None:
+        kernel_summary_df, kernel_draws_df = _build_kernel_output_tables(
+            kernel_draws=kernel_draws,
+            source=kernel_source,
+            output_cfg=output_cfg,
+        )
+        kernel_summary_df.to_parquet(
+            output_dir / "kernel_mode_summary.parquet",
+            index=False,
+            compression=parquet_compression,
+        )
+        if kernel_draws_df is not None and not kernel_draws_df.empty:
+            kernel_draws_df.to_parquet(
+                output_dir / "kernel_mode_draws.parquet",
+                index=False,
+                compression=parquet_compression,
+            )
+
+    posterior_df = fit.draws_pd()
+    posterior_df = _filter_posterior_draws(posterior_df, output_cfg=output_cfg)
+    posterior_df.to_parquet(
+        output_dir / "posterior_samples.parquet",
+        index=False,
+        compression=parquet_compression,
+    )
     print(f"Results saved to {output_dir}")
 
 if __name__ == "__main__":
