@@ -447,10 +447,26 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
         
     if "LOGIT_P_LOCATION" in stan_code:
         stan_data['LOGIT_P_LOCATION'] = float(logit_p_loc)
-        
+
     if "LOGIT_P_SCALE" in stan_code:
         stan_data['LOGIT_P_SCALE'] = float(config['model'].get('logit_p_scale', 2.0))
-    
+
+    # SC model: logit-Normal prior on rho
+    if "LOGIT_RHO_LOCATION" in stan_code:
+        stan_data['LOGIT_RHO_LOCATION'] = float(config['model'].get('logit_rho_location', -10.0))
+    if "LOGIT_RHO_SCALE" in stan_code:
+        stan_data['LOGIT_RHO_SCALE'] = float(config['model'].get('logit_rho_scale', 2.0))
+
+    # CC model: logit-Normal priors on rho_l and rho_h
+    if "LOGIT_RHO_L_LOCATION" in stan_code:
+        stan_data['LOGIT_RHO_L_LOCATION'] = float(config['model'].get('logit_rho_l_location', -10.0))
+    if "LOGIT_RHO_L_SCALE" in stan_code:
+        stan_data['LOGIT_RHO_L_SCALE'] = float(config['model'].get('logit_rho_l_scale', 2.0))
+    if "LOGIT_RHO_H_LOCATION" in stan_code:
+        stan_data['LOGIT_RHO_H_LOCATION'] = float(config['model'].get('logit_rho_h_location', -6.0))
+    if "LOGIT_RHO_H_SCALE" in stan_code:
+        stan_data['LOGIT_RHO_H_SCALE'] = float(config['model'].get('logit_rho_h_scale', 2.5))
+
     if is_vector_dev:
         stan_data['DEVIATION_SCALE'] = [dev_scale_val] * k_components
     elif "DEVIATION_SCALE" in stan_code:

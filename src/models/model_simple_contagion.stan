@@ -17,16 +17,14 @@ data {
     // HYPERPARAMETER - exponential distribution scale for kernel mode deviations
     real<lower=1e-6> DEVIATION_SCALE;
 
-    // HYPERPARAMETER - prior location for logit_p (not used directly here but kept for consistency)
-    real LOGIT_P_LOCATION;
-
-    // HYPERPARAMETER - prior scale for logit_p
-    real<lower=0> LOGIT_P_SCALE;
+    // HYPERPARAMETER - logit-scale Normal prior on rho (per-contact infection probability)
+    real LOGIT_RHO_LOCATION;
+    real<lower=0> LOGIT_RHO_SCALE;
 }
 
 parameters {
-    // geometric infection probability parameters for each mode
-    vector<lower=0, upper=1>[K] rho;
+    // geometric infection probability on logit scale (unconstrained for better HMC geometry)
+    vector[K] logit_rho;
 
     // std for kernel mode deviations
     real<lower=1e-6> sigma;
@@ -39,6 +37,9 @@ parameters {
 }
 
 transformed parameters {
+    // back-transform to probability scale
+    vector<lower=0, upper=1>[K] rho = inv_logit(logit_rho);
+
     // kernel modes on logit scale
     array[K] vector[kmax] logit_mu;
     for (k in 1:K){
@@ -49,7 +50,7 @@ transformed parameters {
         }
     }
 
-    // kernels on logit scale 
+    // kernels on logit scale
     array[V] matrix[kmax, K] alpha; // transposed for computation
     for (i in 1:V){
         for (k in 1:K){
@@ -59,8 +60,8 @@ transformed parameters {
 }
 
 model {
-    // Parametric prior
-    rho ~ beta(1, 10); // slightly more informative than 1,100 but still supports small values
+    // Logit-scale Normal prior on rho — spans orders of magnitude cleanly
+    logit_rho ~ normal(LOGIT_RHO_LOCATION, LOGIT_RHO_SCALE);
 
     sigma ~ exponential(DEVIATION_SCALE);
 

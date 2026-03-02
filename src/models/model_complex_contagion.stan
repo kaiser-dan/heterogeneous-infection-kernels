@@ -17,17 +17,21 @@ data {
     // HYPERPARAMETER - exponential distribution scale for kernel mode deviations
     real<lower=1e-6> DEVIATION_SCALE;
 
-    // HYPERPARAMETER - prior location for logit_p
-    real LOGIT_P_LOCATION;
+    // HYPERPARAMETER - logit-scale Normal prior on rho_l (lower asymptote)
+    real LOGIT_RHO_L_LOCATION;
+    real<lower=0> LOGIT_RHO_L_SCALE;
 
-    // HYPERPARAMETER - prior scale for logit_p
-    real<lower=0> LOGIT_P_SCALE;
+    // HYPERPARAMETER - logit-scale Normal prior on rho_h (upper asymptote)
+    real LOGIT_RHO_H_LOCATION;
+    real<lower=0> LOGIT_RHO_H_SCALE;
 }
 
 parameters {
-    // Sigmoid parameters for each mode
-    vector<lower=0, upper=1>[K] rho_l;
-    vector<lower=0, upper=1>[K] rho_h;
+    // Sigmoid asymptotes on logit scale (unconstrained for better HMC geometry)
+    vector[K] logit_rho_l;
+    vector[K] logit_rho_h;
+
+    // Sigmoid shape parameters (stay on natural scale)
     vector<lower=0>[K] w;
     vector<lower=0>[K] k0;
 
@@ -42,6 +46,10 @@ parameters {
 }
 
 transformed parameters {
+    // back-transform to probability scale
+    vector<lower=0, upper=1>[K] rho_l = inv_logit(logit_rho_l);
+    vector<lower=0, upper=1>[K] rho_h = inv_logit(logit_rho_h);
+
     // kernel modes on logit scale
     array[K] vector[kmax] logit_mu;
     for (k in 1:K){
@@ -52,7 +60,7 @@ transformed parameters {
         }
     }
 
-    // kernels on logit scale 
+    // kernels on logit scale
     array[V] matrix[kmax, K] alpha; // transposed for computation
     for (i in 1:V){
         for (k in 1:K){
@@ -62,9 +70,11 @@ transformed parameters {
 }
 
 model {
-    // Sigmoid priors
-    rho_l ~ beta(1, 10);
-    rho_h ~ beta(1, 1); // allow for higher infection probabilities
+    // Logit-scale Normal priors on sigmoid asymptotes
+    logit_rho_l ~ normal(LOGIT_RHO_L_LOCATION, LOGIT_RHO_L_SCALE);
+    logit_rho_h ~ normal(LOGIT_RHO_H_LOCATION, LOGIT_RHO_H_SCALE);
+
+    // Shape priors
     w ~ exponential(0.5);
     k0 ~ normal(kmax/2.0, kmax/2.0);
 
