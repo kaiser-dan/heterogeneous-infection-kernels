@@ -99,12 +99,14 @@ rule generate_synthetic_processed:
 
         overrides = SYNTHETIC_INSTANCE_OVERRIDES.get(wildcards.data_name, {})
         overrides_json = json.dumps(overrides, separators=(",", ":"))
+        # Snakemake's shell() uses format-style expansion; escape braces in JSON payloads.
+        overrides_json_escaped = overrides_json.replace("{", "{{").replace("}", "}}")
         cmd = (
             f"uv run python {input.script} "
             f"--config {params.config} "
             f"--output-dir data/processed/synthetic/{wildcards.data_name} "
             f"--data-name {wildcards.data_name} "
-            f"--synthetic-overrides {shlex.quote(overrides_json)}"
+            f"--synthetic-overrides {shlex.quote(overrides_json_escaped)}"
         )
         shell(cmd)
 

@@ -109,18 +109,23 @@ generated quantities {
     // mixture indicator
     array[V] int<lower=1, upper=K> z;
 
+    // log_lik for WAIC/LOO
+    vector[V] log_lik;
+
     for (i in 1:V){
         vector[K] lps;
         for (k in 1:K){
             lps[k] = log(pi[k]);
             for (nu in 1:kmax){
                 if (M[i, nu] > 0 || N[i, nu] > 0) {
-                    lps[k] += M[i, nu] * log(c[i][k, nu]) + N[i, nu] * log(1 - c[i][k, nu]);
+                    lps[k] += M[i, nu] * log_inv_logit(alpha[i][nu, k]) + N[i, nu] * log1m_inv_logit(alpha[i][nu, k]);
                 }
             }
         }
 
         real log_denom = log_sum_exp(lps);
+        log_lik[i] = log_denom;
+
         for (k in 1:K){
             post_prob[i, k] = exp(lps[k] - log_denom);
         }

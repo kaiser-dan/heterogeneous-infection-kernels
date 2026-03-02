@@ -226,3 +226,4 @@ rule ppc:
 # 3. Include Modular Rules
 include: "workflow/rules/data_prep.smk"
 include: "workflow/rules/inference.smk"
+include: "workflow/rules/analysis.smk"

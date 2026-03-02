@@ -45,15 +45,15 @@ renderall:
 
 # Run a research sweep defined in a YAML config
 [group('research')]
-sweep config profile="workflow/profiles/local":
-    uv run snakemake inference --configfile {{config}} --profile {{profile}}
+sweep config profile="workflow/profiles/local" *extra="":
+    uv run snakemake inference --configfile {{config}} --profile {{profile}} {{extra}}
 
 
 # ----- Sync -----
 # Sync results from HPC to local
 [group('sync')]
 sync:
-    rsync -avP vacc:/gpfs1/home/w/t/wthomps3/CSDS/side_projects/heterogeneous-infection-kernels/results/ results/
+    rsync -avP --exclude='posterior_samples.parquet' vacc:/gpfs1/home/w/t/wthomps3/CSDS/side_projects/heterogeneous-infection-kernels/results/ results/
 
 
 # ----- Cleanup -----

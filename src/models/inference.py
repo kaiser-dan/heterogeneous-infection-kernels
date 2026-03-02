@@ -158,7 +158,9 @@ def _extract_kernel_draws(fit, kmax):
             mu = mu[:, None, :]
         if mu.ndim == 3:
             km = min(int(kmax), int(mu.shape[2]))
-            return mu[:, :, :km], "mu"
+            # Only return mu if it has finite values (generated quantities may be all NaN)
+            if np.any(np.isfinite(mu[:, :, :km])):
+                return mu[:, :, :km], "mu"
     except Exception:
         pass
 
@@ -194,11 +196,19 @@ def _extract_kernel_draws(fit, kmax):
     return None, None
 
 
-def _build_kernel_output_tables(kernel_draws, source, output_cfg):
+def _build_kernel_output_tables(kernel_draws, source, output_cfg, lp=None):
     n_draws, k_components, kmax = kernel_draws.shape
     ci_half = (1.0 - output_cfg["kernel_ci_level"]) / 2.0
     ci_low = 100.0 * ci_half
     ci_high = 100.0 * (1.0 - ci_half)
+
+    # Joint MAP: the kernel from the single draw with highest log-posterior
+    joint_map_draw_idx = None
+    if lp is not None:
+        lp_arr = np.asarray(lp, dtype=float).ravel()
+        finite_mask = np.isfinite(lp_arr)
+        if finite_mask.any():
+            joint_map_draw_idx = int(np.argmax(np.where(finite_mask, lp_arr, -np.inf)))
 
     summary_rows = []
     draws_rows = []
@@ -209,19 +219,28 @@ def _build_kernel_output_tables(kernel_draws, source, output_cfg):
         for nu_idx in range(kmax):
             samples = kernel_draws[:, k, nu_idx]
             finite = samples[np.isfinite(samples)]
-            summary_rows.append(
-                {
-                    "component": int(k + 1),
-                    "nu": int(nu_idx + 1),
-                    "mean": float(np.nanmean(samples)),
-                    "median": float(np.nanmedian(samples)),
-                    "map_marginal": _marginal_map(samples, bins=output_cfg["kernel_map_bins"]),
-                    "ci_low": float(np.percentile(finite, ci_low)) if finite.size > 0 else np.nan,
-                    "ci_high": float(np.percentile(finite, ci_high)) if finite.size > 0 else np.nan,
-                    "n_draws": int(finite.size),
-                    "source_param": source,
-                }
-            )
+
+            row = {
+                "component": int(k + 1),
+                "nu": int(nu_idx + 1),
+                "mean": float(np.nanmean(samples)),
+                "median": float(np.nanmedian(samples)),
+                "map_marginal": _marginal_map(samples, bins=output_cfg["kernel_map_bins"]),
+                "ci_low": float(np.percentile(finite, ci_low)) if finite.size > 0 else np.nan,
+                "ci_high": float(np.percentile(finite, ci_high)) if finite.size > 0 else np.nan,
+                "n_draws": int(finite.size),
+                "source_param": source,
+            }
+
+            # Joint MAP value from the best draw
+            if joint_map_draw_idx is not None:
+                val = kernel_draws[joint_map_draw_idx, k, nu_idx]
+                row["map_joint"] = float(val) if np.isfinite(val) else np.nan
+            else:
+                row["map_joint"] = np.nan
+
+            summary_rows.append(row)
+
             if keep_draws:
                 for draw_idx in range(0, n_draws, draws_thin):
                     draws_rows.append(
@@ -452,10 +471,17 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
 
     kernel_draws, kernel_source = _extract_kernel_draws(fit, kmax=kmax)
     if kernel_draws is not None:
+        # Extract lp__ for joint MAP computation
+        try:
+            lp_values = np.asarray(fit.stan_variable("lp__"), dtype=float)
+        except Exception:
+            lp_values = None
+
         kernel_summary_df, kernel_draws_df = _build_kernel_output_tables(
             kernel_draws=kernel_draws,
             source=kernel_source,
             output_cfg=output_cfg,
+            lp=lp_values,
         )
         kernel_summary_df.to_parquet(
             output_dir / "kernel_mode_summary.parquet",
