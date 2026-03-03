@@ -15,6 +15,7 @@ import arviz as az
 import seaborn as sns
 from shiny import ui, render, reactive
 import duckdb
+import yaml
 from scipy.stats import binom
 import functools
 
@@ -36,19 +37,38 @@ RESULTS_BASE = REPO_ROOT / "results"
 DATA_SUMMARIES_BASE = REPO_ROOT / "data" / "summaries"
 DATA_PROCESSED_BASE = REPO_ROOT / "data" / "processed"
 
+_CONFIG_PARAMS_CACHE = {}
+def _load_config_params(sweep_name):
+    """Read top-level scalar params (q, exposure_metric, etc.) from a sweep's config YAML."""
+    if sweep_name in _CONFIG_PARAMS_CACHE:
+        return _CONFIG_PARAMS_CACHE[sweep_name]
+    cfg_path = REPO_ROOT / "configs" / f"{sweep_name}.yaml"
+    result = {}
+    if cfg_path.exists():
+        try:
+            with open(cfg_path) as f:
+                cfg = yaml.safe_load(f)
+            for key in ("q", "exposure_metric"):
+                if key in cfg and not isinstance(cfg[key], (list, dict)):
+                    result[key] = str(cfg[key])  # string to match path-parsed values
+        except Exception:
+            pass
+    _CONFIG_PARAMS_CACHE[sweep_name] = result
+    return result
+
 def get_all_runs_df():
     runs = []
     if not RESULTS_BASE.exists():
         return pd.DataFrame()
 
     summaries = list(RESULTS_BASE.glob("**/inference_summary.parquet"))
-    
+
     for s_path in summaries:
         rel_path = s_path.relative_to(RESULTS_BASE)
         parts = rel_path.parts
         # parts: (sweep, source, data, ...instance_parts..., file)
         if len(parts) < 4: continue
-        
+
         sweep = parts[0]
         source = parts[1]
         data_name = parts[2]
@@ -60,7 +80,13 @@ def get_all_runs_df():
             if '~' in seg:
                 k, v = seg.split('~', 1)
                 params[k] = v
-        
+
+        # Fill in config-level params (q, exposure_metric) not encoded in paths
+        cfg_params = _load_config_params(sweep)
+        for k, v in cfg_params.items():
+            if k not in params:
+                params[k] = v
+
         row = {
             'run_path': str(s_path.parent),
             'sweep': sweep,
@@ -70,7 +96,7 @@ def get_all_runs_df():
         }
         row.update(params)
         runs.append(row)
-    
+
     df = pd.DataFrame(runs)
     if not df.empty:
         df['ui_label'] = df.apply(lambda r: f"{r['source']}/{r['data']} | {r.get('stan_file', 'unknown')}", axis=1)
@@ -115,70 +141,105 @@ def get_data_info(source, data_name):
     return str(DATA_SUMMARIES_BASE / source / f"{data_name}.parquet"), "A_array"
 
 # Data Loading Helpers
-@functools.lru_cache(maxsize=32)
-def load_twitter_data(data_name, q, metric, run_kmax=50):
-    """
-    Load specialized Twitter data (probability distributions).
-    Expected format: Parquet with columns 0..49 (probs) + user_id.
-    """
-    path, col = get_data_info('twitter', data_name) # Forced source='twitter'
-    if not Path(path).exists():
-        return None, None
-    
-    q_val = float(q)
+PIPELINE_TWITTER_FULL = DATA_PROCESSED_BASE / "twitter" / "full"
+
+def _find_pipeline_parquets(metric_key, q_val):
+    """Find pipeline M/N parquets for exact q match only."""
+    m_path = PIPELINE_TWITTER_FULL / f"M_{metric_key}_q{q_val}.parquet"
+    n_path = PIPELINE_TWITTER_FULL / f"N_{metric_key}_q{q_val}.parquet"
+    if m_path.exists() and n_path.exists():
+        return m_path, n_path
+    return None, None
+
+
+def _load_pipeline_mn(m_path, n_path, run_kmax):
+    """Sum pipeline M/N parquet columns into 1D arrays."""
     con = duckdb.connect()
-    
-    # 1. DuckDB Aggregation
+    cols_info = con.execute(
+        f"DESCRIBE SELECT * FROM read_parquet('{m_path}')"
+    ).fetchall()
+    exposure_cols = [c[0] for c in cols_info if c[0] != "user_id"]
+    sum_stmt = ", ".join([f'SUM("{c}") AS "{c}"' for c in exposure_cols])
+
+    m_sums = con.execute(f"SELECT {sum_stmt} FROM read_parquet('{m_path}')").fetchone()
+    n_sums = con.execute(f"SELECT {sum_stmt} FROM read_parquet('{n_path}')").fetchone()
+    con.close()
+
+    M = np.zeros(run_kmax, dtype=float)
+    N = np.zeros(run_kmax, dtype=float)
+    for i, col_name in enumerate(exposure_cols):
+        k = int(col_name)
+        if 1 <= k <= run_kmax:
+            M[k - 1] = float(m_sums[i])
+            N[k - 1] = float(n_sums[i])
+    return M, N
+
+
+def _load_twitter_from_raw(data_name, q_val, metric, run_kmax):
+    """Fallback: compute M/N on-the-fly from raw exposure arrays."""
+    path, col = get_data_info('twitter', data_name)
+    if not Path(path).exists():
+        return np.zeros(run_kmax), np.zeros(run_kmax)
+
+    con = duckdb.connect()
     if metric == 'k':
         lvl_expr = f"list_sum(CAST({col} AS INTEGER[]))"
     else:
         lvl_expr = f"len(CAST({col} AS INTEGER[]))"
-        
+
     query = f"""
         WITH raw AS (
-            SELECT 
-                {lvl_expr} as n_raw,
-                adopted
+            SELECT {lvl_expr} as n_raw, adopted
             FROM read_parquet('{path}')
         )
         SELECT n_raw, adopted, COUNT(*) as weight
-        FROM raw
-        GROUP BY n_raw, adopted
+        FROM raw GROUP BY n_raw, adopted
     """
-    
     try:
         df_agg = con.query(query).to_df()
     except Exception as e:
-        print(f"Twitter Aggregation error: {e}")
+        print(f"Twitter fallback aggregation error: {e}")
         return np.zeros(run_kmax), np.zeros(run_kmax)
-    
+
     M = np.zeros(run_kmax, dtype=float)
     N = np.zeros(run_kmax, dtype=float)
-    
     if df_agg.empty:
         return M, N
-    
-    # 2. Binomial Smoothing
+
     for row in df_agg.itertuples():
         n_raw = int(row.n_raw)
         w = row.weight
-        
         if q_val >= 1.0:
             idx = min(n_raw, run_kmax) - 1
             if idx >= 0:
                 if row.adopted: M[idx] += w
                 else: N[idx] += w
         else:
-            # Vectorized Binomial Smoothing: k ~ Binom(n_raw, q)
             k_vals = np.arange(1, min(n_raw, run_kmax) + 1)
             probs = binom.pmf(k_vals, n_raw, q_val)
-            
             if row.adopted:
                 M[:len(probs)] += w * probs
             else:
                 N[:len(probs)] += w * probs
-                
     return M, N
+
+
+@functools.lru_cache(maxsize=32)
+def load_twitter_data(data_name, q, metric, run_kmax=50):
+    """
+    Load Twitter M/N data. Tries pipeline parquets first (fast),
+    falls back to on-the-fly computation from raw arrays.
+    """
+    q_val = float(q)
+    metric_key = "k" if metric == "k" else "kappa"
+
+    # Try pipeline parquets (exact q match, then closest)
+    m_path, n_path = _find_pipeline_parquets(metric_key, q_val)
+    if m_path is not None:
+        return _load_pipeline_mn(m_path, n_path, run_kmax)
+
+    # Fallback: compute from raw exposure arrays
+    return _load_twitter_from_raw(data_name, q_val, metric, run_kmax)
 
 @functools.lru_cache(maxsize=32)
 def load_oo_data(data_name, run_kmax=50):
@@ -262,191 +323,171 @@ def load_empirical_data_dispatch(run, run_kmax=50):
 
 
 def load_kernel_summary(run_path):
-    s_path = Path(run_path) / "inference_summary.parquet"
-    if not s_path.exists(): return None
-    
-    # 1. Try loading explicit 'mu' or 'c' (legacy)
-    # We use a robust SAFE_CAST or check for regex match
-    
-    con = duckdb.connect()
-    
-    # Regex for mu[k] or mu[k,j] or c[j]
-    # Standard format seen: c[1], c[2]... OR mu[1,1]...
-    
-    # Let's try to load 'mu' or 'c' first
-    # robustly handle index column name
-    query_mu = f"""
-        SELECT 
-            __index_level_0__ as index,
-            Mean as mean,
-            "5%" as lower,
-            "95%" as upper
-        FROM read_parquet('{str(s_path)}')
-        WHERE index LIKE 'mu%' OR index LIKE 'c[%' OR index LIKE 'mu_prob%'
+    """Load kernel summary with all available estimators.
+
+    Returns DataFrame with columns: component, level, mean, median, map_marginal, map_joint, lower, upper.
+    Falls back through multiple data sources.
     """
-    
+    run_dir = Path(run_path)
+
+    # 1. Preferred: kernel_mode_summary.parquet (has mean/median/MAP computed on probability scale)
+    km_path = run_dir / "kernel_mode_summary.parquet"
+    if km_path.exists():
+        try:
+            df_km = pd.read_parquet(km_path)
+            # Check for valid (non-NaN) data
+            if not df_km.empty and df_km['mean'].notna().any():
+                result = df_km.rename(columns={'nu': 'level', 'ci_low': 'lower', 'ci_high': 'upper'})
+                # Ensure all estimator columns exist
+                for col in ['mean', 'median', 'map_marginal', 'map_joint']:
+                    if col not in result.columns:
+                        result[col] = result.get('mean', np.nan)
+                return result[['component', 'level', 'mean', 'median', 'map_marginal', 'map_joint', 'lower', 'upper']].sort_values(['component', 'level'])
+        except Exception:
+            pass
+
+    # 2. Fallback: inference_summary.parquet
+    s_path = run_dir / "inference_summary.parquet"
+    if not s_path.exists():
+        return None
+
+    con = duckdb.connect()
+
+    # 2a. Try mu[k,nu] from inference_summary
     try:
-        df_mu = con.query(query_mu).to_df()
+        df_mu = con.query(f"""
+            SELECT __index_level_0__ as index, Mean as mean, "5%" as lower, "95%" as upper
+            FROM read_parquet('{str(s_path)}') WHERE index LIKE 'mu[%'
+        """).to_df()
     except Exception:
         df_mu = pd.DataFrame()
-        
+
     rows = []
-    
     if not df_mu.empty:
-        # Regex to handle:
-        # c[k] -> component=1, level=k
-        # mu[c,k] -> component=c, level=k
-        # mu_prob[c,k] -> component=c, level=k
-        
-        # We need to be careful about order. 
-        # c[10] vs mu[1,10]
-        
-        pat_comp = re.compile(r'^(?:mu|mu_prob)\[(\d+),(\d+)\]')
-        pat_single = re.compile(r'^(?:c|mu)\[(\d+)\]')
-        
+        pat_comp = re.compile(r'^mu\[(\d+),(\d+)\]')
+        pat_single = re.compile(r'^mu\[(\d+)\]')
         for row in df_mu.itertuples():
-            idx = row.index
-            
-            # Try Multi-Component first
-            m = pat_comp.match(idx)
+            m = pat_comp.match(row.index)
             if m:
-                comp_id = int(m.group(1))
-                level_id = int(m.group(2))
-                rows.append({
-                    'component': comp_id,
-                    'level': level_id,
-                    'mean': row.mean,
-                    'lower': row.lower,
-                    'upper': row.upper
-                })
+                rows.append({'component': int(m.group(1)), 'level': int(m.group(2)),
+                             'mean': row.mean, 'lower': row.lower, 'upper': row.upper})
                 continue
-                
-            # Try Single Component
-            m = pat_single.match(idx)
+            m = pat_single.match(row.index)
             if m:
-                level_id = int(m.group(1))
-                rows.append({
-                    'component': 1,
-                    'level': level_id,
-                    'mean': row.mean,
-                    'lower': row.lower,
-                    'upper': row.upper
+                rows.append({'component': 1, 'level': int(m.group(1)),
+                             'mean': row.mean, 'lower': row.lower, 'upper': row.upper})
+
+        has_finite = any(r['mean'] is not None and not (isinstance(r['mean'], float) and np.isnan(r['mean'])) for r in rows)
+        if rows and has_finite:
+            df = pd.DataFrame(rows).sort_values(['component', 'level'])
+            # Fill missing estimator columns with mean (only mean available from inference_summary)
+            for col in ['median', 'map_marginal', 'map_joint']:
+                df[col] = df['mean']
+            return df
+
+    # 2b. Fallback: Reconstruct from logit_mu (parametric models with NaN generated quantities)
+    try:
+        df_logit = con.query(f"""
+            SELECT __index_level_0__ as index, Mean as mean, "5%" as lower, "95%" as upper
+            FROM read_parquet('{str(s_path)}') WHERE index LIKE 'logit_mu[%'
+        """).to_df()
+    except Exception:
+        df_logit = pd.DataFrame()
+
+    if not df_logit.empty:
+        pat_lm = re.compile(r'^logit_mu\[(\d+),(\d+)\]')
+        lm_rows = []
+        for row in df_logit.itertuples():
+            m = pat_lm.match(row.index)
+            if m and row.mean is not None:
+                mean_p = 1.0 / (1.0 + np.exp(-row.mean))
+                lower_p = 1.0 / (1.0 + np.exp(-row.lower)) if row.lower is not None else None
+                upper_p = 1.0 / (1.0 + np.exp(-row.upper)) if row.upper is not None else None
+                lm_rows.append({
+                    'component': int(m.group(1)), 'level': int(m.group(2)),
+                    'mean': mean_p, 'lower': lower_p, 'upper': upper_p
                 })
-                
-        if rows:
-             return pd.DataFrame(rows).sort_values(['component', 'level'])
+        if lm_rows:
+            df = pd.DataFrame(lm_rows).sort_values(['component', 'level'])
+            for col in ['median', 'map_marginal', 'map_joint']:
+                df[col] = df['mean']
+            return df
 
-    # 2. Fallback: Reconstruct from logit_p + Delta (Non-parametric)
-    # Get logit_p
-    query_p = f"""SELECT Mean, "5%", "95%" FROM read_parquet('{str(s_path)}') WHERE __index_level_0__ = 'logit_p[1]'""" # Assume K=1
-    try:
-        df_p = con.query(query_p).to_df()
-    except:
-        return pd.DataFrame(columns=['level', 'mean', 'lower', 'upper'])
-        
-    if df_p.empty:
-         return pd.DataFrame(columns=['level', 'mean', 'lower', 'upper'])
-         
-    logit_p_mean = df_p.iloc[0]['Mean']
-    logit_p_low = df_p.iloc[0]['5%']
-    logit_p_high = df_p.iloc[0]['95%']
-    
-    # Inverse logit
-    p_mean = 1 / (1 + np.exp(-logit_p_mean))
-    p_low = 1 / (1 + np.exp(-logit_p_low)) 
-    p_high = 1 / (1 + np.exp(-logit_p_high))
-    
-    # Get Delta[1, j]
-    query_delta = f"""
-        SELECT 
-            CAST(regexp_extract(__index_level_0__, 'Delta\[1,([0-9]+)\]', 1) as INTEGER) as level,
-            Mean as val
-        FROM read_parquet('{str(s_path)}')
-        WHERE __index_level_0__ LIKE 'Delta[1,%]'
-        ORDER BY level
-    """
-    try:
-        df_delta = con.query(query_delta).to_df()
-    except:
-         return pd.DataFrame(columns=['level', 'mean', 'lower', 'upper'])
-
-    if df_delta.empty:
-         return pd.DataFrame(columns=['level', 'mean', 'lower', 'upper'])
-         
-    # Compute Reconstructed Curve
-    # mu_curve = p * cumsum(Delta)
-    deltas = df_delta['val'].values
-    cumsum_delta = np.cumsum(deltas)
-    
-    # Compute mean curve
-    mu_vals = p_mean * cumsum_delta
-    
-    # Approx Interval: Scale intervals by p_low/p_high (ignoring Delta uncertainty for viz speed)
-    mu_low = p_low * cumsum_delta
-    mu_high = p_high * cumsum_delta
-    
-    # Store
-    for i, level in enumerate(df_delta['level']):
-        rows.append({
-            'component': 1,
-            'level': level,
-            'mean': mu_vals[i],
-            'lower': mu_low[i],
-            'upper': mu_high[i]
-        })
-        
-    return pd.DataFrame(rows).sort_values(['component', 'level'])
+    return pd.DataFrame(columns=['component', 'level', 'mean', 'median', 'map_marginal', 'map_joint', 'lower', 'upper'])
 
 def load_pi_summary(run_path):
+    # Try posterior_samples.parquet first (has full posterior draws)
     s_path = Path(run_path) / "posterior_samples.parquet"
-    if not s_path.exists(): return None
-    
-    # DuckDB to select columns starting with pi
-    # Currently DuckDB wildcards in SELECT (SELECT pi*) are cleaner
-    # But read_parquet might return all columns.
-    
-    con = duckdb.connect()
-    # Get columns first
-    cols = con.query(f"DESCRIBE SELECT * FROM read_parquet('{str(s_path)}')").to_df()['column_name'].tolist()
-    pi_cols = [c for c in cols if c.startswith('pi[')]
-    
-    if not pi_cols: return None
-    
-    # Construct aggregation query
-    aggs = []
-    for c in pi_cols:
-        comp = c.split('[')[1].split(']')[0]
-        aggs.append(f"AVG(\"{c}\") as mean_{comp}")
-        aggs.append(f"quantile(\"{c}\", 0.1) as low_{comp}")
-        aggs.append(f"quantile(\"{c}\", 0.9) as high_{comp}")
-        
-    agg_str = ", ".join(aggs)
-    query = f"SELECT {agg_str} FROM read_parquet('{str(s_path)}')"
-    
-    res = con.query(query).to_df().iloc[0]
-    
-    pi_data = []
-    for c in pi_cols:
-        comp = c.split('[')[1].split(']')[0]
-        # Robust access for both 'mean_1' and 'mean_1,1' formats
+    if s_path.exists():
         try:
-            m_val = res[f'mean_{comp}']
-            l_val = res[f'low_{comp}']
-            h_val = res[f'high_{comp}']
-        except KeyError:
-            # Fallback for pandas/duckdb potentially double-quoting or differing on commas
-            m_val = res.get(f'mean_{comp}', 0)
-            l_val = res.get(f'low_{comp}', 0)
-            h_val = res.get(f'high_{comp}', 0)
+            con = duckdb.connect()
+            cols = con.query(f"DESCRIBE SELECT * FROM read_parquet('{str(s_path)}')").to_df()['column_name'].tolist()
+            pi_cols = [c for c in cols if c.startswith('pi[')]
 
-        pi_data.append({
-            'component': comp,
-            'mean': m_val,
-            'lower': l_val,
-            'upper': h_val
-        })
-        
-    return pd.DataFrame(pi_data)
+            if pi_cols:
+                aggs = []
+                for c in pi_cols:
+                    comp = c.split('[')[1].split(']')[0]
+                    aggs.append(f'AVG("{c}") as mean_{comp}')
+                    aggs.append(f'quantile("{c}", 0.1) as low_{comp}')
+                    aggs.append(f'quantile("{c}", 0.9) as high_{comp}')
+
+                agg_str = ", ".join(aggs)
+                query = f"SELECT {agg_str} FROM read_parquet('{str(s_path)}')"
+                res = con.query(query).to_df().iloc[0]
+
+                pi_data = []
+                for c in pi_cols:
+                    comp = c.split('[')[1].split(']')[0]
+                    try:
+                        m_val = res[f'mean_{comp}']
+                        l_val = res[f'low_{comp}']
+                        h_val = res[f'high_{comp}']
+                    except KeyError:
+                        m_val = res.get(f'mean_{comp}', 0)
+                        l_val = res.get(f'low_{comp}', 0)
+                        h_val = res.get(f'high_{comp}', 0)
+
+                    pi_data.append({
+                        'component': comp,
+                        'mean': m_val,
+                        'lower': l_val,
+                        'upper': h_val
+                    })
+
+                return pd.DataFrame(pi_data)
+        except Exception:
+            pass
+
+    # Fallback: read pi from inference_summary.parquet (has Mean, 5%, 95%)
+    summary_path = Path(run_path) / "inference_summary.parquet"
+    if not summary_path.exists():
+        return None
+
+    try:
+        con = duckdb.connect()
+        df_pi = con.query(f"""
+            SELECT __index_level_0__ as idx, Mean as mean, "5%" as lower, "95%" as upper
+            FROM read_parquet('{str(summary_path)}')
+            WHERE idx LIKE 'pi[%'
+        """).to_df()
+
+        if df_pi.empty:
+            return None
+
+        pi_data = []
+        for row in df_pi.itertuples():
+            comp = row.idx.split('[')[1].split(']')[0]
+            pi_data.append({
+                'component': comp,
+                'mean': row.mean,
+                'lower': row.lower,
+                'upper': row.upper
+            })
+
+        return pd.DataFrame(pi_data)
+    except Exception:
+        return None
 
 def load_model_fit_stats(run_path, n=1000):
     """
@@ -553,7 +594,7 @@ def create_model_comparison_plot(df_comp, cur_run):
     comp_val = cur_run[id_col] if cur_run else None
     colors = ['tab:blue' if r[id_col] != comp_val else 'tab:orange' for i, r in df_comp.iterrows()]
     
-    sns.barplot(data=df_comp, y='Model', x=metric, ax=ax, palette=colors)
+    sns.barplot(data=df_comp, y='Model', x=metric, ax=ax, hue='Model', palette=colors, legend=False)
     
     ax.set_xlabel(f"{label} (Lower is Better)")
     ax.set_ylabel("")
@@ -690,7 +731,9 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
             stats = load_model_fit_stats(run_path, n=n)
             if stats:
                 # Create a clean model label
-                m_name = run.get('stan_file', 'unknown') or run['instance_id']
+                m_name = run.get('stan_file', None)
+                if m_name is None or pd.isna(m_name) or not isinstance(m_name, str):
+                    m_name = str(run.get('instance_id', 'unknown'))
                 m_name = m_name.replace('src/models/', '').replace('.stan', '').replace('__', '/')
                 m_name = m_name.replace('non_parametric_', 'NP_').replace('model_', '')
                 m_name = m_name.replace('monotonic_empirical_bayes', 'Mono(EB)')
@@ -747,33 +790,42 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
         label = input.data_model()
         df = filtered_runs()
         if df.empty or not label: return ui.div()
-    
+
         # Filter by label
         subset = df[df['ui_label'] == label]
-    
+
         ui_elems = []
-    
+
         # Find varying columns in subset that aren't source/data/stan_file
         # Typically: q, exposure_metric, K
-    
+
         # Metric Selector
         metrics = sorted(subset['exposure_metric'].dropna().unique().tolist())
         if metrics:
             ui_elems.append(ui.input_select("metric", "Metric", choices=metrics))
-        
+
         # Q Selector
         qs = sorted(subset['q'].dropna().unique().tolist())
         if qs:
             # Sort properly (float)
             qs.sort(key=float)
             ui_elems.append(ui.input_select("q", "Sensing (q)", choices=qs))
-       
+
         # K (Components) Selector
         ks = sorted(subset.get('K', pd.Series()).dropna().unique().tolist())
         if ks:
              ui_elems.append(ui.input_select("K", "Components (K)", choices=ks))
-         
+
         return ui.div(*ui_elems)
+
+    # ========================================================================
+
+    ui.input_select("estimator", "Estimator", choices={
+        "mean": "Posterior Mean",
+        "median": "Posterior Median",
+        "map_marginal": "Marginal MAP",
+        "map_joint": "Joint MAP",
+    })
 
     # ========================================================================
 
@@ -815,7 +867,7 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
         M, N = load_empirical_data_dispatch(run, kmax)
     
         total = M + N
-        # Avoid div by zero
+        # Avoid div by zero — fraction scale
         with np.errstate(divide='ignore', invalid='ignore'):
             obs_p = np.where(total > 0, M / total, 0)
     
@@ -843,40 +895,51 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
         if has_model:
             prop_cycle = plt.rcParams['axes.prop_cycle']
             colors = prop_cycle.by_key()['color']
-        
+
+            # Which estimator to plot (from sidebar dropdown)
+            est_col = input.estimator()
+            if est_col not in kernel_df.columns:
+                est_col = 'mean'  # fallback
+            est_labels = {"mean": "Mean", "median": "Median", "map_marginal": "Marginal MAP", "map_joint": "Joint MAP"}
+            est_label = est_labels.get(est_col, est_col)
+
             for idx, k_comp in enumerate(comps):
                 sub = kernel_df[kernel_df['component'] == k_comp].sort_values('level')
                 if sub.empty: continue
-            
+
                 c = colors[idx % len(colors)]
-            
+
                 # Format Label with Weight
                 w_val = weights.get(k_comp, None)
                 if w_val is not None:
-                    label = f'Model Comp {k_comp} ($\pi={w_val:.2f}$)'
+                    label = f'{est_label} Comp {k_comp} ($\\pi={w_val:.2f}$)'
                 else:
-                    label = f'Model Comp {k_comp}'
-            
-                ax.plot(sub['level'], sub['mean'], 'o-', color=c, label=label, linewidth=2, zorder=5)
+                    label = f'{est_label} Comp {k_comp}'
+
+                ax.plot(sub['level'], sub[est_col], 'o-', color=c, label=label, linewidth=2, zorder=5)
                 ax.fill_between(sub['level'], sub['lower'], sub['upper'], color=c, alpha=0.1, zorder=4)
             
         ax.set_xlabel(f"Exposure ({metric})")
-        ax.set_ylabel("Probability of Adoption")
+        ax.set_ylabel("Adoption Fraction")
         ax.set_title(f"Model vs Data | {run['source']}/{run['data']} | q={qs}")
     
         if not has_model and np.sum(obs_p) == 0:
             ax.text(0.5, 0.5, "No Exposure Data Found for this simulation\nCheck if backbone disparity filtering removed all edges", 
                     ha='center', va='center', transform=ax.transAxes, fontsize=12, color='red')
     
-        # Dynamic Lim
+        # Dynamic Lim (both model and empirical are fractions)
         y_max = 1.0
         if has_model:
-             upper_max = kernel_df['upper'].max()
-             y_max = max(upper_max, obs_p.max()) if len(obs_p) > 0 else upper_max
+             finite_upper = kernel_df['upper'].dropna()
+             upper_max = finite_upper.max() if len(finite_upper) > 0 else 0.0
+             obs_max = obs_p.max() if len(obs_p) > 0 else 0.0
+             y_max = max(upper_max, obs_max) if np.isfinite(upper_max) else obs_max
         else:
              y_max = obs_p.max() if len(obs_p) > 0 else 1.0
-         
-        ax.set_ylim(0, min(y_max * 1.2, 1.05)) # Cap at 1.05
+
+        if not np.isfinite(y_max) or y_max <= 0:
+             y_max = 1.0
+        ax.set_ylim(0, y_max * 1.2)
         ax.grid(True, alpha=0.15)
         ax.legend(loc='upper left')
     
@@ -892,7 +955,7 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
         pi_df = load_pi_summary(run['run_path'])
         if pi_df is None or pi_df.empty:
             fig, ax = plt.subplots()
-            ax.text(0.5, 0.5, "No mixture components (K=1)", ha='center')
+            ax.text(0.5, 0.5, "No mixture weight data available", ha='center')
             ax.axis('off')
             return fig
         
@@ -1033,9 +1096,9 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
                 if metric == 'k': 
                     # Handle float A (weighted)
                     val = sum(A)
-                    if isinstance(val, (int, float)):
+                    try:
                         n_raw = int(val)
-                    else:
+                    except (TypeError, ValueError):
                         n_raw = 0
                 else: 
                     n_raw = int(len(A)) 
@@ -1098,6 +1161,212 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
     @render.plot
     def model_bic_plot_ht():
         return create_model_comparison_plot(model_comparison_data(), selected_run())
+
+    # ========================================================================
+
+    import matplotlib.lines as mlines
+
+    Q_SC = 0.192
+    Q_CC = 0.18
+
+    @functools.lru_cache(maxsize=1)
+    def load_monsted_three_way():
+        """Load all three data sources for Monsted Fig 3 comparison."""
+        derived_dir = REPO_ROOT / "data" / "derived"
+        processed_full = REPO_ROOT / "data" / "processed" / "twitter" / "full"
+
+        # 1. Transcribed
+        transcribed = pd.read_csv(derived_dir / "monsted_fig3_transcribed.csv", comment="#")
+
+        # 2. Reproduce script
+        reproduce = pd.read_csv(derived_dir / "monsted_fig3_our_computed.csv")
+
+        # 3. Pipeline M/N parquets
+        pipe = {}
+        for metric, q_val in [("k", Q_SC), ("kappa", Q_CC)]:
+            m_path = str(processed_full / f"M_{metric}_q{q_val}.parquet")
+            n_path = str(processed_full / f"N_{metric}_q{q_val}.parquet")
+
+            con = duckdb.connect()
+            cols_info = con.execute(
+                f"DESCRIBE SELECT * FROM read_parquet('{m_path}')"
+            ).fetchall()
+            exposure_cols = [c[0] for c in cols_info if c[0] != "user_id"]
+            sum_stmt = ", ".join([f'SUM("{c}") AS "{c}"' for c in exposure_cols])
+
+            m_sums = con.execute(f"SELECT {sum_stmt} FROM read_parquet('{m_path}')").fetchone()
+            n_sums = con.execute(f"SELECT {sum_stmt} FROM read_parquet('{n_path}')").fetchone()
+            con.close()
+
+            m_dict = {int(exposure_cols[i]): float(m_sums[i]) for i in range(len(exposure_cols))}
+            n_dict = {int(exposure_cols[i]): float(n_sums[i]) for i in range(len(exposure_cols))}
+            pipe[metric] = (m_dict, n_dict)
+
+        return transcribed, reproduce, pipe
+
+
+    @functools.lru_cache(maxsize=1)
+    def compute_monsted_comparison_table():
+        """Build comparison table across all three sources."""
+        transcribed, reproduce, pipe = load_monsted_three_way()
+        rows = []
+
+        for model, metric, kmax in [("SC", "k", 7), ("CC", "kappa", 8)]:
+            m_dict, n_dict = pipe[metric]
+            r = reproduce[reproduce["model"] == model].set_index("k")
+
+            for k in range(1, kmax + 1):
+                # Transcribed
+                tA = transcribed[(transcribed["panel"] == "A") & (transcribed["model"] == model) & (transcribed["x"] == k)]
+                tB = transcribed[(transcribed["panel"] == "B") & (transcribed["model"] == model) & (transcribed["x"] == k)]
+
+                trans_pct = float(tA["observed"].iloc[0]) if not tA.empty else np.nan
+                trans_count = float(tB["observed"].iloc[0]) if not tB.empty else np.nan
+
+                # Reproduce script
+                repro_pct = float(r.loc[k, "pct_retweeted"]) if k in r.index else np.nan
+                repro_count = float(r.loc[k, "N_adopted"]) if k in r.index else np.nan
+
+                # Pipeline
+                m_val = m_dict.get(k, 0.0)
+                total = m_val + n_dict.get(k, 0.0)
+                pipe_pct = 100.0 * m_val / total if total > 0 else np.nan
+                pipe_count = m_val
+
+                # Deltas (pipeline vs transcribed)
+                delta_pct = pipe_pct - trans_pct if pd.notna(pipe_pct) and pd.notna(trans_pct) else np.nan
+                delta_count = pipe_count - trans_count if pd.notna(trans_count) else np.nan
+
+                rows.append({
+                    "model": model, "k": k,
+                    "trans_pct": trans_pct, "repro_pct": repro_pct, "pipe_pct": pipe_pct,
+                    "delta_pct": delta_pct,
+                    "trans_count": trans_count, "repro_count": repro_count, "pipe_count": pipe_count,
+                    "delta_count": delta_count,
+                })
+
+        return pd.DataFrame(rows)
+
+    # ========================================================================
+
+    @render.plot
+    def monsted_three_way_plot():
+        transcribed, reproduce, pipe = load_monsted_three_way()
+
+        fig, axes = plt.subplots(2, 2, figsize=(7.5, 6.0))
+
+        layout = [
+            ('A', 'SC', 'k',     axes[0, 0], 7, '% retweeted',     None),
+            ('A', 'CC', 'kappa', axes[0, 1], 8, None,               None),
+            ('B', 'SC', 'k',     axes[1, 0], 7, 'Number retweeted', 'k'),
+            ('B', 'CC', 'kappa', axes[1, 1], 8, None,               r'$\kappa$'),
+        ]
+
+        for panel, model, metric, ax, kmax, ylabel, xlabel in layout:
+            ks = np.arange(1, kmax + 1)
+
+            # Transcribed
+            t = transcribed[(transcribed['panel'] == panel) & (transcribed['model'] == model)]
+            obs = t.set_index('x')['observed'].reindex(ks).values
+
+            # Reproduce script
+            r = reproduce[reproduce['model'] == model].set_index('k')
+            if panel == 'A':
+                repro_vals = r['pct_retweeted'].reindex(ks).values
+            else:
+                repro_vals = r['N_adopted'].reindex(ks).values
+
+            # Pipeline
+            m_dict, n_dict = pipe[metric]
+            if panel == 'A':
+                pipe_vals = np.array([
+                    100.0 * m_dict.get(k, 0.0) / (m_dict.get(k, 0.0) + n_dict.get(k, 0.0))
+                    if (m_dict.get(k, 0.0) + n_dict.get(k, 0.0)) > 0 else 0.0
+                    for k in ks
+                ])
+            else:
+                pipe_vals = np.array([m_dict.get(k, 0.0) for k in ks])
+
+            # Gray bars (transcribed)
+            ax.bar(ks, obs, color='#b0b0b0', width=0.65, edgecolor='#555555',
+                   linewidth=0.6, zorder=2)
+            # Blue squares (reproduce script)
+            ax.scatter(ks, repro_vals, s=42, marker='s', color='#2980b9', zorder=5)
+            # Red diamonds (pipeline)
+            ax.scatter(ks, pipe_vals, s=32, marker='D', color='#c0392b', zorder=6)
+
+            ax.set_xlim(0.25, kmax + 0.75)
+            ax.set_xticks(ks)
+            ax.tick_params(axis='both', labelsize=8)
+            if xlabel:
+                ax.set_xlabel(xlabel, fontsize=10)
+            if ylabel:
+                ax.set_ylabel(ylabel, fontsize=9)
+            if panel == 'A':
+                ax.set_ylim(0, 0.065)
+            else:
+                ax.set_ylim(0, 58)
+            if model == 'CC':
+                ax.set_facecolor('#ebebeb')
+
+        axes[0, 0].set_title('Simple contagion', fontsize=10, pad=6)
+        axes[0, 1].set_title('Complex contagion', fontsize=10, pad=6)
+
+        for ax, label in zip(axes[:, 0], ['A', 'B']):
+            ax.text(-0.22, 1.08, label, transform=ax.transAxes,
+                    fontsize=13, fontweight='bold', va='top', ha='left')
+
+        bar_h  = plt.Rectangle((0, 0), 1, 1, fc='#b0b0b0', ec='#555555', lw=0.6)
+        repo_h = mlines.Line2D([], [], marker='s', color='#2980b9', markersize=6, linestyle='None')
+        pipe_h = mlines.Line2D([], [], marker='D', color='#c0392b', markersize=5, linestyle='None')
+
+        for ax in axes[0, :]:
+            ax.legend(
+                handles=[bar_h, repo_h, pipe_h],
+                labels=[
+                    'Transcribed (paper)',
+                    f'Reproduce script (q_sc={Q_SC}, q_cc={Q_CC})',
+                    f'Pipeline (q_sc={Q_SC}, q_cc={Q_CC})',
+                ],
+                fontsize=7, loc='upper left', framealpha=0.85,
+                handlelength=1.2, handletextpad=0.5,
+            )
+
+        plt.tight_layout(h_pad=1.2, w_pad=0.8)
+        return fig
+
+    # ========================================================================
+
+    @render.text
+    def monsted_validation_status():
+        df = compute_monsted_comparison_table()
+        n_rows = len(df)
+        pct_fails = df["delta_pct"].abs().gt(1.0).sum()
+        count_fails = df["delta_count"].abs().gt(1.0).sum()
+        total_fails = int(pct_fails + count_fails)
+        if total_fails == 0:
+            return (
+                f"Three-way validation: ALL PASS ({n_rows} points). "
+                f"Pipeline matches transcribed within thresholds "
+                f"(Panel A: 1 pp, Panel B: 1.0 count) at q_sc={Q_SC}, q_cc={Q_CC}."
+            )
+        worst_pct = df.loc[df["delta_pct"].abs().idxmax()]
+        worst_count = df.loc[df["delta_count"].abs().idxmax()]
+        return (
+            f"Three-way validation: {total_fails} threshold exceedances. "
+            f"Worst Panel A: {worst_pct['model']} k={int(worst_pct['k'])} delta={worst_pct['delta_pct']:.4f} pp. "
+            f"Worst Panel B: {worst_count['model']} k={int(worst_count['k'])} delta={worst_count['delta_count']:.4f}."
+        )
+
+    # ========================================================================
+
+    @render.table
+    def monsted_validation_table():
+        df = compute_monsted_comparison_table().copy()
+        num_cols = [c for c in df.columns if c != "model"]
+        for col in num_cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df
 
     # ========================================================================
 

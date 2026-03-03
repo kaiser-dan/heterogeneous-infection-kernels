@@ -879,9 +879,9 @@ def main_plot_view():
     M, N = load_empirical_data_dispatch(run, kmax)
     
     total = M + N
-    # Avoid div by zero — percentage scale (matching Monsted tab convention)
+    # Avoid div by zero — fraction scale
     with np.errstate(divide='ignore', invalid='ignore'):
-        obs_p = np.where(total > 0, 100.0 * M / total, 0)
+        obs_p = np.where(total > 0, M / total, 0)
     
     # Load Weights (pi) if available
     pi_df = load_pi_summary(run['run_path'])
@@ -903,7 +903,7 @@ def main_plot_view():
     label_emp = 'Empirical (Smoothed)' if is_smoothed else 'Empirical Data'
     ax.bar(x, obs_p, alpha=0.3, color='gray', label=label_emp, width=0.8, zorder=1)
     
-    # 2. Model Kernels (Multi-Component) — convert from probability to percentage
+    # 2. Model Kernels (Multi-Component)
     if has_model:
         prop_cycle = plt.rcParams['axes.prop_cycle']
         colors = prop_cycle.by_key()['color']
@@ -928,27 +928,22 @@ def main_plot_view():
             else:
                 label = f'{est_label} Comp {k_comp}'
 
-            # Convert probability (0-1) to percentage to match empirical scale
-            est_pct = sub[est_col] * 100.0
-            lower_pct = sub['lower'] * 100.0
-            upper_pct = sub['upper'] * 100.0
-
-            ax.plot(sub['level'], est_pct, 'o-', color=c, label=label, linewidth=2, zorder=5)
-            ax.fill_between(sub['level'], lower_pct, upper_pct, color=c, alpha=0.1, zorder=4)
+            ax.plot(sub['level'], sub[est_col], 'o-', color=c, label=label, linewidth=2, zorder=5)
+            ax.fill_between(sub['level'], sub['lower'], sub['upper'], color=c, alpha=0.1, zorder=4)
             
     ax.set_xlabel(f"Exposure ({metric})")
-    ax.set_ylabel("% adopted")
+    ax.set_ylabel("Adoption Fraction")
     ax.set_title(f"Model vs Data | {run['source']}/{run['data']} | q={qs}")
     
     if not has_model and np.sum(obs_p) == 0:
         ax.text(0.5, 0.5, "No Exposure Data Found for this simulation\nCheck if backbone disparity filtering removed all edges", 
                 ha='center', va='center', transform=ax.transAxes, fontsize=12, color='red')
     
-    # Dynamic Lim (both model and empirical are now in percentage)
+    # Dynamic Lim (both model and empirical are fractions)
     y_max = 1.0
     if has_model:
          finite_upper = kernel_df['upper'].dropna()
-         upper_max = (finite_upper.max() * 100.0) if len(finite_upper) > 0 else 0.0
+         upper_max = finite_upper.max() if len(finite_upper) > 0 else 0.0
          obs_max = obs_p.max() if len(obs_p) > 0 else 0.0
          y_max = max(upper_max, obs_max) if np.isfinite(upper_max) else obs_max
     else:
@@ -1119,9 +1114,9 @@ def matrix_plot_view():
             if metric == 'k': 
                 # Handle float A (weighted)
                 val = sum(A)
-                if isinstance(val, (int, float)):
+                try:
                     n_raw = int(val)
-                else:
+                except (TypeError, ValueError):
                     n_raw = 0
             else: 
                 n_raw = int(len(A)) 
