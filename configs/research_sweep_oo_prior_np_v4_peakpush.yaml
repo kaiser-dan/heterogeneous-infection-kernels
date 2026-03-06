@@ -1,0 +1,39 @@
+# ============================================================================
+# OO Prior Probe v4 - NP Monotonic (Drop Zero Bin + Peak Push)
+# ============================================================================
+# Hypothesis:
+#   After removing k=0 pressure, lifting LOGIT_P_LOCATION and allowing K=3 can
+#   better match the OO mid/high-k adoption curve.
+# ============================================================================
+name: "research_sweep_oo_prior_np_v4_peakpush"
+
+source: "oo"
+wandb_enabled: false
+oo:
+  sim_id: 165
+  backbone_method: "disparity"
+  backbone_threshold: 0.3
+  kmax: 20
+
+model:
+  stan_file: "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  K: 2
+  concentration: 1.0
+  deviation_scale: 1.0
+  logit_p_location: -5.2
+  logit_p_scale: 1.2
+  empirical_prior_floor: 0.000001
+  empirical_prior_cap: 0.999999
+  drop_zero_exposure_bin: true
+  V_max_local: 1000
+
+sweep:
+  K: [2, 3]
+  stan_file:
+    - "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  concentration: [0.5, 1.0]
+  deviation_scale: [0.5, 1.0]
+  logit_p_location: [-5.6, -5.2, -4.8]
+  logit_p_scale: [0.8, 1.2]
+  drop_zero_exposure_bin: [true]
+

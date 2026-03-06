@@ -354,6 +354,18 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
         # OO handles discretization via dynamic graph IR directory
         # summary_path for OO points to the 'effective_oo_...' directory
         M, N = generate_stan_matrices_oo(summary_path, config)
+        drop_zero_bin = bool(
+            config.get('model', {}).get(
+                'drop_zero_exposure_bin',
+                config.get('oo', {}).get('drop_zero_exposure_bin', False),
+            )
+        )
+        if drop_zero_bin:
+            if M.shape[1] <= 1:
+                raise ValueError("Cannot drop zero-exposure bin: M/N have <=1 exposure column.")
+            print("OO option enabled: dropping zero-exposure bin (column 0) before fitting.")
+            M = M[:, 1:]
+            N = N[:, 1:]
         V = M.shape[0]
         # Dynamically update kmax to match the pre-computed matrices
         if M.shape[1] != kmax:

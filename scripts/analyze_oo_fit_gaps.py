@@ -13,7 +13,13 @@ import numpy as np
 import pandas as pd
 
 
-def load_empirical_curve(repo_root: Path, sim_id: int, method: str, kmax: int) -> tuple[np.ndarray, np.ndarray]:
+def load_empirical_curve(
+    repo_root: Path,
+    sim_id: int,
+    method: str,
+    kmax: int,
+    drop_zero_bin: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
     base = repo_root / "data" / "processed" / "oo" / f"sim_{sim_id}_backbone_{method}"
     m_df = pd.read_parquet(base / "M.parquet")
     n_df = pd.read_parquet(base / "N.parquet")
@@ -21,6 +27,11 @@ def load_empirical_curve(repo_root: Path, sim_id: int, method: str, kmax: int) -
 
     M = m_df[cols].sum(axis=0).to_numpy(dtype=float)
     N = n_df[cols].sum(axis=0).to_numpy(dtype=float)
+    if drop_zero_bin:
+        if len(M) <= 1:
+            raise ValueError("Cannot drop zero-exposure bin: empirical curve has <=1 bin.")
+        M = M[1:]
+        N = N[1:]
     if len(M) > kmax:
         M, N = M[:kmax], N[:kmax]
     elif len(M) < kmax:
@@ -155,6 +166,11 @@ def main() -> None:
     parser.add_argument("--backbone-method", default="disparity")
     parser.add_argument("--kmax", type=int, default=20)
     parser.add_argument(
+        "--drop-zero-bin",
+        action="store_true",
+        help="Drop empirical exposure bin 0 (k=0) before scoring.",
+    )
+    parser.add_argument(
         "--output-csv",
         default=None,
         help="Optional output CSV path. Defaults to results/<sweep>/oo_fit_gap_summary.csv",
@@ -166,7 +182,13 @@ def main() -> None:
     if not run_base.exists():
         raise FileNotFoundError(f"Run directory not found: {run_base}")
 
-    M, N = load_empirical_curve(repo_root, args.sim_id, args.backbone_method, args.kmax)
+    M, N = load_empirical_curve(
+        repo_root,
+        args.sim_id,
+        args.backbone_method,
+        args.kmax,
+        drop_zero_bin=args.drop_zero_bin,
+    )
     rows = []
     for summary_path in run_base.rglob("inference_summary.parquet"):
         run_dir = summary_path.parent
