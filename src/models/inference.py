@@ -422,8 +422,17 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
     if logit_p_loc == 'empirical':
         total_m = M.sum()
         total_n = N.sum()
-        emp_p = total_m / (total_m + total_n) if (total_m + total_n) > 0 else 0.01
-        emp_p = max(min(emp_p, 0.99), 0.01)
+        # Keep empirical Bayes configurable; a hard 0.01 floor is too aggressive
+        # for sparse OO datasets where baseline adoption can be << 1%.
+        prior_floor = float(config['model'].get('empirical_prior_floor', 1e-6))
+        prior_cap = float(config['model'].get('empirical_prior_cap', 1.0 - 1e-6))
+        if not (0.0 < prior_floor < prior_cap < 1.0):
+            raise ValueError(
+                f"Invalid empirical prior bounds: floor={prior_floor}, cap={prior_cap}. "
+                "Need 0 < floor < cap < 1."
+            )
+        emp_p = total_m / (total_m + total_n) if (total_m + total_n) > 0 else prior_floor
+        emp_p = max(min(emp_p, prior_cap), prior_floor)
         logit_p_loc = np.log(emp_p / (1 - emp_p))
         print(f"Empirical Bayes: Setting LOGIT_P_LOCATION to {logit_p_loc:.4f} (p={emp_p:.4f})")
     
