@@ -1,0 +1,40 @@
+# ============================================================================
+# OO Prior Probe v5 - NP Monotonic K=3 Refinement
+# ============================================================================
+# Hypothesis:
+#   K=3 with drop_zero_exposure_bin resolves most OO mismatch, and the remaining
+#   trade-off is controlled by concentration and logit_p location.
+#   This sweep targets the local best region from quick checks.
+# ============================================================================
+name: "research_sweep_oo_prior_np_v5_k3_refine"
+
+source: "oo"
+wandb_enabled: false
+oo:
+  sim_id: 165
+  backbone_method: "disparity"
+  backbone_threshold: 0.3
+  kmax: 20
+
+model:
+  stan_file: "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  K: 3
+  concentration: 0.5
+  deviation_scale: 1.0
+  logit_p_location: -4.8
+  logit_p_scale: 1.2
+  empirical_prior_floor: 0.000001
+  empirical_prior_cap: 0.999999
+  drop_zero_exposure_bin: true
+  V_max_local: 1000
+
+sweep:
+  K: [3]
+  stan_file:
+    - "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  concentration: [0.3, 0.35, 0.4, 0.5]
+  deviation_scale: [1.0]
+  logit_p_location: [-4.9, -4.8, -4.7]
+  logit_p_scale: [1.0, 1.2]
+  drop_zero_exposure_bin: [true]
+
