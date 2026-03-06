@@ -1,0 +1,35 @@
+# ============================================================================
+# OO Prior Probe v1 - NP Monotonic Empirical Bayes
+# ============================================================================
+# Hypothesis:
+#   Using global empirical adoption rate as LOGIT_P_LOCATION is too low for OO
+#   tail bins. We test upward-shifted location priors and tighter smoothness/
+#   heterogeneity priors to improve visual fit to P(adopt | exposure).
+# ============================================================================
+name: "research_sweep_oo_prior_np_v1"
+
+source: "oo"
+wandb_enabled: false
+oo:
+  sim_id: 165
+  backbone_method: "disparity"
+  backbone_threshold: 0.3
+  kmax: 20
+
+model:
+  stan_file: "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  K: 1
+  concentration: 1.0
+  deviation_scale: 0.5
+  logit_p_location: "empirical"
+  logit_p_scale: 1.2
+  V_max_local: 1000
+
+sweep:
+  K: [1, 2]
+  stan_file:
+    - "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  concentration: [0.5, 1.0]
+  deviation_scale: [0.5, 1.0]
+  logit_p_location: ["empirical", -5.6, -5.0]
+  logit_p_scale: [0.8, 1.2]

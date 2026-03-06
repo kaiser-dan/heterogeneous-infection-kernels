@@ -24,6 +24,11 @@ data {
     // HYPERPARAMETER - logit-scale Normal prior on rho_h (upper asymptote)
     real LOGIT_RHO_H_LOCATION;
     real<lower=0> LOGIT_RHO_H_SCALE;
+
+    // HYPERPARAMETER - shape priors for sigmoid kernel
+    real<lower=0> W_RATE;
+    real K0_LOCATION;
+    real<lower=0> K0_SCALE;
 }
 
 parameters {
@@ -75,8 +80,8 @@ model {
     logit_rho_h ~ normal(LOGIT_RHO_H_LOCATION, LOGIT_RHO_H_SCALE);
 
     // Shape priors
-    w ~ exponential(0.5);
-    k0 ~ normal(kmax/2.0, kmax/2.0);
+    w ~ exponential(W_RATE);
+    k0 ~ normal(K0_LOCATION, K0_SCALE);
 
     sigma ~ exponential(DEVIATION_SCALE);
 

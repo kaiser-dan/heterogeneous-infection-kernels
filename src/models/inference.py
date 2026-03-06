@@ -466,6 +466,12 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
         stan_data['LOGIT_RHO_H_LOCATION'] = float(config['model'].get('logit_rho_h_location', -6.0))
     if "LOGIT_RHO_H_SCALE" in stan_code:
         stan_data['LOGIT_RHO_H_SCALE'] = float(config['model'].get('logit_rho_h_scale', 2.5))
+    if "W_RATE" in stan_code:
+        stan_data['W_RATE'] = float(config['model'].get('w_rate', 0.5))
+    if "K0_LOCATION" in stan_code:
+        stan_data['K0_LOCATION'] = float(config['model'].get('k0_location', kmax / 2.0))
+    if "K0_SCALE" in stan_code:
+        stan_data['K0_SCALE'] = float(config['model'].get('k0_scale', kmax / 2.0))
 
     if is_vector_dev:
         stan_data['DEVIATION_SCALE'] = [dev_scale_val] * k_components

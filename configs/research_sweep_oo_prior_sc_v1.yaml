@@ -1,0 +1,32 @@
+# ============================================================================
+# OO Prior Probe v1 - Simple Contagion
+# ============================================================================
+# Hypothesis:
+#   Underfit at high exposure levels is partly prior-driven in SC.
+#   We sweep logit_rho prior location/scale upward to test whether the fitted
+#   curve can reach the observed OO tail probabilities.
+# ============================================================================
+name: "research_sweep_oo_prior_sc_v1"
+
+source: "oo"
+wandb_enabled: false
+oo:
+  sim_id: 165
+  backbone_method: "disparity"
+  backbone_threshold: 0.3
+  kmax: 20
+
+model:
+  stan_file: "src/models/model_simple_contagion.stan"
+  K: 1
+  deviation_scale: 1.0
+  logit_rho_location: -8.0
+  logit_rho_scale: 1.2
+  V_max_local: 1000
+
+sweep:
+  K: [1]
+  stan_file:
+    - "src/models/model_simple_contagion.stan"
+  logit_rho_location: [-9.0, -8.5, -8.0, -7.5, -7.0]
+  logit_rho_scale: [0.8, 1.2, 2.0]
