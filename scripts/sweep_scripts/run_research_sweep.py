@@ -40,10 +40,14 @@ def main():
     # Determine input path based on config source
     if config.get('source') == 'oo':
         oo_conf = config.get('oo', {})
-        sim_id = oo_conf.get('sim_id')
-        method = oo_conf.get('backbone_method', 'disparity')
-        # Standardized path
-        exposure_summary = repo_root / "data" / "processed" / "oo" / f"sim_{sim_id}_backbone_{method}"
+        # Allow explicit data_path override for non-standard directories (e.g. kmax30)
+        if 'data_path' in oo_conf:
+            exposure_summary = repo_root / oo_conf['data_path']
+        else:
+            sim_id = oo_conf.get('sim_id')
+            method = oo_conf.get('backbone_method', 'disparity')
+            # Standardized path
+            exposure_summary = repo_root / "data" / "processed" / "oo" / f"sim_{sim_id}_backbone_{method}"
     else:
         # Twitter default
         intervention = config.get('twitter', {}).get('intervention', 'default')
