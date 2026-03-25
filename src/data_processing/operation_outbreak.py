@@ -229,6 +229,7 @@ def compute_exposure_counts_from_timeseries(
     states,
     adjacency,
     kmax,
+    mn_mode="survival",
 ):
     """
     Build M and N matrices from a pre-computed timeseries and adjacency matrix.
@@ -247,6 +248,9 @@ def compute_exposure_counts_from_timeseries(
     """
     if kmax < 1:
         raise ValueError("kmax must be >= 1")
+    mn_mode = str(mn_mode).lower()
+    if mn_mode not in {"survival", "incidence"}:
+        raise ValueError(f"mn_mode must be 'survival' or 'incidence'. Got: {mn_mode}")
     
     nodes = list(adjacency.index)
     states = states.reindex(columns=nodes, fill_value=0)
@@ -262,7 +266,20 @@ def compute_exposure_counts_from_timeseries(
 
     for node_idx in range(V):
         exposures = exposure_values[:, node_idx]
-        if adopted_mask[:, node_idx].any():
+        adopted = adopted_mask[:, node_idx].any()
+
+        if mn_mode == "incidence":
+            if adopted:
+                adopt_bin = adopted_mask[:, node_idx].argmax()
+                success_bucket = min(int(exposures[adopt_bin]), kmax - 1)
+                M[node_idx, success_bucket] += 1
+            else:
+                censor_bucket = min(int(exposures[-1]), kmax - 1)
+                N[node_idx, censor_bucket] += 1
+            continue
+
+        # survival mode (current/default behavior): count every at-risk interval
+        if adopted:
             adopt_bin = adopted_mask[:, node_idx].argmax()
             failed = exposures[:adopt_bin]
             if failed.size:
@@ -296,6 +313,7 @@ def compute_exposure_counts(
     start_time=None,
     end_time=None,
     kmax=6,
+    mn_mode="survival",
 ):
     """
     Build M and N matrices counting infections and failures for an OO simulation.
@@ -346,7 +364,7 @@ def compute_exposure_counts(
         end_time=end_time,
     )
     
-    return compute_exposure_counts_from_timeseries(states, adjacency, kmax)
+    return compute_exposure_counts_from_timeseries(states, adjacency, kmax, mn_mode=mn_mode)
 
 
 def generate_oo_exposure_parquet(
@@ -356,7 +374,8 @@ def generate_oo_exposure_parquet(
     freq: str = "30min",
     kmax: int = 10,
     backbone_method: str = None,
-    backbone_threshold: float = None
+    backbone_threshold: float = None,
+    mn_mode: str = "survival",
 ):
     """
     Process O.O. data for a given simulation and save results to a standardized directory.
@@ -460,10 +479,10 @@ def generate_oo_exposure_parquet(
     pd.DataFrame(node_rows).to_parquet(output_dir / "nodes.parquet", engine='pyarrow', index=False)
 
     # 4. Compute and Save M/N Matrices (Fixed q=1.0)
-    m_df, n_df = compute_exposure_counts(infections, sim_id, adj, freq=freq, kmax=kmax)
+    m_df, n_df = compute_exposure_counts(infections, sim_id, adj, freq=freq, kmax=kmax, mn_mode=mn_mode)
     m_df.to_parquet(output_dir / "M.parquet", engine='pyarrow', index=True)
     n_df.to_parquet(output_dir / "N.parquet", engine='pyarrow', index=True)
-    print(f"  Saved simulation results to {output_dir}")
+    print(f"  Saved simulation results to {output_dir} (mn_mode={mn_mode})")
 
 
 if __name__ == "__main__":
@@ -472,9 +491,17 @@ if __name__ == "__main__":
     parser.add_argument("--histories", type=str, required=True, help="Path to histories.csv")
     parser.add_argument("--sim-id", type=int, required=True, help="Simulation ID")
     parser.add_argument("--output", type=str, required=True, help="Output parquet path")
+    parser.add_argument("--freq", type=str, default="30min", help="Time bin frequency (pandas offset alias, e.g. 30min, 1h)")
     parser.add_argument("--backbone-method", type=str, default=None, help="Network backbonining method")
     parser.add_argument("--backbone-threshold", type=float, default=0.05, help="Backbone threshold")
     parser.add_argument("--kmax", type=int, default=10, help="Maximum neighbors for M/N matrices")
+    parser.add_argument(
+        "--mn-mode",
+        type=str,
+        default="survival",
+        choices=["survival", "incidence"],
+        help="How to build M/N matrices.",
+    )
     
     args = parser.parse_args()
     
@@ -482,8 +509,9 @@ if __name__ == "__main__":
         histories_path=Path(args.histories),
         sim_id=args.sim_id,
         output_dir=Path(args.output),
+        freq=args.freq,
         kmax=args.kmax,
         backbone_method=args.backbone_method,
-        backbone_threshold=args.backbone_threshold
+        backbone_threshold=args.backbone_threshold,
+        mn_mode=args.mn_mode,
     )
-

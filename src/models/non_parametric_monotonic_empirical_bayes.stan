@@ -83,7 +83,7 @@ model {
 
     Delta ~ dirichlet(rep_vector(CONCENTRATION, kmax));
 
-    sigma ~ exponential(DEVIATION_SCALE);
+    sigma ~ normal(0, DEVIATION_SCALE)T[0,];
 
     // global mixture weights
     pi ~ dirichlet(rep_vector(1.0, K));

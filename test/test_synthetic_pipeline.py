@@ -1,0 +1,218 @@
+import importlib.util
+import json
+import subprocess
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+import yaml
+
+
+@pytest.fixture(scope="module")
+def project_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _venv_python(project_root: Path) -> str:
+    return str(project_root / ".venv" / "bin" / "python")
+
+
+def _venv_snakemake(project_root: Path) -> str:
+    return str(project_root / ".venv" / "bin" / "snakemake")
+
+
+@pytest.fixture(scope="module")
+def synthetic_module(project_root: Path):
+    script_path = project_root / "workflow" / "scripts" / "simulate" / "generate_synthetic_data.py"
+    spec = importlib.util.spec_from_file_location("generate_synthetic_data", script_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_build_graph_types(synthetic_module):
+    sbm_cfg = {"type": "sbm", "params": {"n": 40, "avg_degree": 6, "epsilon": 0.6}}
+    er_cfg = {"type": "er", "params": {"n": 40, "avg_degree": 6}}
+    zkc_cfg = {"type": "zkc", "params": {}}
+
+    A_sbm = synthetic_module.build_graph(sbm_cfg, seed=7)
+    A_er = synthetic_module.build_graph(er_cfg, seed=7)
+    A_zkc = synthetic_module.build_graph(zkc_cfg, seed=7)
+
+    for A in (A_sbm, A_er, A_zkc):
+        assert A.ndim == 2
+        assert A.shape[0] == A.shape[1]
+        assert np.array_equal(A, A.T)
+
+    assert A_sbm.shape == (40, 40)
+    assert A_er.shape == (40, 40)
+    assert A_zkc.shape == (34, 34)
+
+
+def test_build_kernel_bank_and_assignments(synthetic_module):
+    kmax = 12
+    kernels_cfg = [
+        {"type": "simple", "beta": 0.02},
+        {"type": "sigmoid", "rho_l": 0.01, "rho_h": 0.4, "w": 1.2, "k0": 4},
+        {"type": "nonparametric", "values": [0.01 * (i + 1) for i in range(kmax)]},
+    ]
+    bank = synthetic_module.build_kernel_bank(kernels_cfg=kernels_cfg, kmax=kmax)
+
+    assert len(bank) == 3
+    for kernel in bank:
+        assert kernel.shape == (kmax,)
+        assert np.all(np.isfinite(kernel))
+
+    labels_iid = synthetic_module.assign_kernels(
+        n=100,
+        graph_type="sbm",
+        assignment_cfg={"mode": "iid", "probs": [0.2, 0.3, 0.5]},
+        n_kernels=3,
+        seed=11,
+    )
+    assert labels_iid.shape == (100,)
+    assert set(np.unique(labels_iid)).issubset({0, 1, 2})
+
+    labels_block = synthetic_module.assign_kernels(
+        n=80,
+        graph_type="sbm",
+        assignment_cfg={"mode": "block_flip", "omega": 0.1},
+        n_kernels=2,
+        seed=11,
+    )
+    assert labels_block.shape == (80,)
+    assert set(np.unique(labels_block)).issubset({0, 1})
+
+
+def test_synthetic_main_writes_artifacts(tmp_path: Path, synthetic_module):
+    cfg = {
+        "name": "unit_test_synth",
+        "source": "synthetic",
+        "synthetic": {
+            "seed": 17,
+            "kmax": 12,
+            "graph": {
+                "type": "sbm",
+                "params": {"n": 36, "avg_degree": 5, "epsilon": 0.7},
+            },
+            "contagion": {
+                "gamma": 0.1,
+                "tmax": 50,
+                "dt": 1,
+                "initial_infected": 0.15,
+                "assignment": {"mode": "block_flip", "omega": 0.05},
+                "kernels": [
+                    {"id": "k1", "type": "simple", "beta": 0.02},
+                    {"id": "k2", "type": "simple", "beta": 0.05},
+                ],
+            },
+        },
+    }
+
+    cfg_path = tmp_path / "synth.yaml"
+    out_dir = tmp_path / "processed"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    synthetic_module.main(config_path=cfg_path, output_dir=out_dir, data_name="unit_dataset")
+
+    expected = [
+        "M.parquet",
+        "N.parquet",
+        "edges.parquet",
+        "exposures.parquet",
+        "kernels.parquet",
+        "metadata.parquet",
+        "metadata.json",
+    ]
+    for filename in expected:
+        assert (out_dir / filename).exists(), f"Missing synthetic output: {filename}"
+
+    M = pd.read_parquet(out_dir / "M.parquet")
+    N = pd.read_parquet(out_dir / "N.parquet")
+    exposures = pd.read_parquet(out_dir / "exposures.parquet")
+    metadata = pd.read_parquet(out_dir / "metadata.parquet").iloc[0]
+
+    assert M.shape[0] == 36
+    assert N.shape == M.shape
+    assert exposures.shape[1] == 36
+    assert int(metadata["n"]) == 36
+    assert metadata["data_name"] == "unit_dataset"
+
+
+def test_synthetic_overrides_are_applied(tmp_path: Path, synthetic_module):
+    base_cfg = {
+        "name": "unit_test_override",
+        "source": "synthetic",
+        "synthetic": {
+            "seed": 19,
+            "kmax": 10,
+            "graph": {
+                "type": "sbm",
+                "params": {"n": 30, "avg_degree": 4, "epsilon": 0.9},
+            },
+            "contagion": {
+                "gamma": 0.1,
+                "tmax": 30,
+                "dt": 1,
+                "initial_infected": 0.1,
+                "assignment": {"mode": "block_flip", "omega": 0.01},
+                "kernels": [
+                    {"id": "k1", "type": "simple", "beta": 0.01},
+                    {"id": "k2", "type": "simple", "beta": 0.02},
+                ],
+            },
+        },
+    }
+
+    overrides = {
+        "graph": {"params": {"epsilon": 0.3}},
+        "contagion": {
+            "kernels": [
+                {"id": "k1", "type": "simple", "beta": 0.01},
+                {"id": "k2", "type": "simple", "beta": 0.08},
+            ]
+        },
+    }
+
+    cfg_path = tmp_path / "override.yaml"
+    out_dir = tmp_path / "override_processed"
+    cfg_path.write_text(yaml.safe_dump(base_cfg), encoding="utf-8")
+
+    synthetic_module.main(
+        config_path=cfg_path,
+        output_dir=out_dir,
+        data_name="override_dataset",
+        synthetic_overrides=overrides,
+    )
+
+    meta = pd.read_parquet(out_dir / "metadata.parquet").iloc[0]
+    graph_params = json.loads(meta["graph_params_json"])
+    kernels = json.loads(meta["kernels_json"])
+
+    assert pytest.approx(graph_params["epsilon"], rel=0, abs=1e-12) == 0.3
+    assert pytest.approx(kernels[1]["beta"], rel=0, abs=1e-12) == 0.08
+
+
+def test_snakemake_sim_sweep_dry_run(project_root: Path, tmp_path: Path):
+    cmd = [
+        _venv_snakemake(project_root),
+        "-n",
+        "inference",
+        "--configfile",
+        "configs/research_sim_sweep_synthetic.yaml",
+        "--profile",
+        "workflow/profiles/local",
+        "--runtime-source-cache-path",
+        str(tmp_path / "runtime-source-cache"),
+    ]
+    proc = subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
+
+    if proc.returncode != 0:
+        pytest.fail(f"Snakemake dry-run failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+
+    combined = f"{proc.stdout}\n{proc.stderr}"
+    assert "generate_synthetic_processed" in combined
+    assert "generate_synthetic_summary" in combined
+    assert "run_inference" in combined
