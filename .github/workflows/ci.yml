@@ -61,7 +61,7 @@ jobs:
 
       - name: Verify output artifacts
         run: |
-          python - <<'EOF'
+          uv run python - <<'EOF'
           import sys
           from pathlib import Path
           import pandas as pd
@@ -93,4 +93,3 @@ jobs:
 
           print("All expected output artifacts verified.")
           EOF
-
