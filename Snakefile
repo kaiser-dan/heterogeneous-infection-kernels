@@ -19,11 +19,27 @@ SWEEP_ROWS = list(WORKFLOW_CONTEXT.sweep_rows)
 INFERENCE_OUTPUTS = list(WORKFLOW_CONTEXT.inference_outputs)
 
 # 2. Main Rules
+def _all_inputs(_wildcards=None):
+    """Return the data-prep targets appropriate for the configured source."""
+    if SOURCE == "twitter":
+        return [TWITTER_PROCESSED_DIR]
+    if SOURCE == "oo":
+        return expand(
+            "data/processed/oo/sim_{sim_id}_backbone_disparity/exposures.parquet",
+            sim_id=[165, 57, 118, 70, 76, 131, 66, 61, 72, 67],
+        )
+    if SOURCE == "synthetic":
+        return expand(
+            "data/processed/synthetic/{data_name}/exposures.parquet",
+            data_name=DATA_CFG_NAMES,
+        )
+    return []
+
+
 rule all:
-    """Default rule: Only prepare processed data."""
+    """Default rule: Only prepare processed data for the configured source."""
     input:
-        TWITTER_PROCESSED_DIR,
-        expand("data/processed/oo/sim_{sim_id}_backbone_disparity/exposures.parquet", sim_id=[165, 57, 118, 70, 76, 131, 66, 61, 72, 67]),
+        _all_inputs,
 
 rule inference:
     """Explicitly run models defined in the config."""
