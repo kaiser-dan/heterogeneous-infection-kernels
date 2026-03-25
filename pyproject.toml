@@ -45,6 +45,9 @@ notebooks = [
     "quarto>=0.1.0",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["test"]
+
 [tool.commitizen]
 name = "cz_conventional_commits"
 tag_format = "$version"
