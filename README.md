@@ -67,15 +67,21 @@ To use the install package, either prefix all commands with `uv run` (preferred)
 
 ## Quick Start
 
-The Jupyter notebook [`example.ipynb`](example.ipynb) contains a short working example and some comments to illustrate the basic usage of the developed method.
+After installation, the fastest way to confirm the workflow is set up correctly is to run the synthetic smoke-test config included in this branch.
 
-If you have followed the installation instructions above, you can open the notebook with the following command executed from the repository root:
+Inspect the DAG first:
 
 ```bash
-uv run --with jupyter jupyter lab example.ipynb
+uv run snakemake -n inference \
+  --configfile configs/example_synthetic_workflow.yaml \
+  --profile workflow/profiles/local
 ```
 
-This will open a Jupyter lab instance in your default browser.
+Then run the example end-to-end:
+
+```bash
+just sweep configs/example_synthetic_workflow.yaml
+```
 
 # Usage
 
@@ -256,7 +262,7 @@ Raw data are not included in the repository; place them under `data/` if you hav
 
 # Documentation
 
-This repository does not maintain extensive independent documentation for its source code. Functions have docstrings where needed and the [`example.ipynb`](example.ipynb) file can be used as a user guide.
+This repository does not maintain extensive independent documentation for its source code. Functions have docstrings where needed, and the workflow/config examples in this README are the main user-facing guide.
 
 # Tests
 
