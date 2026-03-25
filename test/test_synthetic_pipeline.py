@@ -216,3 +216,51 @@ def test_snakemake_sim_sweep_dry_run(project_root: Path, tmp_path: Path):
     assert "generate_synthetic_processed" in combined
     assert "generate_synthetic_summary" in combined
     assert "run_inference" in combined
+
+
+def test_snakemake_synthetic_data_prep_end_to_end(project_root: Path, tmp_path: Path):
+    """
+    Run the full data-prep portion of the Snakemake workflow with the minimal
+    test_synthetic config and verify all expected output parquet files exist.
+    This exercises the ``generate_synthetic_processed`` rule without requiring
+    CmdStan / Stan inference.
+    """
+    config_path = project_root / "configs" / "test_synthetic.yaml"
+    with open(config_path, encoding="utf-8") as fh:
+        test_cfg = yaml.safe_load(fh)
+    data_name = test_cfg["synthetic"]["dataset_name"]
+
+    cmd = [
+        _venv_snakemake(project_root),
+        "all",
+        "-c1",
+        "--configfile", str(config_path),
+        "--snakefile", str(project_root / "Snakefile"),
+        "--directory", str(project_root),
+        "--runtime-source-cache-path", str(tmp_path / "runtime-source-cache"),
+        "--rerun-incomplete",
+    ]
+    proc = subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
+
+    if proc.returncode != 0:
+        pytest.fail(
+            f"Snakemake 'all' (synthetic data prep) failed:\n"
+            f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+        )
+
+    processed_dir = project_root / "data" / "processed" / "synthetic" / data_name
+    expected_files = [
+        "M.parquet",
+        "N.parquet",
+        "edges.parquet",
+        "exposures.parquet",
+        "kernels.parquet",
+        "metadata.parquet",
+    ]
+    for fname in expected_files:
+        fpath = processed_dir / fname
+        assert fpath.exists(), f"Missing output file: {fpath}"
+        df = pd.read_parquet(fpath)
+        assert len(df) > 0, f"Output file is empty: {fpath}"
+
+
