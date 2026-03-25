@@ -40,6 +40,10 @@ model:
   logit_p_location: "empirical"
   logit_p_scale: 2.0
   V_max_local: 1000
+  sampling:
+    chains: 1
+    iter_warmup: 100
+    iter_sampling: 100
 
 sweep:
   K: [1]
