@@ -67,15 +67,21 @@ To use the install package, either prefix all commands with `uv run` (preferred)
 
 ## Quick Start
 
-The Jupyter notebook [`example.ipynb`](example.ipynb) contains a short working example and some comments to illustrate the basic usage of the developed method.
+After installation, the fastest way to confirm the workflow is set up correctly is to run the synthetic smoke-test config included in this branch.
 
-If you have followed the installation instructions above, you can open the notebook with the following command executed from the repository root:
+Inspect the DAG first:
 
 ```bash
-uv run --with jupyter jupyter lab example.ipynb
+uv run snakemake -n inference \
+  --configfile configs/example_synthetic_workflow.yaml \
+  --profile workflow/profiles/local
 ```
 
-This will open a Jupyter lab instance in your default browser.
+Then run the example end-to-end:
+
+```bash
+just sweep configs/example_synthetic_workflow.yaml
+```
 
 # Usage
 
@@ -119,16 +125,129 @@ If you have the raw data files in `data/`, you can regenerate all processed matr
   just data-total
   ```
 
-### Running Model Inference
+### Running the Snakemake Workflow
 
-Model fitting is handled by `scripts/run_sweep.py`, which manages parameter sweeps over multiple datasets and models:
+The project workflow is driven by the root [Snakefile](Snakefile). In practice you will usually use one of two entrypoints:
+
+- `just sweep <config>`: the standard local wrapper for inference runs
+- `uv run snakemake <target> --configfile <config> --profile <profile>`: the raw Snakemake command when you want full control
+
+The `justfile` recipes are intentionally thin wrappers around the underlying Snakemake commands:
 
 ```bash
-# Run the Twitter inference sweep
+# Process the default raw-data targets declared in rule all
+just data
+
+# Equivalent raw Snakemake command
+uv run snakemake -c1
+
+# Run the inference target for a config with the local profile
 just sweep configs/research_sweep_twitter.yaml
 
-# Run the Operation Outbreak inference sweep
+# Equivalent raw Snakemake command
+uv run snakemake inference --configfile configs/research_sweep_twitter.yaml --profile workflow/profiles/local
+```
+
+The main Snakemake targets in this branch are:
+
+- `all`: prepares the default processed-data targets from raw data
+- `inference`: runs the configured preprocessing and inference outputs for a config file
+
+The bundled profiles are:
+
+- `workflow/profiles/local`: local execution on the current machine
+- `workflow/profiles/slurm`: cluster execution through SLURM
+
+Use the local profile for development and smoke tests. Use the SLURM profile when you want Snakemake to submit rules as cluster jobs.
+
+The profile files live at:
+
+- [workflow/profiles/local/config.yaml](workflow/profiles/local/config.yaml)
+- [workflow/profiles/slurm/config.yaml](workflow/profiles/slurm/config.yaml)
+
+The current defaults are:
+
+- `local`: `executor: local`, `jobs: 4`, default `runtime: 1h`, default `mem_mb: 4000`
+- `slurm`: `executor: slurm`, `jobs: 20`, default account `pi-cdanfort`, default partition `week`, default `runtime: 4h`, default `mem_mb: 8000`
+- `slurm` also overrides `run_inference` to `runtime: 24h` and `mem_mb: 16000`
+
+Examples:
+
+```bash
+# Local execution on the current machine
+just sweep configs/example_synthetic_workflow.yaml
+uv run snakemake inference \
+  --configfile configs/example_synthetic_workflow.yaml \
+  --profile workflow/profiles/local
+
+# SLURM submission using the cluster profile
+just sweep configs/example_synthetic_workflow.yaml workflow/profiles/slurm
+uv run snakemake inference \
+  --configfile configs/example_synthetic_workflow.yaml \
+  --profile workflow/profiles/slurm
+```
+
+If you need different defaults for your cluster, edit the profile YAML directly rather than changing the workflow rules.
+
+### How the Config Files Work
+
+Workflow configs are YAML files under `configs/`. The important top-level fields are:
+
+- `name`: result namespace. Outputs are written under `results/<name>/...`
+- `source`: one of `twitter`, `oo`, or `synthetic`
+- `synthetic`, `twitter`, or `oo`: source-specific data-generation or data-selection settings
+- `model`: default model and sampling settings passed into inference
+- `sweep`: cartesian product of inference settings. Each row becomes one inference output directory
+- `sim_sweep`: synthetic-only cartesian product over dotted keys under `synthetic`. Each row becomes one generated synthetic dataset before inference
+
+For synthetic workflows, the separation is:
+
+- `synthetic`: how to generate one dataset
+- `sim_sweep`: optional expansion into many synthetic datasets
+- `sweep`: which model settings to fit to each generated dataset
+
+### Synthetic Example
+
+The file [configs/example_synthetic_workflow.yaml](configs/example_synthetic_workflow.yaml) is a minimal synthetic smoke-test config. It does three things:
+
+1. generates one small SBM-based synthetic dataset
+2. builds the synthetic summary directory that inference expects
+3. fits one simple-contagion Stan model to that dataset
+
+Inspect the DAG first:
+
+```bash
+uv run snakemake -n inference \
+  --configfile configs/example_synthetic_workflow.yaml \
+  --profile workflow/profiles/local
+```
+
+Run it locally through the `just` wrapper:
+
+```bash
+just sweep configs/example_synthetic_workflow.yaml
+```
+
+Run the equivalent raw Snakemake command directly:
+
+```bash
+uv run snakemake inference \
+  --configfile configs/example_synthetic_workflow.yaml \
+  --profile workflow/profiles/local
+```
+
+That example writes:
+
+- processed synthetic data to `data/processed/synthetic/readme_synthetic_smoke/`
+- the inference-ready summary to `data/summaries/synthetic/readme_synthetic_smoke.parquet/`
+- posterior outputs to `results/example_synthetic_workflow/synthetic/readme_synthetic_smoke/base/`
+
+Larger research runs use the same command shape with a different config, for example:
+
+```bash
+just sweep configs/research_sweep_twitter.yaml
 just sweep configs/research_sweep_oo.yaml
+just sweep configs/research_sim_sweep_synthetic.yaml
 ```
 
 Results (posterior samples and summaries) are saved to the `results/` directory.
@@ -143,7 +262,7 @@ Raw data are not included in the repository; place them under `data/` if you hav
 
 # Documentation
 
-This repository does not maintain extensive independent documentation for its source code. Functions have docstrings where needed and the [`example.ipynb`](example.ipynb) file can be used as a user guide.
+This repository does not maintain extensive independent documentation for its source code. Functions have docstrings where needed, and the workflow/config examples in this README are the main user-facing guide.
 
 # Tests
 

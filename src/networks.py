@@ -1,6 +1,7 @@
 import networkx as nx
+import numpy as np
 
-__all__ = ["sbm"]
+__all__ = ["sbm", "er", "zkc"]
 
 
 # Shamelessly stolen from Nick at:
@@ -36,4 +37,29 @@ def sbm(n, k, epsilon, seed=None):
     p_out = (1 - epsilon) * p
     G = nx.planted_partition_graph(2, int(n / 2), p_in, p_out, seed=seed)
     G.add_nodes_from(range(n))
-    return nx.adjacency_matrix(G).todense()
+    return np.asarray(nx.adjacency_matrix(G).todense(), dtype=int)
+
+
+def er(n, p=None, k=None, seed=None):
+    """
+    Generate an Erdos-Renyi graph adjacency matrix.
+
+    Provide exactly one of `p` or `k` (average degree).
+    """
+    if (p is None) == (k is None):
+        raise ValueError("Provide exactly one of p or k.")
+    if k is not None:
+        if n <= 1:
+            raise ValueError("n must be > 1 when specifying k.")
+        p = float(k) / float(n - 1)
+    G = nx.erdos_renyi_graph(n=n, p=float(p), seed=seed)
+    G.add_nodes_from(range(n))
+    return np.asarray(nx.adjacency_matrix(G).todense(), dtype=int)
+
+
+def zkc():
+    """
+    Generate Zachary's Karate Club graph adjacency matrix.
+    """
+    G = nx.karate_club_graph()
+    return np.asarray(nx.adjacency_matrix(G).todense(), dtype=int)

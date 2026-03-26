@@ -1,59 +1,45 @@
-import yaml
-import pandas as pd
-from itertools import product
 from pathlib import Path
+import sys
 
-# 1. Determine Workflow Mode and Build Experiment Grid
-# Snakemake automatically populates the 'config' dict from --configfile and --config
-cfg_name = config.get('name', 'default_run')
+sys.path.insert(0, str(Path.cwd()))
 
-# Resolve Data Source and Config
-# We still might want to load the data_config to get the SOURCE
-data_config_path = config.get('data_config', 'configs/default_data_prep.yaml')
-with open(data_config_path, 'r') as f:
-    data_prep_data = yaml.safe_load(f)
+from workflow.lib.experiment_plan import build_workflow_context
 
-SOURCE = config.get('source', data_prep_data.get('source', 'twitter'))
 
-if SOURCE == 'oo':
-    sim_id = config.get('oo', {}).get('sim_id', 165)
-    method = config.get('oo', {}).get('backbone_method', 'disparity')
-    DATA_CFG_NAME = f"sim_{sim_id}_backbone_{method}_exposures"
-else:
-    DATA_CFG_NAME = Path(data_config_path).stem
+WORKFLOW_CONTEXT = build_workflow_context(config=config, workflow=workflow)
 
-INFERENCE_OUTPUTS = []
-
-def get_instance_dir(row_dict):
-    parts = []
-    # Sort keys for deterministic paths
-    for k in sorted(row_dict.keys()):
-        v = str(row_dict[k])
-        # Strip path and extension for stan_file to keep dir clean
-        if k == 'stan_file':
-            v = Path(v).stem
-        parts.append(f"{k}~{v}")
-    return "/".join(parts)
-
-if "sweep" in config:
-    keys = config["sweep"].keys()
-    values = config["sweep"].values()
-    grid = [dict(zip(keys, v)) for v in product(*values)]
-    
-    for row in grid:
-        instance_path = get_instance_dir(row)
-        INFERENCE_OUTPUTS.append(f"results/{cfg_name}/{SOURCE}/{DATA_CFG_NAME}/{instance_path}/posterior_samples.parquet")
-        INFERENCE_OUTPUTS.append(f"results/{cfg_name}/{SOURCE}/{DATA_CFG_NAME}/{instance_path}/inference_summary.parquet")
-else:
-    INFERENCE_OUTPUTS.append(f"results/{cfg_name}/{SOURCE}/{DATA_CFG_NAME}/base/posterior_samples.parquet")
-    INFERENCE_OUTPUTS.append(f"results/{cfg_name}/{SOURCE}/{DATA_CFG_NAME}/base/inference_summary.parquet")
+cfg_name = WORKFLOW_CONTEXT.cfg_name
+ACTIVE_CONFIGFILE = WORKFLOW_CONTEXT.active_configfile
+SOURCE = WORKFLOW_CONTEXT.source
+data_prep_data = WORKFLOW_CONTEXT.data_prep_data
+DATA_CFG_NAMES = list(WORKFLOW_CONTEXT.data_cfg_names)
+SYNTHETIC_INSTANCE_OVERRIDES = WORKFLOW_CONTEXT.synthetic_instance_overrides
+TWITTER_PROCESSED_DIR = WORKFLOW_CONTEXT.twitter_processed_dir
+SWEEP_ROWS = list(WORKFLOW_CONTEXT.sweep_rows)
+INFERENCE_OUTPUTS = list(WORKFLOW_CONTEXT.inference_outputs)
 
 # 2. Main Rules
+def _all_inputs(_wildcards=None):
+    """Return the data-prep targets appropriate for the configured source."""
+    if SOURCE == "twitter":
+        return [TWITTER_PROCESSED_DIR]
+    if SOURCE == "oo":
+        return expand(
+            "data/processed/oo/sim_{sim_id}_backbone_disparity/exposures.parquet",
+            sim_id=[165, 57, 118, 70, 76, 131, 66, 61, 72, 67],
+        )
+    if SOURCE == "synthetic":
+        return expand(
+            "data/processed/synthetic/{data_name}/exposures.parquet",
+            data_name=DATA_CFG_NAMES,
+        )
+    return []
+
+
 rule all:
-    """Default rule: Only prepare processed data."""
+    """Default rule: Only prepare processed data for the configured source."""
     input:
-        "data/processed/twitter",
-        expand("data/processed/oo/sim_{sim_id}_backbone_disparity_exposures.parquet", sim_id=[165, 57, 118, 70, 76, 131, 66, 61, 72, 67]),
+        _all_inputs,
 
 rule inference:
     """Explicitly run models defined in the config."""
