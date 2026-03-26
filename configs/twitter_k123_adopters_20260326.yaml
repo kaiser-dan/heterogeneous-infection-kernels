@@ -1,0 +1,52 @@
+# Twitter full-pop survival - adopters-only - K=1,2,3 - March 26 2026
+# SC, CC, NP at K=1,2,3 -- same as v2 but restricting to adopting users only
+# 4 chains / 1000 warmup / 1000 sampling
+name: "twitter_k123_adopters_20260326"
+
+source: "twitter"
+data_config: "configs/default_data_prep_survival.yaml"
+twitter_mn_mode: "survival"
+twitter_adopters_only: true
+twitter_disable_ipw: false
+wandb_enabled: false
+
+q: 0.192
+exposure_metric: "k"
+kmax: 20
+
+model:
+  stan_file: "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  K: 1
+  logit_p_location: "empirical"
+  logit_p_scale: 2.0
+  logit_rho_location: "empirical"
+  logit_rho_scale: 2.0
+  logit_rho_l_location: "empirical_floor"
+  logit_rho_l_scale: 2.0
+  logit_rho_h_location: "empirical_ceiling"
+  logit_rho_h_scale: 2.0
+  w_rate: 2.0
+  k0_location: 10.0
+  k0_scale: 3.0
+  empirical_prior_floor: 1.0e-6
+  empirical_prior_cap: 0.999999
+  empirical_floor_levels: 3
+  empirical_ceiling_levels: 4
+  V_max_local: 1000
+
+  sampling:
+    chains: 4
+    iter_warmup: 1000
+    iter_sampling: 1000
+    adapt_delta: 0.95
+    max_treedepth: 12
+
+output:
+  posterior_mode: "compact"
+
+sweep:
+  K: [1, 2, 3]
+  stan_file:
+    - "src/models/model_simple_contagion.stan"
+    - "src/models/model_complex_contagion.stan"
+    - "src/models/non_parametric_monotonic_empirical_bayes.stan"
