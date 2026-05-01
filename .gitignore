@@ -1,4 +1,7 @@
 
+# Worktrees
+worktrees/
+
 # Data
 data/
 !data/.gitkeep
@@ -34,3 +37,30 @@ src/models/*
 
 /.quarto/
 **/*.quarto_ipynb
+
+# Research notebook and rendered artifacts
+__marimo__/
+dashboard.html
+dashboard_files/
+debug_output*.txt
+_quarto.yml.bak
+S3_Appendix.pdf
+claude.md
+proposal.md
+notebooks/will/.jupyter_cache/
+notebooks/will/__marimo__/
+notebooks/will/_freeze/
+notebooks/will/dashboard.html
+notebooks/will/dashboard_files/
+notebooks/will/*_files/
+notebooks/will/figures/
+notebooks/will/stan_inference_demo.html
+notebooks/will/stan_inference_demo_files/
+notebooks/will/cascade.gif
+notebooks/will/connected_cascade.gif
+notebooks/will/Interactive - 12-3-25.qmd.ipynb
+notebooks/will/test_mixture_data.json
+notebooks/will/test_mixture_results/
+reports/
+output/
+~/
