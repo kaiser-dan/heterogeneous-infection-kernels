@@ -79,3 +79,28 @@ def test_compute_held_out_loglik_k1_cmdstanpy_squeeze():
     result = compute_held_out_loglik(M_held, N_held, fit)
     # Same expected value as the 3D K=1 test
     assert abs(result["cv_score"] - np.log(0.08)) < 1e-9
+
+
+def test_fold_split_mask():
+    """Modulo assignment: fold i gets rows where idx % cv_folds == i."""
+    from src.models.inference import _cv_fold_mask
+    V = 10
+    cv_folds = 3
+    masks = [_cv_fold_mask(V, cv_folds, fold) for fold in range(cv_folds)]
+
+    # Each node assigned to exactly one fold
+    union = np.zeros(V, dtype=bool)
+    for m in masks:
+        assert not np.any(union & m), "node assigned to multiple folds"
+        union |= m
+    assert np.all(union), "not all nodes assigned to a fold"
+
+    # Sizes differ by at most 1
+    sizes = [int(m.sum()) for m in masks]
+    assert max(sizes) - min(sizes) <= 1
+
+
+def test_fold_split_mask_skip_when_folds_zero():
+    from src.models.inference import _cv_fold_mask
+    with pytest.raises(ValueError):
+        _cv_fold_mask(10, 0, 0)

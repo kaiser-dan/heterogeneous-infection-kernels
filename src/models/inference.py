@@ -848,6 +848,12 @@ def compute_held_out_loglik(
     }
 
 
+def _cv_fold_mask(V: int, cv_folds: int, cv_fold: int) -> np.ndarray:
+    if cv_folds < 1:
+        raise ValueError(f"cv_folds must be >= 1, got {cv_folds}")
+    return (np.arange(V) % cv_folds) == cv_fold
+
+
 def run_stan_inference(summary_path, output_dir, instance_params, config_path=None):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
@@ -1113,7 +1119,7 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
         # Aggregate across users (axis 0)
         M_agg = M.sum(axis=0)
         N_agg = N.sum(axis=0)
-        
+
         # Override M and N with aggregated versions
         # Stan expects arrays, so keeping them as numpy arrays is fine (CmdStanPy handles it)
         M = M_agg
@@ -1121,7 +1127,37 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
         row_weights = None
         # V is likely not in the data block for these models, but passing it usually doesn't hurt
         # unless strict data checking is enabled.
-    
+
+    # --- CV fold splitting ---
+    cv_folds = int(config.get('cv_folds', 0))
+    cv_fold  = int(config['model'].get('cv_fold', config.get('cv_fold', -1)))
+    run_cv = cv_folds > 0 and cv_fold >= 0
+
+    M_held = None
+    N_held = None
+
+    if run_cv:
+        if not requires_2d:
+            print(
+                f"Warning: cv_folds={cv_folds} requested but model '{stan_file}' uses "
+                "aggregated (1D) data — CV requires individual node rows. Skipping CV."
+            )
+            run_cv = False
+        else:
+            held_mask = _cv_fold_mask(V, cv_folds, cv_fold)
+            train_mask = ~held_mask
+            M_held = M[held_mask]
+            N_held = N[held_mask]
+            M = M[train_mask]
+            N = N[train_mask]
+            if row_weights is not None:
+                row_weights = row_weights[train_mask]
+            V = int(M.shape[0])
+            print(
+                f"CV fold {cv_fold}/{cv_folds}: "
+                f"train={V} nodes, held_out={int(held_mask.sum())} nodes"
+            )
+
     # Keep empirical Bayes configurable; a hard 0.01 floor is too aggressive
     # for sparse datasets where baseline adoption can be << 1%.
     prior_floor = float(config['model'].get('empirical_prior_floor', 1e-6))
@@ -1309,6 +1345,29 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
         index=False,
         compression=parquet_compression,
     )
+
+    if run_cv and M_held is not None and M_held.shape[0] > 0:
+        try:
+            cv_result = compute_held_out_loglik(M_held, N_held, fit)
+            cv_df = pd.DataFrame([{
+                "cv_score":       cv_result["cv_score"],
+                "n_held_out":     cv_result["n_held_out"],
+                "mean_log_pred":  cv_result["mean_log_pred"],
+                "cv_fold":        cv_fold,
+                "cv_folds":       cv_folds,
+            }])
+            cv_df.to_parquet(
+                output_dir / "cv_held_out_loglik.parquet",
+                index=False,
+                compression=parquet_compression,
+            )
+            print(
+                f"CV fold {cv_fold}: cv_score={cv_result['cv_score']:.4f}  "
+                f"mean_log_pred={cv_result['mean_log_pred']:.4f}"
+            )
+        except Exception as e:
+            print(f"Warning: CV evaluation failed ({e}). Skipping cv_held_out_loglik.parquet.")
+
     print(f"Results saved to {output_dir}")
 
 if __name__ == "__main__":
