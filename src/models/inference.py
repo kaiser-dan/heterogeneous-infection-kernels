@@ -851,6 +851,8 @@ def compute_held_out_loglik(
 def _cv_fold_mask(V: int, cv_folds: int, cv_fold: int) -> np.ndarray:
     if cv_folds < 1:
         raise ValueError(f"cv_folds must be >= 1, got {cv_folds}")
+    if not (0 <= cv_fold < cv_folds):
+        raise ValueError(f"cv_fold={cv_fold} out of range [0, {cv_folds})")
     return (np.arange(V) % cv_folds) == cv_fold
 
 
@@ -1150,6 +1152,8 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
             N_held = N[held_mask]
             M = M[train_mask]
             N = N[train_mask]
+            # row_weights is non-None for both OO (ones array) and Twitter (IPW);
+            # None only occurs after 1D aggregation, which sets run_cv=False above.
             if row_weights is not None:
                 row_weights = row_weights[train_mask]
             V = int(M.shape[0])
@@ -1365,7 +1369,7 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
                 f"CV fold {cv_fold}: cv_score={cv_result['cv_score']:.4f}  "
                 f"mean_log_pred={cv_result['mean_log_pred']:.4f}"
             )
-        except Exception as e:
+        except (OSError, KeyError, ValueError) as e:
             print(f"Warning: CV evaluation failed ({e}). Skipping cv_held_out_loglik.parquet.")
 
     print(f"Results saved to {output_dir}")

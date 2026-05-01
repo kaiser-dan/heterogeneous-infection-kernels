@@ -104,3 +104,9 @@ def test_fold_split_mask_skip_when_folds_zero():
     from src.models.inference import _cv_fold_mask
     with pytest.raises(ValueError):
         _cv_fold_mask(10, 0, 0)
+
+
+def test_fold_split_mask_out_of_range():
+    from src.models.inference import _cv_fold_mask
+    with pytest.raises(ValueError):
+        _cv_fold_mask(10, 3, 5)   # fold 5 doesn't exist in a 3-fold split
