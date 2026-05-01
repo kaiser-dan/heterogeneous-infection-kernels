@@ -1,4 +1,5 @@
-import re
+wildcard_constraints:
+    group_instance_id = "[^/]+"
 
 
 def _cv_fold_dirs(wildcards):
@@ -10,13 +11,13 @@ def _cv_fold_dirs(wildcards):
     inside each one.
     """
     cv_folds = int(config.get("cv_folds", 0))
-    group_id = wildcards.group_instance_id
+    group_id = wildcards.group_instance_id.replace("__", "/")  # decode to slash form
     fold_files = []
     for fold in range(cv_folds):
         fold_part = f"cv_fold~{fold}"
-        parts = group_id.split("__")
+        parts = group_id.split("/")
         parts_with_fold = sorted(parts + [fold_part])
-        fold_instance_id = "__".join(parts_with_fold)
+        fold_instance_id = "/".join(parts_with_fold)  # rejoin with slash
         fold_files.append(
             f"results/{wildcards.sweep_name}/{wildcards.data_source}/"
             f"{wildcards.data_name}/{fold_instance_id}/posterior_samples.parquet"
@@ -37,6 +38,7 @@ rule run_cv_aggregate:
         cmd = (
             f"uv run python {input.script} "
             f"--fold-dirs {fold_dir_args} "
-            f"--output {output[0]}"
+            f"--output {output[0]} "
+            f"--group-id {wildcards.group_instance_id}"
         )
         shell(cmd)
