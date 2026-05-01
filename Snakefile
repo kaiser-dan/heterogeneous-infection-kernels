@@ -206,6 +206,19 @@ if PPC_ENABLED:
                 f"results/{cfg_name}/{SOURCE}/{data_name}/ppc/{pair_id}/nested_summary.parquet"
             )
 
+CV_AGGREGATE_OUTPUTS = []
+_cv_folds = int(config.get("cv_folds", 0))
+if _cv_folds > 0 and "sweep" in config:
+    _seen_cv = set()
+    for _cv_row in build_grid(config["sweep"]):
+        _group_row = {k: v for k, v in _cv_row.items() if k != "cv_fold"}
+        _group_instance_id = encode_instance_id(get_instance_dir(_group_row))
+        for data_name in DATA_CFG_NAMES:
+            _cv_path = f"results/{cfg_name}/{SOURCE}/{data_name}/{_group_instance_id}/cv_summary.parquet"
+            if _cv_path not in _seen_cv:
+                _seen_cv.add(_cv_path)
+                CV_AGGREGATE_OUTPUTS.append(_cv_path)
+
 # 2. Main Rules
 rule all:
     """Default rule: Only prepare processed data."""
@@ -223,7 +236,13 @@ rule ppc:
     input:
         PPC_OUTPUTS
 
+rule cv_aggregate:
+    """Aggregate k-fold CV scores per model config."""
+    input:
+        CV_AGGREGATE_OUTPUTS
+
 # 3. Include Modular Rules
 include: "workflow/rules/data_prep.smk"
 include: "workflow/rules/inference.smk"
 include: "workflow/rules/analysis.smk"
+include: "workflow/rules/cv.smk"
