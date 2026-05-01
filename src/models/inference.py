@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 import wandb
 import os
+from scipy.special import logsumexp as _logsumexp
 
 
 def _to_rate_by_exposure(arr, row_weights=None):
@@ -784,6 +785,64 @@ def _compute_model_comparison(fit, stan_data, stan_file_path, K, kmax):
         "K":              K,
         "stan_file":      stan_file_name,
     }])
+
+
+def compute_held_out_loglik(
+    M_held: np.ndarray,
+    N_held: np.ndarray,
+    fit,
+) -> dict:
+    """Log posterior predictive density for held-out nodes.
+
+    Uses population-level kernels mu[k] and mixture weights pi from the
+    posterior -- no per-node latents required. Correct marginal predictive
+    for a new node drawn from the population mixture.
+    """
+    eps = 1e-9
+
+    if M_held.shape[0] == 0:
+        return {"cv_score": 0.0, "n_held_out": 0, "mean_log_pred": np.nan}
+
+    mu = np.asarray(fit.stan_variable("mu"), dtype=float)   # (S, K, kmax) or (S, kmax)
+    pi = np.asarray(fit.stan_variable("pi"), dtype=float)   # (S, K) or (S,)
+
+    # Normalise to (S, K, kmax) and (S, K) regardless of K=1 shape from CmdStanPy.
+    if mu.ndim == 2:
+        mu = mu[:, np.newaxis, :]   # (S, 1, kmax)
+    if pi.ndim == 1:
+        pi = pi[:, np.newaxis]      # (S, 1)
+
+    S, K, kmax_model = mu.shape
+    kmax_data = M_held.shape[1]
+    k = min(kmax_model, kmax_data)
+
+    mu_c = np.clip(mu[:, :, :k], eps, 1.0 - eps)    # (S, K, k)
+    log_mu = np.log(mu_c)                             # (S, K, k)
+    log_1m_mu = np.log(1.0 - mu_c)                   # (S, K, k)
+    log_pi = np.log(np.clip(pi, eps, 1.0))            # (S, K)
+
+    # Broadcast: (V, 1, 1, k) * (1, S, K, k) -> sum over k -> (V, S, K)
+    M_b = M_held[:, np.newaxis, np.newaxis, :k]       # (V, 1, 1, k)
+    N_b = N_held[:, np.newaxis, np.newaxis, :k]       # (V, 1, 1, k)
+    log_mu_b = log_mu[np.newaxis, :, :, :]            # (1, S, K, k)
+    log_1m_mu_b = log_1m_mu[np.newaxis, :, :, :]     # (1, S, K, k)
+
+    ll_by_component = (M_b * log_mu_b + N_b * log_1m_mu_b).sum(axis=-1)  # (V, S, K)
+
+    # Add log mixture weights and marginalise over K: (V, S)
+    lps = ll_by_component + log_pi[np.newaxis, :, :]  # (V, S, K)
+    log_lik = _logsumexp(lps, axis=-1)                 # (V, S)
+
+    # Marginalise over posterior draws: (V,)
+    log_pred = _logsumexp(log_lik, axis=-1) - np.log(S)  # (V,)
+
+    cv_score = float(log_pred.sum())
+    V_held = M_held.shape[0]
+    return {
+        "cv_score": cv_score,
+        "n_held_out": V_held,
+        "mean_log_pred": cv_score / V_held,
+    }
 
 
 def run_stan_inference(summary_path, output_dir, instance_params, config_path=None):
