@@ -66,3 +66,16 @@ def test_compute_held_out_loglik_empty_held_out():
     assert result["cv_score"] == 0.0
     assert result["n_held_out"] == 0
     assert np.isnan(result["mean_log_pred"])
+
+
+def test_compute_held_out_loglik_k1_cmdstanpy_squeeze():
+    """CmdStanPy returns mu as (S, kmax) and pi as (S,) when K=1."""
+    mu = np.array([[0.1, 0.2, 0.3], [0.1, 0.2, 0.3]])  # (S=2, kmax=3), ndim=2
+    pi = np.array([1.0, 1.0])                            # (S=2,), ndim=1
+    fit = MockFit(mu, pi)
+
+    M_held = np.array([[1.0, 0.0, 0.0]])
+    N_held = np.array([[0.0, 1.0, 0.0]])
+    result = compute_held_out_loglik(M_held, N_held, fit)
+    # Same expected value as the 3D K=1 test
+    assert abs(result["cv_score"] - np.log(0.08)) < 1e-9

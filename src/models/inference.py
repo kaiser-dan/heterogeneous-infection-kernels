@@ -813,6 +813,9 @@ def compute_held_out_loglik(
         pi = pi[:, np.newaxis]      # (S, 1)
 
     S, K, kmax_model = mu.shape
+    assert pi.shape == (S, K), (
+        f"pi shape {pi.shape} does not match mu K-dim (S={S}, K={K}) after normalisation"
+    )
     kmax_data = M_held.shape[1]
     k = min(kmax_model, kmax_data)
 
