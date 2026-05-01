@@ -18,6 +18,10 @@ def aggregate_cv_folds(fold_dirs: list[str], output_path: str) -> pd.DataFrame:
         raise ValueError(f"No cv_held_out_loglik.parquet files found in {fold_dirs}")
 
     df = pd.concat(records, ignore_index=True)
+    if df["cv_folds"].nunique() != 1:
+        raise ValueError(
+            f"Inconsistent cv_folds values across fold dirs: {df['cv_folds'].unique().tolist()}"
+        )
     total_nodes = int(df["n_held_out"].sum())
     total_lppd = float(df["cv_score"].sum())
 
