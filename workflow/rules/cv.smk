@@ -39,6 +39,6 @@ rule run_cv_aggregate:
             f"uv run python {input.script} "
             f"--fold-dirs {fold_dir_args} "
             f"--output {output[0]} "
-            f"--group-id {wildcards.group_instance_id}"
+            f'--group-id "{wildcards.group_instance_id}"'
         )
         shell(cmd)
