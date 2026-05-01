@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import pytest
 from src.models.inference import compute_held_out_loglik
 
@@ -110,3 +111,37 @@ def test_fold_split_mask_out_of_range():
     from src.models.inference import _cv_fold_mask
     with pytest.raises(ValueError):
         _cv_fold_mask(10, 3, 5)   # fold 5 doesn't exist in a 3-fold split
+
+
+def test_aggregate_cv_folds(tmp_path):
+    import importlib.util, sys
+    spec = importlib.util.spec_from_file_location(
+        "aggregate_cv",
+        "workflow/scripts/analysis/aggregate_cv.py",
+    )
+    agg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(agg)
+
+    # Write three fake fold parquet files
+    fold_dirs = []
+    for fold in range(3):
+        d = tmp_path / f"fold_{fold}"
+        d.mkdir()
+        pd.DataFrame([{
+            "cv_score": float(fold),
+            "n_held_out": 10,
+            "mean_log_pred": float(fold) / 10,
+            "cv_fold": fold,
+            "cv_folds": 3,
+        }]).to_parquet(d / "cv_held_out_loglik.parquet", index=False)
+        fold_dirs.append(str(d))
+
+    out_path = tmp_path / "cv_summary.parquet"
+    agg.aggregate_cv_folds(fold_dirs, str(out_path))
+
+    result = pd.read_parquet(out_path)
+    assert len(result) == 1
+    assert abs(result["total_cv_lppd"].iloc[0] - (0.0 + 1.0 + 2.0)) < 1e-9
+    assert result["n_total_nodes"].iloc[0] == 30
+    assert abs(result["mean_cv_lppd_per_node"].iloc[0] - 3.0 / 30) < 1e-9
+    assert result["cv_folds"].iloc[0] == 3
