@@ -6,7 +6,7 @@ __all__ = ["sbm", "er", "zkc"]
 
 # Shamelessly stolen from Nick at:
 # https://github.com/nwlandry/heterogeneous-complex-network-reconstruction/blob/main/lcs/generative.py
-def sbm(n, k, epsilon, seed=None):
+def sbm(n, k, epsilon, phi=0.5, seed=None):
     """
     Generates a Stochastic Block Model (SBM) graph.
 
@@ -18,6 +18,8 @@ def sbm(n, k, epsilon, seed=None):
         The average degree of each node.
     epsilon : float
         The parameter controlling the ratio of inter- to intra-community edges.
+    phi : float, optional
+        Fraction of nodes in block A. Defaults to 0.5 (equal-sized blocks).
     seed : int, optional
         The seed for the random number generator. Defaults to None.
 
@@ -35,7 +37,15 @@ def sbm(n, k, epsilon, seed=None):
     # ratio of inter- to intra-community edges
     p_in = (1 + epsilon) * p
     p_out = (1 - epsilon) * p
-    G = nx.planted_partition_graph(2, int(n / 2), p_in, p_out, seed=seed)
+    n1 = max(1, int(round(phi * n)))
+    n2 = n - n1
+    G = nx.stochastic_block_model(
+        sizes=[n1, n2],
+        p=[[p_in, p_out], [p_out, p_in]],
+        seed=seed,
+        directed=False,
+        selfloops=False,
+    )
     G.add_nodes_from(range(n))
     return np.asarray(nx.adjacency_matrix(G).todense(), dtype=int)
 

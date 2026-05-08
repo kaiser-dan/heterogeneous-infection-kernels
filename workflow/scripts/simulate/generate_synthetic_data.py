@@ -32,6 +32,11 @@ def nonparametric_kernel(values: list[float], kmax: int) -> np.ndarray:
     return arr[:kmax]
 
 
+def power_law_kernel(lam: float, alpha: float, kmax: int) -> np.ndarray:
+    nu = np.arange(1, kmax + 1, dtype=float)
+    return np.clip(lam * nu**alpha, 0.0, 1.0)
+
+
 def build_graph(graph_cfg: dict, seed: int) -> np.ndarray:
     graph_type = graph_cfg.get("type", "sbm")
     params = graph_cfg.get("params", {})
@@ -40,7 +45,8 @@ def build_graph(graph_cfg: dict, seed: int) -> np.ndarray:
         n = int(params["n"])
         k = float(params.get("avg_degree", params.get("k")))
         epsilon = float(params["epsilon"])
-        return np.asarray(sbm(n=n, k=k, epsilon=epsilon, seed=seed), dtype=int)
+        phi = float(params.get("phi", 0.5))
+        return np.asarray(sbm(n=n, k=k, epsilon=epsilon, phi=phi, seed=seed), dtype=int)
     if graph_type == "er":
         n = int(params["n"])
         p = params.get("p")
@@ -70,6 +76,14 @@ def build_kernel_bank(kernels_cfg: list[dict], kmax: int) -> list[np.ndarray]:
             )
         elif ktype == "nonparametric":
             bank.append(nonparametric_kernel(values=kernel_cfg["values"], kmax=kmax))
+        elif ktype == "power_law":
+            bank.append(
+                power_law_kernel(
+                    lam=float(kernel_cfg["lam"]),
+                    alpha=float(kernel_cfg["alpha"]),
+                    kmax=kmax,
+                )
+            )
         else:
             raise ValueError(f"Unsupported kernel type: {ktype}")
     return bank

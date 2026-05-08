@@ -1,0 +1,86 @@
+name: "simpson_mech_b_20260508"
+source: "synthetic"
+wandb_enabled: false
+
+synthetic:
+  seed: 42
+  kmax: 25
+
+  graph:
+    type: "sbm"
+    params:
+      n: 512
+      avg_degree: 18
+      epsilon: 0.7
+      phi: 0.5
+
+  contagion:
+    gamma: 0.1
+    tmax: 1000
+    dt: 1
+    initial_infected: 51
+
+    assignment:
+      mode: "block_flip"
+      omega: 0.0
+
+    kernels:
+      - id: "k_hi"
+        type: "power_law"
+        lam: 0.3
+        alpha: 0.5
+      - id: "k_lo"
+        type: "power_law"
+        lam: 0.1
+        alpha: 0.5
+
+sim_sweep:
+  graph.params.epsilon: [0.3, 0.5, 0.7, 0.9]
+  contagion.assignment.omega: [0.0, 0.1, 0.2]
+  contagion.kernels:
+    # alpha=0.3
+    - [{id: "k_hi", type: "power_law", lam: 0.3, alpha: 0.3}, {id: "k_lo", type: "power_law", lam: 0.05, alpha: 0.3}]
+    - [{id: "k_hi", type: "power_law", lam: 0.3, alpha: 0.3}, {id: "k_lo", type: "power_law", lam: 0.10, alpha: 0.3}]
+    - [{id: "k_hi", type: "power_law", lam: 0.3, alpha: 0.3}, {id: "k_lo", type: "power_law", lam: 0.15, alpha: 0.3}]
+    - [{id: "k_hi", type: "power_law", lam: 0.3, alpha: 0.3}, {id: "k_lo", type: "power_law", lam: 0.20, alpha: 0.3}]
+    # alpha=0.5
+    - [{id: "k_hi", type: "power_law", lam: 0.3, alpha: 0.5}, {id: "k_lo", type: "power_law", lam: 0.05, alpha: 0.5}]
+    - [{id: "k_hi", type: "power_law", lam: 0.3, alpha: 0.5}, {id: "k_lo", type: "power_law", lam: 0.10, alpha: 0.5}]
+    - [{id: "k_hi", type: "power_law", lam: 0.3, alpha: 0.5}, {id: "k_lo", type: "power_law", lam: 0.15, alpha: 0.5}]
+    - [{id: "k_hi", type: "power_law", lam: 0.3, alpha: 0.5}, {id: "k_lo", type: "power_law", lam: 0.20, alpha: 0.5}]
+    # alpha=0.7
+    - [{id: "k_hi", type: "power_law", lam: 0.3, alpha: 0.7}, {id: "k_lo", type: "power_law", lam: 0.05, alpha: 0.7}]
+    - [{id: "k_hi", type: "power_law", lam: 0.3, alpha: 0.7}, {id: "k_lo", type: "power_law", lam: 0.10, alpha: 0.7}]
+    - [{id: "k_hi", type: "power_law", lam: 0.3, alpha: 0.7}, {id: "k_lo", type: "power_law", lam: 0.15, alpha: 0.7}]
+    - [{id: "k_hi", type: "power_law", lam: 0.3, alpha: 0.7}, {id: "k_lo", type: "power_law", lam: 0.20, alpha: 0.7}]
+    # alpha=1.0
+    - [{id: "k_hi", type: "power_law", lam: 0.3, alpha: 1.0}, {id: "k_lo", type: "power_law", lam: 0.05, alpha: 1.0}]
+    - [{id: "k_hi", type: "power_law", lam: 0.3, alpha: 1.0}, {id: "k_lo", type: "power_law", lam: 0.10, alpha: 1.0}]
+    - [{id: "k_hi", type: "power_law", lam: 0.3, alpha: 1.0}, {id: "k_lo", type: "power_law", lam: 0.15, alpha: 1.0}]
+    - [{id: "k_hi", type: "power_law", lam: 0.3, alpha: 1.0}, {id: "k_lo", type: "power_law", lam: 0.20, alpha: 1.0}]
+
+sweep:
+  stan_file: ["src/models/non_parametric_monotonic.stan"]
+  K: [1]
+
+model:
+  stan_file: "src/models/non_parametric_monotonic.stan"
+  K: 1
+  concentration: 1.0
+  deviation_scale: 1.0
+  logit_p_location: "empirical"
+  logit_p_scale: 2.0
+  V_max_local: 10000
+
+output:
+  posterior_mode: "compact"
+  posterior_thin: 10
+  posterior_float32: true
+  parquet_compression: "zstd"
+  kernel_ci_level: 0.90
+  kernel_map_bins: 128
+  write_kernel_draws: false
+
+analysis:
+  ppc:
+    enabled: false
