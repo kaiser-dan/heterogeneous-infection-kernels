@@ -1,0 +1,47 @@
+name: cv_model_sel_k2_gt_20260501
+source: synthetic
+
+synthetic:
+  dataset_name: cv_k2_ground_truth
+  seed: 42
+  kmax: 15
+  graph:
+    type: sbm
+    params:
+      n: 200
+      avg_degree: 10
+      epsilon: 0.85
+  contagion:
+    gamma: 0.1
+    tmax: 200
+    dt: 1
+    initial_infected: 0.10
+    # block_flip with omega=0.0: block 0 -> kernel k1, block 1 -> kernel k2, no noise
+    assignment:
+      mode: block_flip
+      omega: 0.0
+    kernels:
+      - id: k1
+        type: simple
+        beta: 0.02
+      - id: k2
+        type: simple
+        beta: 0.10
+
+cv_folds: 3
+
+model:
+  stan_file: src/models/non_parametric_monotonic.stan
+  K: 1
+  logit_p_location: "empirical"
+  logit_p_scale: 2.0
+  concentration: 1.0
+  deviation_scale: 0.5
+  sampling:
+    chains: 2
+    iter_warmup: 500
+    iter_sampling: 500
+
+sweep:
+  K: [1, 2, 3, 4]
+  cv_fold: [0, 1, 2]

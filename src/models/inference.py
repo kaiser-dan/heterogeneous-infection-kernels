@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 import wandb
 import os
+from scipy.special import logsumexp as _logsumexp
 
 
 def _to_rate_by_exposure(arr, row_weights=None):
@@ -786,6 +787,75 @@ def _compute_model_comparison(fit, stan_data, stan_file_path, K, kmax):
     }])
 
 
+def compute_held_out_loglik(
+    M_held: np.ndarray,
+    N_held: np.ndarray,
+    fit,
+) -> dict:
+    """Log posterior predictive density for held-out nodes.
+
+    Uses population-level kernels mu[k] and mixture weights pi from the
+    posterior -- no per-node latents required. Correct marginal predictive
+    for a new node drawn from the population mixture.
+    """
+    eps = 1e-9
+
+    if M_held.shape[0] == 0:
+        return {"cv_score": 0.0, "n_held_out": 0, "mean_log_pred": np.nan}
+
+    mu = np.asarray(fit.stan_variable("mu"), dtype=float)   # (S, K, kmax) or (S, kmax)
+    pi = np.asarray(fit.stan_variable("pi"), dtype=float)   # (S, K) or (S,)
+
+    # Normalise to (S, K, kmax) and (S, K) regardless of K=1 shape from CmdStanPy.
+    if mu.ndim == 2:
+        mu = mu[:, np.newaxis, :]   # (S, 1, kmax)
+    if pi.ndim == 1:
+        pi = pi[:, np.newaxis]      # (S, 1)
+
+    S, K, kmax_model = mu.shape
+    assert pi.shape == (S, K), (
+        f"pi shape {pi.shape} does not match mu K-dim (S={S}, K={K}) after normalisation"
+    )
+    kmax_data = M_held.shape[1]
+    k = min(kmax_model, kmax_data)
+
+    mu_c = np.clip(mu[:, :, :k], eps, 1.0 - eps)    # (S, K, k)
+    log_mu = np.log(mu_c)                             # (S, K, k)
+    log_1m_mu = np.log(1.0 - mu_c)                   # (S, K, k)
+    log_pi = np.log(np.clip(pi, eps, 1.0))            # (S, K)
+
+    # Broadcast: (V, 1, 1, k) * (1, S, K, k) -> sum over k -> (V, S, K)
+    M_b = M_held[:, np.newaxis, np.newaxis, :k]       # (V, 1, 1, k)
+    N_b = N_held[:, np.newaxis, np.newaxis, :k]       # (V, 1, 1, k)
+    log_mu_b = log_mu[np.newaxis, :, :, :]            # (1, S, K, k)
+    log_1m_mu_b = log_1m_mu[np.newaxis, :, :, :]     # (1, S, K, k)
+
+    ll_by_component = (M_b * log_mu_b + N_b * log_1m_mu_b).sum(axis=-1)  # (V, S, K)
+
+    # Add log mixture weights and marginalise over K: (V, S)
+    lps = ll_by_component + log_pi[np.newaxis, :, :]  # (V, S, K)
+    log_lik = _logsumexp(lps, axis=-1)                 # (V, S)
+
+    # Marginalise over posterior draws: (V,)
+    log_pred = _logsumexp(log_lik, axis=-1) - np.log(S)  # (V,)
+
+    cv_score = float(log_pred.sum())
+    V_held = M_held.shape[0]
+    return {
+        "cv_score": cv_score,
+        "n_held_out": V_held,
+        "mean_log_pred": cv_score / V_held,
+    }
+
+
+def _cv_fold_mask(V: int, cv_folds: int, cv_fold: int) -> np.ndarray:
+    if cv_folds < 1:
+        raise ValueError(f"cv_folds must be >= 1, got {cv_folds}")
+    if not (0 <= cv_fold < cv_folds):
+        raise ValueError(f"cv_fold={cv_fold} out of range [0, {cv_folds})")
+    return (np.arange(V) % cv_folds) == cv_fold
+
+
 def run_stan_inference(summary_path, output_dir, instance_params, config_path=None):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
@@ -1051,7 +1121,7 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
         # Aggregate across users (axis 0)
         M_agg = M.sum(axis=0)
         N_agg = N.sum(axis=0)
-        
+
         # Override M and N with aggregated versions
         # Stan expects arrays, so keeping them as numpy arrays is fine (CmdStanPy handles it)
         M = M_agg
@@ -1059,7 +1129,39 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
         row_weights = None
         # V is likely not in the data block for these models, but passing it usually doesn't hurt
         # unless strict data checking is enabled.
-    
+
+    # --- CV fold splitting ---
+    cv_folds = int(config.get('cv_folds', 0))
+    cv_fold  = int(config['model'].get('cv_fold', config.get('cv_fold', -1)))
+    run_cv = cv_folds > 0 and cv_fold >= 0
+
+    M_held = None
+    N_held = None
+
+    if run_cv:
+        if not requires_2d:
+            print(
+                f"Warning: cv_folds={cv_folds} requested but model '{stan_file}' uses "
+                "aggregated (1D) data — CV requires individual node rows. Skipping CV."
+            )
+            run_cv = False
+        else:
+            held_mask = _cv_fold_mask(V, cv_folds, cv_fold)
+            train_mask = ~held_mask
+            M_held = M[held_mask]
+            N_held = N[held_mask]
+            M = M[train_mask]
+            N = N[train_mask]
+            # row_weights is non-None for both OO (ones array) and Twitter (IPW);
+            # None only occurs after 1D aggregation, which sets run_cv=False above.
+            if row_weights is not None:
+                row_weights = row_weights[train_mask]
+            V = int(M.shape[0])
+            print(
+                f"CV fold {cv_fold}/{cv_folds}: "
+                f"train={V} nodes, held_out={int(held_mask.sum())} nodes"
+            )
+
     # Keep empirical Bayes configurable; a hard 0.01 floor is too aggressive
     # for sparse datasets where baseline adoption can be << 1%.
     prior_floor = float(config['model'].get('empirical_prior_floor', 1e-6))
@@ -1247,6 +1349,29 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
         index=False,
         compression=parquet_compression,
     )
+
+    if run_cv and M_held is not None and M_held.shape[0] > 0:
+        try:
+            cv_result = compute_held_out_loglik(M_held, N_held, fit)
+            cv_df = pd.DataFrame([{
+                "cv_score":       cv_result["cv_score"],
+                "n_held_out":     cv_result["n_held_out"],
+                "mean_log_pred":  cv_result["mean_log_pred"],
+                "cv_fold":        cv_fold,
+                "cv_folds":       cv_folds,
+            }])
+            cv_df.to_parquet(
+                output_dir / "cv_held_out_loglik.parquet",
+                index=False,
+                compression=parquet_compression,
+            )
+            print(
+                f"CV fold {cv_fold}: cv_score={cv_result['cv_score']:.4f}  "
+                f"mean_log_pred={cv_result['mean_log_pred']:.4f}"
+            )
+        except (OSError, KeyError, ValueError) as e:
+            print(f"Warning: CV evaluation failed ({e}). Skipping cv_held_out_loglik.parquet.")
+
     print(f"Results saved to {output_dir}")
 
 if __name__ == "__main__":

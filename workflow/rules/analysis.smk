@@ -8,4 +8,4 @@ rule aggregate_sweep:
     params:
         result_dir = f"results/{cfg_name}"
     shell:
-        "uv run python scripts/build_complexity_table.py --results-dir {params.result_dir} --output {output}"
+        "uv run python workflow/scripts/analysis/build_complexity_table.py --results-dir {params.result_dir} --output {output}"
