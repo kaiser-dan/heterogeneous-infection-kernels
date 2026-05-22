@@ -532,24 +532,18 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
     # A simple but effective way is to look at the .stan file content
     stan_code = stan_file_path.read_text()
     
-    # Use regex to be more robust than simple string matching
-    # We want to match "vector[...] DEVIATION_SCALE" or similar
-    # but NOT "real DEVIATION_SCALE"
-    import re
-    # Match "vector" followed eventually by "DEVIATION_SCALE", allowing for <lower=...> etc
-    # The key is that "vector" should be the type keyword
-    # This regex allows for:
-    # vector DEVIATION_SCALE
-    # vector[K] DEVIATION_SCALE
-    # vector<lower=0>[K] DEVIATION_SCALE
-    vector_decl_pattern = re.compile(r"vector\b.*DEVIATION_SCALE")
-    is_vector_dev = bool(vector_decl_pattern.search(stan_code))
-    
-    is_jgy_mod = "REPLICATES" in stan_code
-    
+    from src.models.stan_registry import (
+        ResolverContext,
+        build_stan_data_extras,
+        is_vector_deviation_scale,
+        parse_data_block_names,
+    )
+
+    declared = parse_data_block_names(stan_code)
+
     # Check if model expects 2D (individual) or 1D (aggregated) matrices
     # Non-parametric models typically use array[V, kmax]
-    requires_2d = "array[V, kmax]" in stan_code or "array[V,kmax]" in stan_code
+    requires_2d = bool(re.search(r"array\s*\[\s*V\s*,\s*kmax\s*\]", stan_code))
     
     if not requires_2d:
         print(f"Model {stan_file} appears to assume homogeneous population (1D matrices). Aggregating data...")
@@ -625,97 +619,33 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
         f" ceiling={empirical_logits['empirical_ceiling']:.4f} (p={empirical_logits['empirical_ceiling_rate']:.6f})"
     )
 
-    logit_p_loc = _resolve_logit_location(
-        config['model'].get('logit_p_location', 0.0),
-        empirical_logits,
+    ctx = ResolverContext(
+        empirical_logits=empirical_logits,
         fallback=0.0,
+        kmax=kmax,
     )
-    
-    stan_data = {
-        'kmax': kmax,
-        'M': M,
-        'N': N,
-    }
 
-    if "ROW_WEIGHT" in stan_code:
+    stan_data = {"kmax": kmax, "M": M, "N": N}
+
+    if "ROW_WEIGHT" in declared:
         if row_weights is None:
             row_weights = np.ones(V, dtype=float)
         if len(row_weights) != V:
             raise ValueError(f"ROW_WEIGHT length ({len(row_weights)}) must match V ({V}).")
-        stan_data['ROW_WEIGHT'] = np.asarray(row_weights, dtype=float)
-    
-    # Only add V and K if the model likely needs them (simple models might not)
-    # But usually extra methods don't cause failure in generic CmdStan unless strict=True
-    # safely adding them is better
-    if re.search(r"\bV\b", stan_code) and "int" in stan_code:
-        stan_data['V'] = V
-    if re.search(r"\bK\b", stan_code) and "int" in stan_code and 'K' in config['model']:
-        stan_data['K'] = k_components
-         
-    # Add other params robustly based on what's in the stan code
-    if "CONCENTRATION" in stan_code:
-        stan_data['CONCENTRATION'] = float(config['model'].get('concentration', 1.0))
-        
-    if "LOGIT_P_LOCATION" in stan_code:
-        stan_data['LOGIT_P_LOCATION'] = float(logit_p_loc)
+        stan_data["ROW_WEIGHT"] = np.asarray(row_weights, dtype=float)
 
-    if "LOGIT_P_SCALE" in stan_code:
-        stan_data['LOGIT_P_SCALE'] = float(config['model'].get('logit_p_scale', 2.0))
+    if "V" in declared:
+        stan_data["V"] = V
+    if "K" in declared and "K" in config["model"]:
+        stan_data["K"] = k_components
 
-    if "SIGMA_SCALE" in stan_code:
-        stan_data['SIGMA_SCALE'] = float(config['model'].get('sigma_scale', 1.0))
-    if "PI_CONCENTRATION" in stan_code:
-        stan_data['PI_CONCENTRATION'] = float(config['model'].get('pi_concentration', 1.0))
-    if "LOGIT_MU_LOCATION" in stan_code:
-        stan_data['LOGIT_MU_LOCATION'] = _resolve_logit_location(
-            config['model'].get('logit_mu_location', 0.0),
-            empirical_logits,
-            fallback=0.0,
-        )
-    if "LOGIT_MU_SCALE" in stan_code:
-        stan_data['LOGIT_MU_SCALE'] = float(config['model'].get('logit_mu_scale', 2.0))
+    stan_data.update(build_stan_data_extras(stan_code, config["model"], ctx))
 
-    # SC model: logit-Normal prior on rho
-    if "LOGIT_RHO_LOCATION" in stan_code:
-        stan_data['LOGIT_RHO_LOCATION'] = _resolve_logit_location(
-            config['model'].get('logit_rho_location', -10.0),
-            empirical_logits,
-            fallback=-10.0,
-        )
-    if "LOGIT_RHO_SCALE" in stan_code:
-        stan_data['LOGIT_RHO_SCALE'] = float(config['model'].get('logit_rho_scale', 2.0))
-
-    # CC model: logit-Normal priors on rho_l and rho_h
-    if "LOGIT_RHO_L_LOCATION" in stan_code:
-        stan_data['LOGIT_RHO_L_LOCATION'] = _resolve_logit_location(
-            config['model'].get('logit_rho_l_location', -10.0),
-            empirical_logits,
-            fallback=-10.0,
-        )
-    if "LOGIT_RHO_L_SCALE" in stan_code:
-        stan_data['LOGIT_RHO_L_SCALE'] = float(config['model'].get('logit_rho_l_scale', 2.0))
-    if "LOGIT_RHO_H_LOCATION" in stan_code:
-        stan_data['LOGIT_RHO_H_LOCATION'] = _resolve_logit_location(
-            config['model'].get('logit_rho_h_location', -6.0),
-            empirical_logits,
-            fallback=-6.0,
-        )
-    if "LOGIT_RHO_H_SCALE" in stan_code:
-        stan_data['LOGIT_RHO_H_SCALE'] = float(config['model'].get('logit_rho_h_scale', 2.5))
-    if "W_RATE" in stan_code:
-        stan_data['W_RATE'] = float(config['model'].get('w_rate', 0.5))
-    if "K0_LOCATION" in stan_code:
-        stan_data['K0_LOCATION'] = float(config['model'].get('k0_location', kmax / 2.0))
-    if "K0_SCALE" in stan_code:
-        stan_data['K0_SCALE'] = float(config['model'].get('k0_scale', kmax / 2.0))
-
-    if is_vector_dev:
-        stan_data['DEVIATION_SCALE'] = [dev_scale_val] * k_components
-    elif "DEVIATION_SCALE" in stan_code:
-        stan_data['DEVIATION_SCALE'] = dev_scale_val
-        
-    if is_jgy_mod:
-        stan_data['REPLICATES'] = int(config['model'].get('replicates', 100))
+    if "DEVIATION_SCALE" in declared:
+        if is_vector_deviation_scale(stan_code):
+            stan_data["DEVIATION_SCALE"] = [dev_scale_val] * k_components
+        else:
+            stan_data["DEVIATION_SCALE"] = dev_scale_val
     
     if config.get('wandb_enabled'):
         wandb.init(project="heterogeneous-infection-kernels", name=f"{config['name']}_{output_dir.name}", config=config)
