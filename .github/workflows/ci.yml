@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "pr/**", "copilot/**"]
+  pull_request:
+    branches: ["main", "pr/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-extras --all-groups
+
+      - name: Run unit tests
+        run: uv run pytest -q --ignore=test/test_twitter_reproducibility.py
+
+  snakemake-synthetic:
+    name: Snakemake synthetic workflow (data prep + inference)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-extras --all-groups
+
+      - name: Install CmdStan
+        run: uv run python -c "import cmdstanpy; cmdstanpy.install_cmdstan()"
+
+      - name: Snakemake dry-run with research synthetic config
+        run: uv run snakemake inference --dry-run -c1 --configfile configs/research_sim_sweep_synthetic.yaml
+
+      - name: Snakemake all (synthetic data prep) with test config
+        run: uv run snakemake all -c1 --configfile configs/test_synthetic.yaml
+
+      - name: Snakemake inference (full pipeline) with test config
+        run: uv run snakemake inference -c1 --configfile configs/test_synthetic.yaml
+
+      - name: Verify output artifacts
+        run: |
+          uv run python - <<'EOF'
+          import sys
+          from pathlib import Path
+          import pandas as pd
+
+          root = Path(".")
+          processed = root / "data" / "processed" / "synthetic" / "test_sim"
+          summaries = root / "data" / "summaries" / "synthetic" / "test_sim.parquet"
+          results   = root / "results" / "test_synthetic" / "synthetic" / "test_sim"
+
+          required_processed = ["M.parquet", "N.parquet", "edges.parquet",
+                                 "exposures.parquet", "kernels.parquet", "metadata.parquet"]
+          for f in required_processed:
+              p = processed / f
+              if not p.exists():
+                  sys.exit(f"MISSING processed file: {p}")
+              df = pd.read_parquet(p)
+              if len(df) == 0:
+                  sys.exit(f"EMPTY processed file: {p}")
+
+          if not summaries.exists():
+              sys.exit(f"MISSING summaries file: {summaries}")
+
+          posterior = list(results.rglob("posterior_samples.parquet"))
+          summary   = list(results.rglob("inference_summary.parquet"))
+          if not posterior:
+              sys.exit(f"No posterior_samples.parquet found under {results}")
+          if not summary:
+              sys.exit(f"No inference_summary.parquet found under {results}")
+
+          print("All expected output artifacts verified.")
+          EOF

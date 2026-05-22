@@ -67,15 +67,21 @@ To use the install package, either prefix all commands with `uv run` (preferred)
 
 ## Quick Start
 
-The Jupyter notebook [`example.ipynb`](example.ipynb) contains a short working example and some comments to illustrate the basic usage of the developed method.
+After installation, the fastest way to confirm the workflow is set up correctly is to run the synthetic smoke-test config included in this branch.
 
-If you have followed the installation instructions above, you can open the notebook with the following command executed from the repository root:
+Inspect the DAG first:
 
 ```bash
-uv run --with jupyter jupyter lab example.ipynb
+uv run snakemake -n inference \
+  --configfile configs/example_synthetic_workflow.yaml \
+  --profile workflow/profiles/local
 ```
 
-This will open a Jupyter lab instance in your default browser.
+Then run the example end-to-end:
+
+```bash
+just sweep configs/example_synthetic_workflow.yaml
+```
 
 # Usage
 
@@ -155,6 +161,35 @@ The bundled profiles are:
 
 Use the local profile for development and smoke tests. Use the SLURM profile when you want Snakemake to submit rules as cluster jobs.
 
+The profile files live at:
+
+- [workflow/profiles/local/config.yaml](workflow/profiles/local/config.yaml)
+- [workflow/profiles/slurm/config.yaml](workflow/profiles/slurm/config.yaml)
+
+The current defaults are:
+
+- `local`: `executor: local`, `jobs: 4`, default `runtime: 1h`, default `mem_mb: 4000`
+- `slurm`: `executor: slurm`, `jobs: 20`, default account `pi-cdanfort`, default partition `week`, default `runtime: 4h`, default `mem_mb: 8000`
+- `slurm` also overrides `run_inference` to `runtime: 24h` and `mem_mb: 16000`
+
+Examples:
+
+```bash
+# Local execution on the current machine
+just sweep configs/example_synthetic_workflow.yaml
+uv run snakemake inference \
+  --configfile configs/example_synthetic_workflow.yaml \
+  --profile workflow/profiles/local
+
+# SLURM submission using the cluster profile
+just sweep configs/example_synthetic_workflow.yaml workflow/profiles/slurm
+uv run snakemake inference \
+  --configfile configs/example_synthetic_workflow.yaml \
+  --profile workflow/profiles/slurm
+```
+
+If you need different defaults for your cluster, edit the profile YAML directly rather than changing the workflow rules.
+
 ### How the Config Files Work
 
 Workflow configs are YAML files under `configs/`. The important top-level fields are:
@@ -230,7 +265,7 @@ Results (posterior samples and summaries) are saved to the `results/` directory.
 
 # Documentation
 
-This repository does not maintain extensive independent documentation for its source code. Functions have docstrings where needed and the [`example.ipynb`](example.ipynb) file can be used as a user guide.
+This repository does not maintain extensive independent documentation for its source code. Functions have docstrings where needed, and the workflow/config examples in this README are the main user-facing guide.
 
 # Tests
 

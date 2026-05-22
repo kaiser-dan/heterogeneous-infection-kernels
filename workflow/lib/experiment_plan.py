@@ -112,6 +112,7 @@ def encode_instance_id(instance_id: str) -> str:
     return instance_id.replace("/", "__")
 
 
+
 def _resolve_active_configfile(workflow: Any, cfg_name: str) -> str:
     configfiles = []
     if workflow is not None:

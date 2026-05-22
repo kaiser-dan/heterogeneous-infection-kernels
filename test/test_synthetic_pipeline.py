@@ -9,6 +9,15 @@ import pytest
 import yaml
 
 
+def _cmdstan_available() -> bool:
+    try:
+        import cmdstanpy
+        return cmdstanpy.cmdstan_version() is not None
+    except Exception:
+        return False
+
+
+
 @pytest.fixture(scope="module")
 def project_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -406,3 +415,93 @@ def test_snakemake_ppc_both_modes_dry_run(project_root: Path, tmp_path: Path):
     combined = f"{proc.stdout}\n{proc.stderr}"
     assert "run_ppc_non_nested" in combined
     assert "run_ppc_nested_refit" in combined
+
+
+def test_snakemake_synthetic_data_prep_end_to_end(project_root: Path, tmp_path: Path):
+    """
+    Run the full data-prep portion of the Snakemake workflow with the minimal
+    test_synthetic config and verify all expected output parquet files exist.
+    This exercises the ``generate_synthetic_processed`` rule without requiring
+    CmdStan / Stan inference.
+    """
+    config_path = project_root / "configs" / "test_synthetic.yaml"
+    with open(config_path, encoding="utf-8") as fh:
+        test_cfg = yaml.safe_load(fh)
+    data_name = test_cfg["synthetic"]["dataset_name"]
+
+    cmd = [
+        _venv_snakemake(project_root),
+        "all",
+        "-c1",
+        "--configfile", str(config_path),
+        "--snakefile", str(project_root / "Snakefile"),
+        "--directory", str(project_root),
+        "--runtime-source-cache-path", str(tmp_path / "runtime-source-cache"),
+        "--rerun-incomplete",
+    ]
+    proc = subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
+
+    if proc.returncode != 0:
+        pytest.fail(
+            f"Snakemake 'all' (synthetic data prep) failed:\n"
+            f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+        )
+
+    processed_dir = project_root / "data" / "processed" / "synthetic" / data_name
+    expected_files = [
+        "M.parquet",
+        "N.parquet",
+        "edges.parquet",
+        "exposures.parquet",
+        "kernels.parquet",
+        "metadata.parquet",
+    ]
+    for fname in expected_files:
+        fpath = processed_dir / fname
+        assert fpath.exists(), f"Missing output file: {fpath}"
+        df = pd.read_parquet(fpath)
+        assert len(df) > 0, f"Output file is empty: {fpath}"
+
+
+@pytest.mark.skipif(not _cmdstan_available(), reason="CmdStan not installed")
+def test_snakemake_synthetic_inference_end_to_end(project_root: Path, tmp_path: Path):
+    """
+    Run the full Snakemake inference target with the minimal test_synthetic config
+    (1 sim instance, 1 model, 100 warmup + 100 sampling, 1 chain) and verify
+    that all expected inference output artifacts are produced.
+    Skipped automatically when CmdStan is not installed.
+    """
+    config_path = project_root / "configs" / "test_synthetic.yaml"
+    with open(config_path, encoding="utf-8") as fh:
+        test_cfg = yaml.safe_load(fh)
+    cfg_name = test_cfg["name"]
+    data_name = test_cfg["synthetic"]["dataset_name"]
+
+    cmd = [
+        _venv_snakemake(project_root),
+        "inference",
+        "-c1",
+        "--configfile", str(config_path),
+        "--snakefile", str(project_root / "Snakefile"),
+        "--directory", str(project_root),
+        "--runtime-source-cache-path", str(tmp_path / "runtime-source-cache"),
+        "--rerun-incomplete",
+    ]
+    proc = subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
+
+    if proc.returncode != 0:
+        pytest.fail(
+            f"Snakemake 'inference' (small sweep) failed:\n"
+            f"STDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+        )
+
+    results_dir = project_root / "results" / cfg_name / "synthetic" / data_name
+    posterior_files = list(results_dir.rglob("posterior_samples.parquet"))
+    summary_files = list(results_dir.rglob("inference_summary.parquet"))
+
+    assert posterior_files, f"No posterior_samples.parquet found under {results_dir}"
+    assert summary_files, f"No inference_summary.parquet found under {results_dir}"
+
+    for fpath in posterior_files + summary_files:
+        df = pd.read_parquet(fpath)
+        assert len(df) > 0, f"Inference output is empty: {fpath}"

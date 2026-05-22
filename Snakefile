@@ -20,26 +20,30 @@ INFERENCE_OUTPUTS = list(WORKFLOW_CONTEXT.inference_outputs)
 PPC_OUTPUTS = list(WORKFLOW_CONTEXT.ppc_outputs)
 PPC_PAIR_MAP = WORKFLOW_CONTEXT.ppc_pair_map
 PPC_CONFIG = WORKFLOW_CONTEXT.ppc_config
-
-CV_AGGREGATE_OUTPUTS = []
-_cv_folds = int(config.get("cv_folds", 0))
-if _cv_folds > 0 and "sweep" in config:
-    _seen_cv = set()
-    for _cv_row in build_grid(config["sweep"]):
-        _group_row = {k: v for k, v in _cv_row.items() if k != "cv_fold"}
-        _group_instance_id = encode_instance_id(get_instance_dir(_group_row))
-        for data_name in DATA_CFG_NAMES:
-            _cv_path = f"results/{cfg_name}/{SOURCE}/{data_name}/{_group_instance_id}/cv_summary.parquet"
-            if _cv_path not in _seen_cv:
-                _seen_cv.add(_cv_path)
-                CV_AGGREGATE_OUTPUTS.append(_cv_path)
+CV_AGGREGATE_OUTPUTS = list(WORKFLOW_CONTEXT.cv_aggregate_outputs)
 
 # 2. Main Rules
+def _all_inputs(_wildcards=None):
+    """Return the data-prep targets appropriate for the configured source."""
+    if SOURCE == "twitter":
+        return [TWITTER_PROCESSED_DIR]
+    if SOURCE == "oo":
+        return expand(
+            "data/processed/oo/sim_{sim_id}_backbone_disparity/exposures.parquet",
+            sim_id=[165, 57, 118, 70, 76, 131, 66, 61, 72, 67],
+        )
+    if SOURCE == "synthetic":
+        return expand(
+            "data/processed/synthetic/{data_name}/exposures.parquet",
+            data_name=DATA_CFG_NAMES,
+        )
+    return []
+
+
 rule all:
-    """Default rule: Only prepare processed data."""
+    """Default rule: Only prepare processed data for the configured source."""
     input:
-        TWITTER_PROCESSED_DIR,
-        expand("data/processed/oo/sim_{sim_id}_backbone_disparity/exposures.parquet", sim_id=[165, 57, 118, 70, 76, 131, 66, 61, 72, 67]),
+        _all_inputs,
 
 rule inference:
     """Explicitly run models defined in the config."""

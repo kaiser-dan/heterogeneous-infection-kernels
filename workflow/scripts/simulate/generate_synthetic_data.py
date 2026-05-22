@@ -37,6 +37,7 @@ def power_law_kernel(lam: float, alpha: float, kmax: int) -> np.ndarray:
     return np.clip(lam * nu**alpha, 0.0, 1.0)
 
 
+
 def build_graph(graph_cfg: dict, seed: int) -> np.ndarray:
     graph_type = graph_cfg.get("type", "sbm")
     params = graph_cfg.get("params", {})

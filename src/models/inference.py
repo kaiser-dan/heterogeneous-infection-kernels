@@ -1162,6 +1162,7 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
                 f"train={V} nodes, held_out={int(held_mask.sum())} nodes"
             )
 
+
     # Keep empirical Bayes configurable; a hard 0.01 floor is too aggressive
     # for sparse datasets where baseline adoption can be << 1%.
     prior_floor = float(config['model'].get('empirical_prior_floor', 1e-6))
@@ -1371,6 +1372,7 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
             )
         except (OSError, KeyError, ValueError) as e:
             print(f"Warning: CV evaluation failed ({e}). Skipping cv_held_out_loglik.parquet.")
+
 
     print(f"Results saved to {output_dir}")
 
