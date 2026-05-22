@@ -12,15 +12,78 @@ class MalahboisResult:
     total_distance: np.ndarray
     centered_distance: np.ndarray
     non_centrality: float
+    mode_non_centrality: float
     reference_kernel: np.ndarray
+    mode_reference_kernel: np.ndarray
     posterior_mean: np.ndarray
+    posterior_mode: np.ndarray
     covariance: np.ndarray
+    mode_covariance: np.ndarray
+    rho_mode: float
 
 
 def simple_contagion_reference(rho: float, k: int) -> np.ndarray:
     """Simple contagion kernel c(nu) = 1 - (1 - rho)^nu for nu=1..k."""
     nu = np.arange(1, k + 1, dtype=float)
     return 1.0 - (1.0 - float(rho)) ** nu
+
+
+def _regularized_covariance(samples: np.ndarray, jitter: float) -> np.ndarray:
+    covariance = np.cov(samples, rowvar=False)
+    covariance = np.atleast_2d(np.asarray(covariance, dtype=float))
+    dim = covariance.shape[0]
+    return covariance + (jitter * np.eye(dim, dtype=float))
+
+
+def _whiten_samples(samples: np.ndarray, covariance: np.ndarray) -> np.ndarray:
+    chol = np.linalg.cholesky(covariance)
+    return np.linalg.solve(chol, np.asarray(samples, dtype=float).T).T
+
+
+def _pairwise_squared_distances(samples: np.ndarray) -> np.ndarray:
+    sq_norms = np.sum(samples * samples, axis=1, keepdims=True)
+    distances = sq_norms + sq_norms.T - (2.0 * samples @ samples.T)
+    return np.maximum(distances, 0.0)
+
+
+def _resolve_neighbor_count(n_samples: int, dimension: int) -> int:
+    if n_samples < 3:
+        return 1
+    return min(max(int(np.sqrt(n_samples)), dimension + 2), n_samples - 1)
+
+
+def _knn_mode_index(
+    samples: np.ndarray,
+    covariance: np.ndarray,
+    neighbor_count: int,
+) -> int:
+    whitened = _whiten_samples(samples, covariance)
+    distances = _pairwise_squared_distances(whitened)
+    np.fill_diagonal(distances, np.inf)
+    kth_radius = np.partition(distances, neighbor_count - 1, axis=1)[:, neighbor_count - 1]
+    return int(np.argmin(kth_radius))
+
+
+def _mode_neighborhood_indices(
+    samples: np.ndarray,
+    global_covariance: np.ndarray,
+    mode_index: int,
+    neighbor_count: int,
+) -> np.ndarray:
+    if samples.shape[0] < 3:
+        return np.arange(samples.shape[0], dtype=int)
+
+    local_sample_count = min(
+        max(neighbor_count + 1, samples.shape[1] + 2),
+        samples.shape[0],
+    )
+    if local_sample_count < 2:
+        return np.arange(samples.shape[0], dtype=int)
+
+    whitened = _whiten_samples(samples, global_covariance)
+    mode_delta = whitened - whitened[mode_index]
+    distances = np.einsum("ij,ij->i", mode_delta, mode_delta)
+    return np.argpartition(distances, local_sample_count - 1)[:local_sample_count]
 
 
 def compute_malahbois_complexity(
@@ -54,8 +117,7 @@ def compute_malahbois_complexity(
 
     n_samples, k = mu.shape
     mu_bar = mu.mean(axis=0)
-    covariance = np.cov(mu, rowvar=False)
-    covariance = covariance + (jitter * np.eye(k, dtype=float))
+    covariance = _regularized_covariance(mu, jitter=jitter)
     chol = np.linalg.cholesky(covariance)
 
     rho_hat = float(rho.mean())
@@ -72,6 +134,37 @@ def compute_malahbois_complexity(
     z_offset = np.linalg.solve(chol, mu_bar - mu_sc)
     non_centrality = float(np.dot(z_offset, z_offset))
 
+    mu_neighbor_count = _resolve_neighbor_count(n_samples=n_samples, dimension=k)
+    mu_mode_index = _knn_mode_index(mu, covariance=covariance, neighbor_count=mu_neighbor_count)
+    mu_neighbor_idx = _mode_neighborhood_indices(
+        samples=mu,
+        global_covariance=covariance,
+        mode_index=mu_mode_index,
+        neighbor_count=mu_neighbor_count,
+    )
+    posterior_mode = mu[mu_neighbor_idx].mean(axis=0)
+    mode_covariance = covariance
+
+    rho_matrix = rho[:, None]
+    rho_covariance = _regularized_covariance(rho_matrix, jitter=jitter)
+    rho_neighbor_count = _resolve_neighbor_count(n_samples=rho.size, dimension=1)
+    rho_mode_index = _knn_mode_index(
+        rho_matrix,
+        covariance=rho_covariance,
+        neighbor_count=rho_neighbor_count,
+    )
+    rho_neighbor_idx = _mode_neighborhood_indices(
+        samples=rho_matrix,
+        global_covariance=rho_covariance,
+        mode_index=rho_mode_index,
+        neighbor_count=rho_neighbor_count,
+    )
+    rho_mode = float(rho[rho_neighbor_idx].mean())
+    mu_sc_mode = simple_contagion_reference(rho_mode, k)
+
+    z_mode_offset = np.linalg.solve(chol, posterior_mode - mu_sc_mode)
+    mode_non_centrality = float(np.dot(z_mode_offset, z_mode_offset))
+
     if total_distance.shape != (n_samples,) or centered_distance.shape != (n_samples,):
         raise RuntimeError("Unexpected Mahalanobis output shape.")
 
@@ -79,9 +172,14 @@ def compute_malahbois_complexity(
         total_distance=total_distance,
         centered_distance=centered_distance,
         non_centrality=non_centrality,
+        mode_non_centrality=mode_non_centrality,
         reference_kernel=mu_sc,
+        mode_reference_kernel=mu_sc_mode,
         posterior_mean=mu_bar,
+        posterior_mode=posterior_mode,
         covariance=covariance,
+        mode_covariance=mode_covariance,
+        rho_mode=rho_mode,
     )
 
 

@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union, Tuple
 import json
 import datetime
-from itertools import combinations
 from scipy.special import binom
 import sqlite3
 import networkx as nx
@@ -198,6 +197,12 @@ interventions = ['getyourflushot', 'highfiveastranger', 'somethinggood',
 # Default data dir for twitter (relative to project root)
 DATA_DIR = Path('data/twitter_contagion_data')
 
+
+def _resolve_data_dir(data_dir: Optional[Union[str, Path]] = None) -> Path:
+    if data_dir is None:
+        return DATA_DIR
+    return Path(data_dir)
+
 def parse_created_at(created_at):
     return datetime.datetime.strptime(created_at, '%a %b %d %H:%M:%S +0000 %Y')
 
@@ -226,13 +231,15 @@ bot_ID2handle = {
 }
 bot_IDs = set(bot_ID2handle.keys())
 
-def get_ID2bot_tweet():
-    with open(DATA_DIR / 'all_bot_tweets_', 'r') as f:
+def get_ID2bot_tweet(data_dir: Optional[Union[str, Path]] = None):
+    base_dir = _resolve_data_dir(data_dir)
+    with open(base_dir / 'all_bot_tweets_', 'r') as f:
         raw = json.load(f)
     return {t['id'] : t for t in raw if not 'retweeted_status' in t}
 
-def get_ID2retweets():
-    with open(DATA_DIR / 'retweets_', 'r') as f:
+def get_ID2retweets(data_dir: Optional[Union[str, Path]] = None):
+    base_dir = _resolve_data_dir(data_dir)
+    with open(base_dir / 'retweets_', 'r') as f:
         raw = json.load(f)
     ID2retweets = {}
     for tweetlist in raw:
@@ -248,11 +255,12 @@ def get_interventions():
 def get_bot_IDs():
     return bot_IDs
 
-def make_graph(include_details=True):
+def make_graph(data_dir: Optional[Union[str, Path]] = None, include_details=True):
     G = nx.Graph()
     id2handle = {}
-    
-    db_path = DATA_DIR / 'targets.db'
+
+    base_dir = _resolve_data_dir(data_dir)
+    db_path = base_dir / 'targets.db'
     if db_path.exists():
         try:
             conn = sqlite3.connect(db_path)
@@ -265,7 +273,7 @@ def make_graph(include_details=True):
     else:
         print(f"Note: targets.db not found at {db_path}. Proceeding without handles.")
 
-    edges = pd.read_csv(DATA_DIR / 'edges', low_memory=False)
+    edges = pd.read_csv(base_dir / 'edges', low_memory=False)
     for _, row in edges.iterrows():
         try:
             account_id = int(row['account_id'])
