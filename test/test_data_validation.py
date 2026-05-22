@@ -44,9 +44,10 @@ def test_oo_processed_files_exist(oo_processed_dir):
     """Verify that OO simulation data exists"""
     if not oo_processed_dir.exists():
         pytest.skip("OO processed directory not found")
-    
-    # Check for at least one simulation's files (supports both raw and backbone)
-    sim_files = list(oo_processed_dir.glob("sim_165*_exposures.parquet"))
+
+    sim_files = list(oo_processed_dir.glob("sim_165*/exposures.parquet"))
+    if not sim_files:
+        sim_files = list(oo_processed_dir.glob("sim_165*_exposures.parquet"))
     if not sim_files:
         pytest.skip("No processed OO files found for sim 165")
 
@@ -58,11 +59,11 @@ def test_twitter_mn_structure(twitter_mn_dir):
     """Verify structure of Twitter M/N matrices"""
     if not twitter_mn_dir.exists():
         pytest.skip("Twitter MN directory not found")
-    
-    m_files = list(twitter_mn_dir.glob("M_kappa_q1.0.parquet"))
+
+    m_files = list(twitter_mn_dir.glob("M_kappa_q*.parquet"))
     if not m_files:
-        pytest.skip("Twitter M_kappa_q1.0.parquet not found")
-        
+        pytest.skip("Twitter M_kappa parquet not found")
+
     M_df = pd.read_parquet(m_files[0])
     total_adoptions = M_df.drop(columns='user_id').sum().sum()
     assert 150 < total_adoptions < 400, f"Expected ~211 adoptions, got {total_adoptions}"

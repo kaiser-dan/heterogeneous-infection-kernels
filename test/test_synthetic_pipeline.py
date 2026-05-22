@@ -14,6 +14,14 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _venv_python(project_root: Path) -> str:
+    return str(project_root / ".venv" / "bin" / "python")
+
+
+def _venv_snakemake(project_root: Path) -> str:
+    return str(project_root / ".venv" / "bin" / "snakemake")
+
+
 @pytest.fixture(scope="module")
 def synthetic_module(project_root: Path):
     script_path = project_root / "workflow" / "scripts" / "simulate" / "generate_synthetic_data.py"
@@ -187,17 +195,17 @@ def test_synthetic_overrides_are_applied(tmp_path: Path, synthetic_module):
     assert pytest.approx(kernels[1]["beta"], rel=0, abs=1e-12) == 0.08
 
 
-def test_snakemake_sim_sweep_dry_run(project_root: Path):
+def test_snakemake_sim_sweep_dry_run(project_root: Path, tmp_path: Path):
     cmd = [
-        "uv",
-        "run",
-        "snakemake",
+        _venv_snakemake(project_root),
         "-n",
         "inference",
         "--configfile",
         "configs/research_sim_sweep_synthetic.yaml",
         "--profile",
         "workflow/profiles/local",
+        "--runtime-source-cache-path",
+        str(tmp_path / "runtime-source-cache"),
     ]
     proc = subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
 
@@ -214,8 +222,22 @@ def test_non_nested_ppc_script_accepts_stat_parameter(project_root: Path, tmp_pa
     summary_dir = tmp_path / "summary.parquet"
     summary_dir.mkdir(parents=True, exist_ok=True)
 
-    M = pd.DataFrame(np.array([[2, 1, 0], [0, 2, 1]], dtype=int))
-    N = pd.DataFrame(np.array([[3, 2, 1], [4, 1, 2]], dtype=int))
+    M = pd.DataFrame(
+        {
+            "user_id": ["u1", "u2"],
+            "1": [2, 0],
+            "2": [1, 2],
+            "3": [0, 1],
+        }
+    )
+    N = pd.DataFrame(
+        {
+            "user_id": ["u1", "u2"],
+            "1": [3, 4],
+            "2": [2, 1],
+            "3": [1, 2],
+        }
+    )
     M.to_parquet(summary_dir / "M.parquet", index=False)
     N.to_parquet(summary_dir / "N.parquet", index=False)
 
@@ -227,9 +249,7 @@ def test_non_nested_ppc_script_accepts_stat_parameter(project_root: Path, tmp_pa
 
     script = project_root / "workflow" / "scripts" / "analysis" / "run_ppc_non_nested.py"
     cmd = [
-        "uv",
-        "run",
-        "python",
+        _venv_python(project_root),
         str(script),
         "--summary-dir",
         str(summary_dir),
@@ -254,6 +274,105 @@ def test_non_nested_ppc_script_accepts_stat_parameter(project_root: Path, tmp_pa
     assert set(summary["stat_name"]) == {"deviance", "l1_rate"}
 
 
+def test_nested_ppc_runs_multiple_stats_with_stubbed_refits(tmp_path: Path, monkeypatch):
+    from workflow.scripts.analysis import run_ppc_nested_refit as nested_mod
+
+    summary_dir = tmp_path / "summary.parquet"
+    summary_dir.mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame(
+        {
+            "user_id": ["u1", "u2"],
+            "1": [2, 1],
+            "2": [1, 2],
+            "3": [0, 1],
+        }
+    ).to_parquet(summary_dir / "M.parquet", index=False)
+    pd.DataFrame(
+        {
+            "user_id": ["u1", "u2"],
+            "1": [3, 4],
+            "2": [2, 1],
+            "3": [1, 2],
+        }
+    ).to_parquet(summary_dir / "N.parquet", index=False)
+
+    simple_obs_path = tmp_path / "simple_observed.parquet"
+    pd.DataFrame({"rho[1]": [0.12, 0.16, 0.2, 0.18]}).to_parquet(simple_obs_path, index=False)
+
+    nonparam_obs_path = tmp_path / "nonparam_observed.parquet"
+    observed_mu = np.array(
+        [
+            [0.12, 0.22, 0.28],
+            [0.13, 0.24, 0.3],
+            [0.11, 0.21, 0.29],
+            [0.14, 0.23, 0.31],
+        ]
+    )
+    pd.DataFrame(
+        {f"mu[1,{idx + 1}]": observed_mu[:, idx] for idx in range(observed_mu.shape[1])}
+    ).to_parquet(nonparam_obs_path, index=False)
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("name: unit_test\n", encoding="utf-8")
+
+    def fake_fit_one_dataset(summary_dir, output_dir, config_path, instance_params):
+        _, _, M_rep, N_rep = nested_mod.load_mn(summary_dir)
+        kmax = M_rep.shape[1]
+        rho_center = float(np.clip(M_rep.sum() / (M_rep.sum() + N_rep.sum() + 1e-9), 0.02, 0.8))
+
+        if instance_params["kind"] == "simple":
+            return pd.DataFrame(
+                {
+                    "rho[1]": [
+                        max(0.001, rho_center - 0.03),
+                        rho_center,
+                        min(0.999, rho_center + 0.03),
+                    ]
+                }
+            )
+
+        base = nested_mod.simple_kernel(rho_center, kmax)
+        mu_rep = np.vstack(
+            [
+                np.clip(base - 0.01, 1e-6, 1.0 - 1e-6),
+                np.clip(base, 1e-6, 1.0 - 1e-6),
+                np.clip(base + 0.01, 1e-6, 1.0 - 1e-6),
+            ]
+        )
+        return pd.DataFrame({f"mu[1,{idx + 1}]": mu_rep[:, idx] for idx in range(kmax)})
+
+    monkeypatch.setattr(nested_mod, "fit_one_dataset", fake_fit_one_dataset)
+
+    details_out = tmp_path / "nested_details.parquet"
+    summary_out = tmp_path / "nested_summary.parquet"
+    stats = ["mahal_non_centrality", "mahal_mode_non_centrality"]
+    nested_mod.run_nested_ppc(
+        summary_dir=summary_dir,
+        config_path=config_path,
+        simple_observed_posterior=simple_obs_path,
+        nonparam_observed_posterior=nonparam_obs_path,
+        simple_instance_params={"kind": "simple"},
+        nonparam_instance_params={"kind": "nonparam"},
+        details_output=details_out,
+        summary_output=summary_out,
+        draws=4,
+        seed=7,
+        stats=stats,
+    )
+
+    details = pd.read_parquet(details_out)
+    summary = pd.read_parquet(summary_out)
+
+    assert set(details["stat_name"]) == set(stats)
+    assert set(summary["stat_name"]) == set(stats)
+    assert len(details) == 8
+    assert set(details["status"]) == {"ok"}
+    assert (summary["n_reps_requested"] == 4).all()
+    assert (summary["n_reps_succeeded"] == 4).all()
+    assert summary["ppp_value"].between(0.0, 1.0).all()
+
+
 def test_snakemake_ppc_both_modes_dry_run(project_root: Path, tmp_path: Path):
     base_cfg_path = project_root / "configs" / "research_sim_sweep_synthetic.yaml"
     cfg = yaml.safe_load(base_cfg_path.read_text(encoding="utf-8"))
@@ -261,20 +380,24 @@ def test_snakemake_ppc_both_modes_dry_run(project_root: Path, tmp_path: Path):
     cfg["analysis"]["ppc"]["mode"] = "both"
     cfg["analysis"]["ppc"]["draws"] = 3
     cfg["analysis"]["ppc"]["nested_draws"] = 2
+    cfg["analysis"]["ppc"]["nested_stats"] = [
+        "mahal_non_centrality",
+        "mahal_mode_non_centrality",
+    ]
 
     cfg_path = tmp_path / "ppc_enabled.yaml"
     cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
     cmd = [
-        "uv",
-        "run",
-        "snakemake",
+        _venv_snakemake(project_root),
         "-n",
         "ppc",
         "--configfile",
         str(cfg_path),
         "--profile",
         "workflow/profiles/local",
+        "--runtime-source-cache-path",
+        str(tmp_path / "runtime-source-cache"),
     ]
     proc = subprocess.run(cmd, cwd=project_root, capture_output=True, text=True)
     if proc.returncode != 0:
