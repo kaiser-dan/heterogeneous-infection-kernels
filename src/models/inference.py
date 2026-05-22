@@ -119,6 +119,16 @@ def _default_output_config():
     }
 
 
+def _derive_defaults_for_mode(mode: str) -> dict:
+    if mode == "full":
+        return {"posterior_thin": 1, "posterior_float32": False}
+    if mode == "compact":
+        return {"posterior_thin": 5, "posterior_float32": True}
+    if mode == "minimal":
+        return {"posterior_thin": 25, "posterior_float32": True}
+    raise ValueError(f"Unknown posterior_mode '{mode}'. Expected full|compact|minimal.")
+
+
 def _resolve_output_config(config):
     output_cfg = dict(_default_output_config())
     output_cfg.update(config.get("output", {}))
@@ -128,12 +138,12 @@ def _resolve_output_config(config):
         raise ValueError("output.posterior_mode must be one of: full, compact, minimal")
     output_cfg["posterior_mode"] = mode
 
-    if output_cfg["posterior_thin"] is None:
-        output_cfg["posterior_thin"] = {"full": 1, "compact": 5, "minimal": 20}[mode]
-    output_cfg["posterior_thin"] = max(1, int(output_cfg["posterior_thin"]))
+    mode_defaults = _derive_defaults_for_mode(mode)
+    for key, val in mode_defaults.items():
+        if output_cfg.get(key) is None:
+            output_cfg[key] = val
 
-    if output_cfg["posterior_float32"] is None:
-        output_cfg["posterior_float32"] = mode != "full"
+    output_cfg["posterior_thin"] = max(1, int(output_cfg["posterior_thin"]))
     output_cfg["posterior_float32"] = bool(output_cfg["posterior_float32"])
 
     output_cfg["kernel_draws_thin"] = max(1, int(output_cfg.get("kernel_draws_thin", 1)))
@@ -173,6 +183,8 @@ def _marginal_map(samples, bins):
         return np.nan
     if np.allclose(x, x[0]):
         return float(x[0])
+    # Cap user-requested bins at sqrt(N) (or 20, whichever is larger) to avoid
+    # noisy histograms when N is small.
     n_bins = min(int(bins), max(20, int(np.sqrt(x.size))))
     hist, edges = np.histogram(x, bins=n_bins)
     idx = int(np.argmax(hist))
@@ -458,6 +470,9 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
         config = yaml.safe_load(f)
     
     if instance_params:
+        # TODO: confirm dead before removing — all current callers (Snakemake, shell scripts)
+        # pass JSON via json.dumps(), so json.loads() always succeeds; yaml.safe_load fallback
+        # should never fire, but leave it until confirmed unused across all entry points.
         if isinstance(instance_params, str):
             try:
                 instance_params = json.loads(instance_params)
