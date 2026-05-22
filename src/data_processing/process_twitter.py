@@ -1119,3 +1119,124 @@ def _load_precomputed_twitter_mn(summary_df, config, summary_path, q, metric):
     M = m_indexed.loc[selected_ids, exposure_cols].to_numpy(dtype=float)
     N = n_indexed.loc[selected_ids, exposure_cols].to_numpy(dtype=float)
     return M, N, source_desc
+
+
+def load_twitter_MN(summary_path, config: dict, kmax: int) -> dict:
+    """
+    Build Twitter Stan-input M, N, and row_weights for a sweep instance.
+
+    Returns a dict with keys: M, N, row_weights, kmax_observed, source_desc.
+    Raises ValueError when no summary.parquet and no direct pre-computed M/N
+    files are available.
+    """
+    from src.data_processing.utils import cfg_get
+
+    loaded_summary_df = _load_twitter_summary_df(summary_path)
+    summary_df = loaded_summary_df.copy() if loaded_summary_df is not None else pd.DataFrame()
+    if not summary_df.empty and "user_id" in summary_df.columns:
+        summary_df["user_id"] = summary_df["user_id"].astype(str)
+
+    V_max_local = cfg_get(config, "V_max_local", 200)
+    twitter_cfg = config.get("twitter", {}) if isinstance(config.get("twitter", {}), dict) else {}
+    adopters_only = bool(
+        twitter_cfg.get("adopters_only", cfg_get(config, "twitter_adopters_only", False))
+    )
+    disable_ipw = bool(
+        twitter_cfg.get("disable_ipw", cfg_get(config, "twitter_disable_ipw", False))
+    )
+
+    if not summary_df.empty:
+        if adopters_only:
+            n_before = len(summary_df)
+            summary_df = summary_df[summary_df["adopted"]].copy()
+            if summary_df.empty:
+                raise ValueError("Twitter adopters-only mode produced 0 rows.")
+            summary_df["ipw"] = 1.0
+            print(f"Twitter mode: adopters-only ({len(summary_df)} / {n_before} rows).")
+            print("Twitter mode: IPW disabled (unit ROW_WEIGHT).")
+        else:
+            adopters = summary_df[summary_df["adopted"]]
+            non_adopters = summary_df[~summary_df["adopted"]]
+            n_adopters = len(adopters)
+            n_non_adopters = len(non_adopters)
+            if len(summary_df) > V_max_local:
+                if n_adopters <= V_max_local // 2:
+                    sample_a = adopters
+                    n_sample_a = n_adopters
+                    n_sample_n = V_max_local - n_sample_a
+                else:
+                    n_sample_a = V_max_local // 2
+                    sample_a = adopters.sample(n=n_sample_a, random_state=42)
+                    n_sample_n = V_max_local - n_sample_a
+                sample_n = non_adopters.sample(n=n_sample_n, random_state=42)
+                weight_a = n_adopters / n_sample_a if n_sample_a > 0 else 1.0
+                weight_n = n_non_adopters / n_sample_n if n_sample_n > 0 else 1.0
+                sample_a = sample_a.copy()
+                sample_a["ipw"] = weight_a
+                sample_n = sample_n.copy()
+                sample_n["ipw"] = weight_n
+                summary_df = pd.concat([sample_a, sample_n])
+            else:
+                summary_df["ipw"] = 1.0
+            if disable_ipw:
+                summary_df = summary_df.copy()
+                summary_df["ipw"] = 1.0
+                print("Twitter mode: IPW explicitly disabled (unit ROW_WEIGHT).")
+    else:
+        print("Twitter mode: no summary.parquet found; relying on direct pre-computed M/N.")
+
+    q = cfg_get(config, "q", 1.0)
+    metric = cfg_get(config, "exposure_metric", "kappa")
+    twitter_mn_mode = str(cfg_get(config, "twitter_mn_mode", "incidence")).lower()
+    print(f"Twitter M/N mode: {twitter_mn_mode}")
+
+    if not summary_df.empty and "ipw" in summary_df.columns:
+        row_weights = summary_df["ipw"].to_numpy(dtype=float)
+    elif not summary_df.empty:
+        row_weights = np.ones(len(summary_df), dtype=float)
+    else:
+        row_weights = None
+
+    use_precomputed = bool(cfg_get(config, "twitter_use_precomputed_mn", True))
+    M = N = None
+    source_desc = None
+    kmax_observed = int(kmax)
+
+    if use_precomputed:
+        precomputed = _load_precomputed_twitter_mn(
+            summary_df=summary_df,
+            config=config,
+            summary_path=summary_path,
+            q=q,
+            metric=metric,
+        )
+        if precomputed is not None:
+            M, N, source_desc = precomputed
+            if M.shape[1] != int(kmax):
+                print(
+                    f"Adjusting kmax from {kmax} to {M.shape[1]} "
+                    "to match pre-computed Twitter matrices."
+                )
+                kmax_observed = int(M.shape[1])
+            if row_weights is None:
+                row_weights = np.ones(M.shape[0], dtype=float)
+            print(f"Twitter M/N source: pre-computed ({source_desc})")
+
+    if M is None:
+        if summary_df.empty:
+            raise ValueError(
+                "Twitter inference requires summary.parquet or direct pre-computed M/N files."
+            )
+        M, N, row_weights = generate_stan_matrices_twitter(
+            summary_df, q, metric, kmax_observed, mn_mode=twitter_mn_mode
+        )
+        source_desc = "reconstructed from summary A_array"
+        print("Twitter M/N source: reconstructed from summary A_array.")
+
+    return {
+        "M": M,
+        "N": N,
+        "row_weights": row_weights,
+        "kmax_observed": kmax_observed,
+        "source_desc": source_desc,
+    }
