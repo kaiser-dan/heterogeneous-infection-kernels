@@ -485,6 +485,54 @@ def generate_oo_exposure_parquet(
     print(f"  Saved simulation results to {output_dir} (mn_mode={mn_mode})")
 
 
+def load_oo_MN(summary_path, config: dict, kmax: int) -> dict:
+    """
+    Build OO Stan-input M, N, and row_weights for a sweep instance.
+
+    Returns a dict with keys: M, N, row_weights, kmax_observed, source_desc.
+    """
+    from src.data_processing.utils import cfg_get
+
+    M, N = generate_stan_matrices_oo(summary_path, config)
+    source_desc = f"pre-computed M/N in {Path(summary_path)}"
+
+    oo_adopters_only = bool(config.get("oo", {}).get("adopters_only", False))
+    if oo_adopters_only:
+        nodes_path = Path(summary_path) / "nodes.parquet"
+        if not nodes_path.exists():
+            raise FileNotFoundError(
+                f"oo.adopters_only=True but nodes.parquet not found at {nodes_path}"
+            )
+        nodes_df = pd.read_parquet(nodes_path)
+        adopted_mask = nodes_df["adopted"].values.astype(bool)
+        n_before = M.shape[0]
+        M = M[adopted_mask]
+        N = N[adopted_mask]
+        print(f"OO adopters-only: kept {M.shape[0]} / {n_before} nodes (adopted=True).")
+
+    drop_zero_bin = bool(
+        cfg_get(config, "drop_zero_exposure_bin", config.get("oo", {}).get("drop_zero_exposure_bin", False))
+    )
+    if drop_zero_bin:
+        if M.shape[1] <= 1:
+            raise ValueError("Cannot drop zero-exposure bin: M/N have <=1 exposure column.")
+        print("OO option enabled: dropping zero-exposure bin (column 0) before fitting.")
+        M = M[:, 1:]
+        N = N[:, 1:]
+
+    kmax_observed = int(M.shape[1])
+    if kmax_observed != int(kmax):
+        print(f"Adjusting kmax from {kmax} to {kmax_observed} to match input matrices.")
+
+    return {
+        "M": M,
+        "N": N,
+        "row_weights": np.ones(M.shape[0], dtype=float),
+        "kmax_observed": kmax_observed,
+        "source_desc": source_desc,
+    }
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Process Operation Outbreak data.")
