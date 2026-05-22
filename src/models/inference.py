@@ -16,6 +16,10 @@ from src.data_processing.process_twitter import (
     _load_twitter_summary_df,
     _load_precomputed_twitter_mn,
 )
+from src.data_processing.process_twitter import load_twitter_MN
+from src.data_processing.operation_outbreak import load_oo_MN
+
+DATASET_LOADERS = {"twitter": load_twitter_MN, "oo": load_oo_MN}
 
 
 def _to_rate_by_exposure(arr, row_weights=None):
@@ -493,179 +497,14 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
     # ... rest of function
     kmax = config.get('kmax', 20)
     
-    row_weights = None
-
-    if source == 'twitter':
-        loaded_summary_df = _load_twitter_summary_df(summary_path)
-        summary_df = loaded_summary_df.copy() if loaded_summary_df is not None else pd.DataFrame()
-        if not summary_df.empty and "user_id" in summary_df.columns:
-            summary_df["user_id"] = summary_df["user_id"].astype(str)
-        V_max_local = config.get('model', {}).get('V_max_local', 200)
-        twitter_cfg = config.get('twitter', {}) if isinstance(config.get('twitter', {}), dict) else {}
-        adopters_only = bool(
-            twitter_cfg.get(
-                'adopters_only',
-                config.get('twitter_adopters_only', config.get('model', {}).get('twitter_adopters_only', False)),
-            )
-        )
-        disable_ipw = bool(
-            twitter_cfg.get(
-                'disable_ipw',
-                config.get('twitter_disable_ipw', config.get('model', {}).get('twitter_disable_ipw', False)),
-            )
-        )
-
-        if not summary_df.empty:
-            if adopters_only:
-                n_before = len(summary_df)
-                summary_df = summary_df[summary_df['adopted']].copy()
-                if summary_df.empty:
-                    raise ValueError("Twitter adopters-only mode produced 0 rows.")
-                # Case-only likelihood: unit row weights (no importance weighting).
-                summary_df['ipw'] = 1.0
-                print(f"Twitter mode: adopters-only ({len(summary_df)} / {n_before} rows).")
-                print("Twitter mode: IPW disabled (unit ROW_WEIGHT).")
-            else:
-                # Stratified Sampling with Inverse Probability Weighting (IPW)
-                adopters = summary_df[summary_df['adopted']]
-                non_adopters = summary_df[~summary_df['adopted']]
-                
-                n_adopters = len(adopters)
-                n_non_adopters = len(non_adopters)
-                
-                # Goal: preserve ALL adopters if possible, fill rest with non-adopters
-                # If too many adopters, we sample them too (and weight them)
-                if len(summary_df) > V_max_local:
-                    # Determine quotas
-                    if n_adopters <= V_max_local // 2:
-                        # Take all adopters
-                        sample_a = adopters
-                        n_sample_a = n_adopters
-                        n_sample_n = V_max_local - n_sample_a
-                    else:
-                        # Too many adopters (rare case for this data), cap at 50%
-                        n_sample_a = V_max_local // 2
-                        sample_a = adopters.sample(n=n_sample_a, random_state=42)
-                        n_sample_n = V_max_local - n_sample_a
-                        
-                    # Sample non-adopters
-                    sample_n = non_adopters.sample(n=n_sample_n, random_state=42)
-                    
-                    # Calculate Weights (Inverse Probability)
-                    # W = Total / Sampled
-                    weight_a = n_adopters / n_sample_a if n_sample_a > 0 else 1.0
-                    weight_n = n_non_adopters / n_sample_n if n_sample_n > 0 else 1.0
-                    
-                    # Assign weights
-                    sample_a = sample_a.copy()
-                    sample_a['ipw'] = weight_a
-                    
-                    sample_n = sample_n.copy()
-                    sample_n['ipw'] = weight_n
-                    
-                    # Combine
-                    summary_df = pd.concat([sample_a, sample_n])
-                else:
-                    summary_df['ipw'] = 1.0  # No subsampling
-
-                if disable_ipw:
-                    summary_df = summary_df.copy()
-                    summary_df['ipw'] = 1.0
-                    print("Twitter mode: IPW explicitly disabled (unit ROW_WEIGHT).")
-        else:
-            print("Twitter mode: no summary.parquet found; relying on direct pre-computed M/N.")
-        
-        q = config.get('q', 1.0)
-        metric = config.get('exposure_metric', 'kappa')
-        twitter_mn_mode = str(
-            config.get('twitter_mn_mode', config.get('model', {}).get('twitter_mn_mode', 'incidence'))
-        ).lower()
-        print(f"Twitter M/N mode: {twitter_mn_mode}")
-
-        if not summary_df.empty and 'ipw' in summary_df.columns:
-            row_weights = summary_df['ipw'].to_numpy(dtype=float)
-        elif not summary_df.empty:
-            row_weights = np.ones(len(summary_df), dtype=float)
-
-        use_precomputed_twitter_mn = bool(
-            config.get(
-                'twitter_use_precomputed_mn',
-                config.get('model', {}).get('twitter_use_precomputed_mn', True),
-            )
-        )
-
-        loaded_precomputed = False
-        if use_precomputed_twitter_mn:
-            precomputed = _load_precomputed_twitter_mn(
-                summary_df=summary_df,
-                config=config,
-                summary_path=summary_path,
-                q=q,
-                metric=metric,
-            )
-            if precomputed is not None:
-                M, N, mn_source = precomputed
-                loaded_precomputed = True
-                if M.shape[1] != int(kmax):
-                    print(
-                        f"Adjusting kmax from {kmax} to {M.shape[1]} "
-                        "to match pre-computed Twitter matrices."
-                    )
-                    kmax = int(M.shape[1])
-                if row_weights is None:
-                    row_weights = np.ones(M.shape[0], dtype=float)
-                print(f"Twitter M/N source: pre-computed ({mn_source})")
-
-        if not loaded_precomputed:
-            if summary_df.empty:
-                raise ValueError(
-                    "Twitter inference requires summary.parquet or direct pre-computed M/N files."
-                )
-            M, N, row_weights = generate_stan_matrices_twitter(
-                summary_df, q, metric, kmax, mn_mode=twitter_mn_mode
-            )
-            print("Twitter M/N source: reconstructed from summary A_array.")
-
-        V = M.shape[0]
-    else:
-        # OO handles discretization via dynamic graph IR directory
-        # summary_path for OO points to the 'effective_oo_...' directory
-        M, N = generate_stan_matrices_oo(summary_path, config)
-
-        oo_adopters_only = bool(
-            config.get('oo', {}).get('adopters_only', False)
-        )
-        if oo_adopters_only:
-            nodes_path = Path(summary_path) / "nodes.parquet"
-            if not nodes_path.exists():
-                raise FileNotFoundError(
-                    f"oo.adopters_only=True but nodes.parquet not found at {nodes_path}"
-                )
-            nodes_df = pd.read_parquet(nodes_path)
-            adopted_mask = nodes_df['adopted'].values.astype(bool)
-            n_before = M.shape[0]
-            M = M[adopted_mask]
-            N = N[adopted_mask]
-            print(f"OO adopters-only: kept {M.shape[0]} / {n_before} nodes (adopted=True).")
-
-        drop_zero_bin = bool(
-            config.get('model', {}).get(
-                'drop_zero_exposure_bin',
-                config.get('oo', {}).get('drop_zero_exposure_bin', False),
-            )
-        )
-        if drop_zero_bin:
-            if M.shape[1] <= 1:
-                raise ValueError("Cannot drop zero-exposure bin: M/N have <=1 exposure column.")
-            print("OO option enabled: dropping zero-exposure bin (column 0) before fitting.")
-            M = M[:, 1:]
-            N = N[:, 1:]
-        V = M.shape[0]
-        # Dynamically update kmax to match the pre-computed matrices
-        if M.shape[1] != kmax:
-            print(f"Adjusting kmax from {kmax} to {M.shape[1]} to match input matrices.")
-            kmax = M.shape[1]
-        row_weights = np.ones(V, dtype=float)
+    loader = DATASET_LOADERS.get(source)
+    if loader is None:
+        raise ValueError(f"Unknown source '{source}'. Expected one of {list(DATASET_LOADERS)}.")
+    data = loader(summary_path, config, kmax)
+    M, N = data["M"], data["N"]
+    row_weights = data["row_weights"]
+    kmax = data["kmax_observed"]
+    V = M.shape[0]
 
     # Compile and load model to check data requirements
     stan_file = config['model']['stan_file']

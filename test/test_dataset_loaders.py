@@ -86,3 +86,11 @@ def test_load_oo_MN_drop_zero_bin_removes_first_column(tmp_path):
     data = load_oo_MN(d, {"model": {"drop_zero_exposure_bin": True}}, kmax=3)
     assert data["M"].shape == (1, 2)
     assert data["kmax_observed"] == 2
+
+
+def test_inference_loaders_registry_present():
+    from src.models import inference as inf
+    assert "twitter" in inf.DATASET_LOADERS
+    assert "oo" in inf.DATASET_LOADERS
+    assert callable(inf.DATASET_LOADERS["twitter"])
+    assert callable(inf.DATASET_LOADERS["oo"])
