@@ -348,3 +348,12 @@ def convert_incidence_to_adopters_only_survival(M):
     M_adopters = np.clip(M_adopters, 0.0, None)
     N_survival = np.clip(N_survival, 0.0, None)
     return M_adopters, N_survival, adopted_mask
+
+def cfg_get(config: dict, key: str, default=None):
+    """Look up a sweep-config value, preferring top-level then config['model']."""
+    if key in config:
+        return config[key]
+    model_cfg = config.get("model")
+    if isinstance(model_cfg, dict) and key in model_cfg:
+        return model_cfg[key]
+    return default
