@@ -38,7 +38,7 @@ def _to_rate_by_exposure(arr, row_weights=None):
     raise ValueError(f"Unsupported array rank for exposure counts: {arr.ndim}")
 
 
-def _safe_logit(p):
+def _logit(p):
     p = np.asarray(p, dtype=float)
     return np.log(p / (1.0 - p))
 
@@ -78,9 +78,9 @@ def _compute_empirical_logit_locations(
     ceiling_p = _clamp(np.max(high_slice)) if high_slice.size > 0 else overall_p
 
     return {
-        "empirical": float(_safe_logit(overall_p)),
-        "empirical_floor": float(_safe_logit(floor_p)),
-        "empirical_ceiling": float(_safe_logit(ceiling_p)),
+        "empirical": float(_logit(overall_p)),
+        "empirical_floor": float(_logit(floor_p)),
+        "empirical_ceiling": float(_logit(ceiling_p)),
         "empirical_rate": overall_p,
         "empirical_floor_rate": floor_p,
         "empirical_ceiling_rate": ceiling_p,
@@ -179,8 +179,11 @@ def _marginal_map(samples, bins):
     return float(0.5 * (edges[idx] + edges[idx + 1]))
 
 
-def _extract_kernel_draws(fit, kmax):
-    try:
+def _extract_kernel_draws(fit, kmax: int):
+    """Return (kernel_draws, source) by introspecting the fit's exposed Stan variables."""
+    stan_vars = set(fit.metadata.stan_vars) if hasattr(fit, "metadata") else set()
+
+    if "mu" in stan_vars:
         mu = np.asarray(fit.stan_variable("mu"), dtype=float)
         if mu.ndim == 2:
             mu = mu[:, None, :]
@@ -189,10 +192,8 @@ def _extract_kernel_draws(fit, kmax):
             # Only return mu if it has finite values (generated quantities may be all NaN)
             if np.any(np.isfinite(mu[:, :, :km])):
                 return mu[:, :, :km], "mu"
-    except Exception:
-        pass
 
-    try:
+    if "rho" in stan_vars:
         rho = np.asarray(fit.stan_variable("rho"), dtype=float)
         if rho.ndim == 1:
             rho = rho[:, None]
@@ -200,10 +201,8 @@ def _extract_kernel_draws(fit, kmax):
             nu = np.arange(1, int(kmax) + 1, dtype=float)[None, None, :]
             kernels = 1.0 - np.power((1.0 - rho[:, :, None]), nu)
             return kernels, "rho"
-    except Exception:
-        pass
 
-    try:
+    if all(v in stan_vars for v in ("rho_l", "rho_h", "w", "k0")):
         rho_l = np.asarray(fit.stan_variable("rho_l"), dtype=float)
         rho_h = np.asarray(fit.stan_variable("rho_h"), dtype=float)
         w = np.asarray(fit.stan_variable("w"), dtype=float)
@@ -218,8 +217,6 @@ def _extract_kernel_draws(fit, kmax):
                 1.0 + np.exp(-w[:, :, None] * (nu - k0[:, :, None]))
             )
             return kernels, "sigmoid"
-    except Exception:
-        pass
 
     return None, None
 
@@ -472,23 +469,10 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
         for key in ['q', 'exposure_metric', 'source']:
             if key in instance_params: config[key] = instance_params[key]
         
-    print(f"Debug: Exposure Summary Path: {summary_path}")
-    if os.path.exists(summary_path):
-        print(f"Debug: Exists. Is Dir: {os.path.isdir(summary_path)}")
-        if os.path.isdir(summary_path):
-             print(f"Debug: Contents: {os.listdir(summary_path)}")
-    else:
-        print(f"Debug: Does NOT exist!")
-
-    # Check CmdStan
-    try:
-        from cmdstanpy import cmdstan_path, install_cmdstan
-        print(f"CmdStanPy CmdStan path: {cmdstan_path()}")
-    except Exception as e:
-        print(f"CmdStan not found or error: {e}")
-        print("Installing CmdStan...")
-        from cmdstanpy import install_cmdstan
-        install_cmdstan()
+    if not cmdstanpy.cmdstan_path():
+        raise RuntimeError(
+            "CmdStan is not installed. Run `uv run python -m cmdstanpy.install_cmdstan` once."
+        )
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -526,10 +510,6 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
     k_components = int(config['model'].get('K', 1))
     dev_scale_val = float(config['model'].get('deviation_scale', 0.1))
     
-    # Check model code to see if it expects a vector or scalar for DEVIATION_SCALE
-    # A simple but effective way is to look at the .stan file content
-    # Check model code to see if it expects a vector or scalar for DEVIATION_SCALE
-    # A simple but effective way is to look at the .stan file content
     stan_code = stan_file_path.read_text()
     
     from src.models.stan_registry import (
@@ -682,13 +662,7 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
     kernel_draws, kernel_source = _extract_kernel_draws(fit, kmax=kmax)
     if kernel_draws is not None:
         # Extract lp__ for joint MAP computation
-        try:
-            lp_values = np.asarray(fit.stan_variable("lp__"), dtype=float)
-        except Exception:
-            try:
-                lp_values = np.asarray(fit.method_variables()["lp__"], dtype=float)
-            except Exception:
-                lp_values = None
+        lp_values = np.asarray(fit.method_variables()["lp__"], dtype=float)
 
         kernel_summary_df, kernel_draws_df = _build_kernel_output_tables(
             kernel_draws=kernel_draws,
@@ -717,26 +691,23 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
     )
 
     if run_cv and M_held is not None and M_held.shape[0] > 0:
-        try:
-            cv_result = compute_held_out_loglik(M_held, N_held, fit)
-            cv_df = pd.DataFrame([{
-                "cv_score":       cv_result["cv_score"],
-                "n_held_out":     cv_result["n_held_out"],
-                "mean_log_pred":  cv_result["mean_log_pred"],
-                "cv_fold":        cv_fold,
-                "cv_folds":       cv_folds,
-            }])
-            cv_df.to_parquet(
-                output_dir / "cv_held_out_loglik.parquet",
-                index=False,
-                compression=parquet_compression,
-            )
-            print(
-                f"CV fold {cv_fold}: cv_score={cv_result['cv_score']:.4f}  "
-                f"mean_log_pred={cv_result['mean_log_pred']:.4f}"
-            )
-        except (OSError, KeyError, ValueError) as e:
-            print(f"Warning: CV evaluation failed ({e}). Skipping cv_held_out_loglik.parquet.")
+        cv_result = compute_held_out_loglik(M_held, N_held, fit)
+        cv_df = pd.DataFrame([{
+            "cv_score":       cv_result["cv_score"],
+            "n_held_out":     cv_result["n_held_out"],
+            "mean_log_pred":  cv_result["mean_log_pred"],
+            "cv_fold":        cv_fold,
+            "cv_folds":       cv_folds,
+        }])
+        cv_df.to_parquet(
+            output_dir / "cv_held_out_loglik.parquet",
+            index=False,
+            compression=parquet_compression,
+        )
+        print(
+            f"CV fold {cv_fold}: cv_score={cv_result['cv_score']:.4f}  "
+            f"mean_log_pred={cv_result['mean_log_pred']:.4f}"
+        )
 
 
     print(f"Results saved to {output_dir}")
