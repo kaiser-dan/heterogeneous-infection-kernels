@@ -25,13 +25,17 @@ rule process_oo_sim:
         n_matrix = PROCESSED_BASE / "oo" / "sim_{sim_id}_backbone_{method}" / "N.parquet"
     params:
         kmax = lambda wildcards: config.get('oo', {}).get('kmax', 20),
-        threshold = lambda wildcards: config.get('oo', {}).get('backbone_threshold', 0.3)
+        threshold = lambda wildcards: config.get('oo', {}).get('backbone_threshold', 0.3),
+        freq = lambda wildcards: config.get('oo', {}).get('time_bin_freq', '30min'),
+        mn_mode = lambda wildcards: config.get('oo', {}).get('mn_mode', 'survival')
     shell:
         "uv run python {input.script} "
         "--histories {input.histories} "
         "--sim-id {wildcards.sim_id} "
         "--output data/processed/oo/sim_{wildcards.sim_id}_backbone_{wildcards.method} "
+        "--freq {params.freq} "
         "--kmax {params.kmax} "
+        "--mn-mode {params.mn_mode} "
         "--backbone-method {wildcards.method} "
         "--backbone-threshold {params.threshold}"
 
@@ -46,6 +50,30 @@ rule process_twitter_dataset:
         data_dir = RAW_TWITTER,
         script = "src/data_processing/process_twitter.py"
     output:
-        directory(PROCESSED_BASE / "twitter")
+        directory(Path(TWITTER_PROCESSED_DIR))
+    params:
+        q_sc = lambda wildcards: config.get('twitter', {}).get(
+            'q_sc', data_prep_data.get('twitter', {}).get('q_sc', 0.192)
+        ),
+        q_cc = lambda wildcards: config.get('twitter', {}).get(
+            'q_cc', data_prep_data.get('twitter', {}).get('q_cc', 0.180)
+        ),
+        mn_mode = lambda wildcards: config.get('twitter', {}).get(
+            'mn_mode', data_prep_data.get('twitter', {}).get('mn_mode', 'incidence')
+        ),
+        full_only_flag = lambda wildcards: (
+            "--full-only" if bool(
+                config.get('twitter', {}).get(
+                    'full_only', data_prep_data.get('twitter', {}).get('full_only', False)
+                )
+            ) else ""
+        )
     shell:
-        "uv run python -m src.data_processing.process_twitter --data-dir {input.data_dir} --output-dir {output} --no-bot-retweets"
+        "uv run python -m src.data_processing.process_twitter "
+        "--data-dir {input.data_dir} "
+        "--output-dir {output} "
+        "--q-sc {params.q_sc} "
+        "--q-cc {params.q_cc} "
+        "--mn-mode {params.mn_mode} "
+        "{params.full_only_flag} "
+        "--no-bot-retweets"

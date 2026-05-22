@@ -7,27 +7,42 @@ wildcard_constraints:
 
 rule generate_twitter_summary:
     input:
-        "data/processed/twitter"
+        processed = lambda wildcards: TWITTER_PROCESSED_DIR,
+        config = lambda wildcards: ACTIVE_CONFIGFILE
     output:
-        "data/summaries/twitter/default_data_prep.parquet"
+        directory("data/summaries/twitter/{data_name}.parquet")
     run:
+        import shutil
         import pandas as pd
         from pathlib import Path
-        import os
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(output[0]), exist_ok=True)
-        # Combine all A-matrices for Twitter
-        p = Path(input[0])
+
+        p = Path(input.processed)
+        out_dir = Path(output[0])
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Combine A/B matrices for Twitter
         combined_rows = []
+        sources = []
+
+        # Primary mode: per-intervention directories.
         for intervention_dir in p.glob("*"):
             if not intervention_dir.is_dir() or intervention_dir.name in ["full", "summaries"]:
                 continue
-            
+
             am_path = intervention_dir / "A_matrix.parquet"
             bv_path = intervention_dir / "B_vector.parquet"
-            if not am_path.exists() or not bv_path.exists():
-                continue
-                
+            if am_path.exists() and bv_path.exists():
+                sources.append((intervention_dir.name, am_path, bv_path))
+
+        # Fallback mode: full-only preprocessing output.
+        if not sources:
+            full_dir = p / "full"
+            am_path = full_dir / "A_matrix.parquet"
+            bv_path = full_dir / "B_vector.parquet"
+            if am_path.exists() and bv_path.exists():
+                sources.append(("full", am_path, bv_path))
+
+        for _, am_path, bv_path in sources:
             am = pd.read_parquet(am_path)
             bv = pd.read_parquet(bv_path)
             
@@ -52,9 +67,40 @@ rule generate_twitter_summary:
         
         if not combined_rows:
             raise ValueError(f"No exposure data found in {p}")
-            
+
         summary_df = pd.DataFrame(combined_rows)
-        summary_df.to_parquet(output[0])
+        summary_df.to_parquet(out_dir / "summary.parquet", index=False)
+
+        q = float(config.get("q", 1.0))
+        metric = str(config.get("exposure_metric", "kappa"))
+        full_dir = p / "full"
+
+        def find_metric_matrix(kind: str) -> Path:
+            exact = full_dir / f"{kind}_{metric}_q{q}.parquet"
+            if exact.exists():
+                return exact
+
+            matches = []
+            prefix = f"{kind}_{metric}_q"
+            for candidate in full_dir.glob(f"{kind}_{metric}_q*.parquet"):
+                stem = candidate.stem
+                if not stem.startswith(prefix):
+                    continue
+                try:
+                    found_q = float(stem[len(prefix):])
+                except ValueError:
+                    continue
+                if abs(found_q - q) <= 1e-9:
+                    matches.append(candidate)
+
+            if not matches:
+                raise FileNotFoundError(
+                    f"Could not find {kind}_{metric} matrix for q={q} in {full_dir}"
+                )
+            return sorted(matches)[0]
+
+        shutil.copy(find_metric_matrix("M"), out_dir / "M.parquet")
+        shutil.copy(find_metric_matrix("N"), out_dir / "N.parquet")
 
 rule generate_oo_summary:
     input:
@@ -85,7 +131,7 @@ rule generate_synthetic_processed:
     input:
         script = "workflow/scripts/simulate/generate_synthetic_data.py"
     params:
-        config = lambda wildcards: f"configs/{cfg_name}.yaml"
+        config = lambda wildcards: ACTIVE_CONFIGFILE
     output:
         M = "data/processed/synthetic/{data_name}/M.parquet",
         N = "data/processed/synthetic/{data_name}/N.parquet",
@@ -155,10 +201,11 @@ def parse_instance_params(instance_id):
 rule run_inference:
     input:
         summary = "data/summaries/{data_source}/{data_name}.parquet",
-        config = "configs/{sweep_name}.yaml"
+        config = lambda wildcards: ACTIVE_CONFIGFILE
     output:
         samples = "results/{sweep_name}/{data_source}/{data_name}/{instance_id}/posterior_samples.parquet",
         summary = "results/{sweep_name}/{data_source}/{data_name}/{instance_id}/inference_summary.parquet"
+    threads: 4
     run:
         import json
         
@@ -210,7 +257,7 @@ rule run_ppc_nested_refit:
     input:
         script = "workflow/scripts/analysis/run_ppc_nested_refit.py",
         summary = "data/summaries/{data_source}/{data_name}.parquet",
-        config = "configs/{sweep_name}.yaml",
+        config = lambda wildcards: ACTIVE_CONFIGFILE,
         simple_obs_samples = lambda wildcards: (
             f"results/{wildcards.sweep_name}/{wildcards.data_source}/{wildcards.data_name}/"
             f"{PPC_PAIR_MAP[wildcards.pair_id]['simple_instance_id']}/posterior_samples.parquet"
@@ -231,10 +278,18 @@ rule run_ppc_nested_refit:
         nonparam_params = parse_instance_params(pair["nonparam_instance_id"])
         simple_params_json = json.dumps(simple_params, separators=(",", ":"))
         nonparam_params_json = json.dumps(nonparam_params, separators=(",", ":"))
+        simple_params_json_escaped = simple_params_json.replace("{", "{{").replace("}", "}}")
+        nonparam_params_json_escaped = nonparam_params_json.replace("{", "{{").replace("}", "}}")
 
         draws = int(PPC_CONFIG.get("nested_draws", PPC_CONFIG.get("draws", 20)))
         seed = int(PPC_CONFIG.get("seed", 123))
-        nested_stat = str(PPC_CONFIG.get("nested_statistic", "mahal_non_centrality"))
+        nested_stats = PPC_CONFIG.get("nested_stats", PPC_CONFIG.get("nested_statistic", "mahal_non_centrality"))
+        if isinstance(nested_stats, list):
+            nested_stats_arg = ",".join(str(s) for s in nested_stats)
+        elif isinstance(nested_stats, str):
+            nested_stats_arg = nested_stats
+        else:
+            raise ValueError("analysis.ppc.nested_stats must be a list or string.")
 
         cmd = (
             f"uv run python {input.script} "
@@ -242,12 +297,12 @@ rule run_ppc_nested_refit:
             f"--config {input.config} "
             f"--simple-observed-posterior {input.simple_obs_samples} "
             f"--nonparam-observed-posterior {input.nonparam_obs_samples} "
-            f"--simple-instance-params {shlex.quote(simple_params_json)} "
-            f"--nonparam-instance-params {shlex.quote(nonparam_params_json)} "
+            f"--simple-instance-params {shlex.quote(simple_params_json_escaped)} "
+            f"--nonparam-instance-params {shlex.quote(nonparam_params_json_escaped)} "
             f"--details-output {output.details} "
             f"--summary-output {output.summary} "
             f"--draws {draws} "
             f"--seed {seed} "
-            f"--statistic {shlex.quote(nested_stat)}"
+            f"--stats {shlex.quote(nested_stats_arg)}"
         )
         shell(cmd)
