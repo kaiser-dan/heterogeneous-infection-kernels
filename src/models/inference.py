@@ -19,7 +19,7 @@ from src.data_processing.process_twitter import (
 from src.data_processing.process_twitter import load_twitter_MN
 from src.data_processing.operation_outbreak import load_oo_MN
 
-DATASET_LOADERS = {"twitter": load_twitter_MN, "oo": load_oo_MN}
+DATASET_LOADERS = {"twitter": load_twitter_MN, "oo": load_oo_MN, "synthetic": load_oo_MN}
 
 
 def _to_rate_by_exposure(arr, row_weights=None):

@@ -214,7 +214,7 @@ rule run_inference:
         # Escape curly braces for Snakemake's shell() function
         params_json_escaped = params_json.replace('{', '{{').replace('}', '}}')
         
-        cmd = f"uv run python src/models/inference.py --config {input.config} --exposure-summary {input.summary} --output-dir results/{wildcards.sweep_name}/{wildcards.data_source}/{wildcards.data_name}/{wildcards.instance_id} --instance-params '{params_json_escaped}'"
+        cmd = f"uv run python -m src.models.inference --config {input.config} --exposure-summary {input.summary} --output-dir results/{wildcards.sweep_name}/{wildcards.data_source}/{wildcards.data_name}/{wildcards.instance_id} --instance-params '{params_json_escaped}'"
         shell(cmd)
 
 
