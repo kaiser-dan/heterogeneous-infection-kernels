@@ -1,0 +1,68 @@
+# Synthetic model selection -- K_true=1, v3
+# Re-inference on EXISTING synth_model_sel_k1_20260325 dataset.
+# All K_fit={1,2,3} with 4 chains / 1000 warmup / 1000 samples.
+# v1 used 1 chain / 500 / 500 -- posteriors were noisy and rho_h overshot.
+name: "synth_model_sel_k1_v3_20260327"
+source: "synthetic"
+
+synthetic:
+  dataset_name: "synth_model_sel_k1_20260325"
+  seed: 101
+  kmax: 20
+  graph:
+    type: "sbm"
+    params:
+      n: 512
+      avg_degree: 10
+      epsilon: 0.80
+  contagion:
+    gamma: 0.0
+    tmax: 120
+    dt: 1
+    initial_infected: 0.10
+    assignment:
+      mode: "iid"
+      probs: [1.0]
+    kernels:
+      - id: "k1"
+        type: "sigmoid"
+        rho_l: 0.005
+        rho_h: 0.25
+        w: 0.8
+        k0: 5.0
+
+model:
+  stan_file: "src/models/model_complex_contagion.stan"
+  K: 1
+  logit_p_location: "empirical"
+  logit_p_scale: 2.0
+  logit_rho_location: "empirical"
+  logit_rho_scale: 2.0
+  logit_rho_l_location: "empirical_floor"
+  logit_rho_l_scale: 2.0
+  logit_rho_h_location: "empirical_ceiling"
+  logit_rho_h_scale: 2.0
+  w_rate: 2.0
+  k0_location: 10.0
+  k0_scale: 3.0
+  empirical_prior_floor: 1.0e-6
+  empirical_prior_cap: 0.999999
+  empirical_floor_levels: 3
+  empirical_ceiling_levels: 4
+
+  sampling:
+    chains: 4
+    iter_warmup: 1000
+    iter_sampling: 1000
+    adapt_delta: 0.90
+    max_treedepth: 12
+
+output:
+  posterior_mode: "compact"
+
+sweep:
+  K: [1, 2, 3]
+  stan_file:
+    - "src/models/model_simple_contagion.stan"
+    - "src/models/model_complex_contagion.stan"
+    - "src/models/non_parametric_monotonic_empirical_bayes.stan"

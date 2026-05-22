@@ -40,7 +40,7 @@ synthetic:
 
 # Cartesian sweep under `synthetic.*` keys.
 sim_sweep:
-  graph.params.epsilon: [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]
+  graph.params.epsilon: [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95,0.99]
   contagion.assignment.omega: [0.0, 0.055556, 0.111111, 0.166667, 0.222222, 0.277778, 0.333333, 0.388889, 0.444444, 0.5]
 
 # Keep inference sweep minimal: simple + nonparametric fit per synthetic dataset.
@@ -59,6 +59,15 @@ sweep:
     "src/models/non_parametric_monotonic_empirical_bayes.stan"
   ]
   K: [1]
+
+output:
+  posterior_mode: "compact"      # full | compact | minimal
+  posterior_thin: 10
+  posterior_float32: true
+  parquet_compression: "zstd"
+  kernel_ci_level: 0.90
+  kernel_map_bins: 128
+  write_kernel_draws: false      # summary table is sufficient for most plots
 
 analysis:
   ppc:

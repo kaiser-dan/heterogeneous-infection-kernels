@@ -1,0 +1,39 @@
+# Twitter NP EB K=1 rerun with log_lik fix - March 25 2026
+name: "twitter_np_rerun_20260325"
+
+source: "twitter"
+data_config: "configs/default_data_prep_survival.yaml"
+twitter_mn_mode: "survival"
+twitter_adopters_only: false
+twitter_disable_ipw: false
+wandb_enabled: false
+
+q: 0.192
+exposure_metric: "k"
+kmax: 20
+
+model:
+  stan_file: "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  K: 1
+  logit_p_location: "empirical"
+  logit_p_scale: 2.0
+  empirical_prior_floor: 1.0e-6
+  empirical_prior_cap: 0.999999
+  empirical_floor_levels: 3
+  empirical_ceiling_levels: 4
+  V_max_local: 1000
+
+  sampling:
+    chains: 1
+    iter_warmup: 1000
+    iter_sampling: 500
+    adapt_delta: 0.9
+    max_treedepth: 12
+
+output:
+  posterior_mode: "compact"
+
+sweep:
+  K: [1]
+  stan_file:
+    - "src/models/non_parametric_monotonic_empirical_bayes.stan"

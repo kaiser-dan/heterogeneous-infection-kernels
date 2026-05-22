@@ -1,0 +1,66 @@
+name: "ppc_sigmoid_dense_full_20260325"
+source: "synthetic"
+wandb_enabled: false
+
+synthetic:
+  dataset_name: "sigmoid_recovery_dense_20260325"
+  seed: 91
+  kmax: 24
+  graph:
+    type: "sbm"
+    params:
+      n: 640
+      avg_degree: 16
+      epsilon: 0.9
+  contagion:
+    gamma: 0.0
+    tmax: 180
+    dt: 1
+    initial_infected: 0.1
+    assignment:
+      mode: "iid"
+      probs: [1.0]
+    kernels:
+      - id: "k1"
+        type: "sigmoid"
+        rho_l: 0.02
+        rho_h: 0.35
+        w: 1.4
+        k0: 5.0
+
+model:
+  stan_file: "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  K: 1
+  concentration: 1.0
+  deviation_scale: 1.0
+  logit_p_location: "empirical"
+  logit_p_scale: 2.0
+  V_max_local: 10000
+  sampling:
+    chains: 2
+    iter_warmup: 750
+    iter_sampling: 750
+    adapt_delta: 0.95
+    max_treedepth: 12
+
+sweep:
+  K: [1]
+  stan_file:
+    - "src/models/model_simple_contagion.stan"
+    - "src/models/non_parametric_monotonic_empirical_bayes.stan"
+
+analysis:
+  ppc:
+    enabled: true
+    mode: "both"
+    draws: 250
+    nested_draws: 25
+    seed: 123
+    non_nested_stats: ["deviance", "neg_loglik", "l1_rate"]
+    nested_stats: ["mahal_non_centrality", "mahal_mode_non_centrality"]
+    simple_match:
+      stan_file: "model_simple_contagion.stan"
+      K: 1
+    nonparam_match:
+      stan_file: "non_parametric_monotonic_empirical_bayes.stan"
+      K: 1

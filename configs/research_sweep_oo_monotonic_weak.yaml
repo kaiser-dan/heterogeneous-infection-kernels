@@ -1,0 +1,33 @@
+# ============================================================================
+# OO Sim 165 Sweep - Monotonic NP (Weak Prior)
+# ============================================================================
+name: "research_sweep_oo_monotonic_weak"
+
+source: "oo"
+oo:
+  sim_id: 165
+  backbone_method: "disparity"
+  backbone_threshold: 0.3
+  kmax: 20
+  drop_zero_exposure_bin: true
+
+model:
+  stan_file: "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  K: 1
+  concentration: 1.0
+  deviation_scale: 1.0
+  logit_p_location: 0.0
+  logit_p_scale: 5.0
+  empirical_prior_floor: 1.0e-6
+  empirical_prior_cap: 0.999999
+
+  sampling:
+    chains: 1
+    iter_warmup: 500
+    iter_sampling: 500
+    adapt_delta: 0.95
+
+sweep:
+  K: [1, 2]
+  stan_file:
+    - "src/models/non_parametric_monotonic_empirical_bayes.stan"

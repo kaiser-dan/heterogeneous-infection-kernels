@@ -1,0 +1,74 @@
+# Synthetic model selection validation -- K_true=2, v2 (rerun K_fit=2,3 with 4 chains)
+# Ground truth: two CC sigmoid kernels, clearly separated
+# This reruns only K_fit={2,3} with 4 chains/1000/1000 to fix BIC and WAIC noise.
+# K_fit=1 results from synth_model_sel_k2_20260325 are still valid (well-converged).
+name: "synth_model_sel_k2_v2_20260325"
+source: "synthetic"
+
+synthetic:
+  dataset_name: "synth_model_sel_k2_v2_20260325"
+  seed: 202
+  kmax: 20
+  graph:
+    type: "sbm"
+    params:
+      n: 512
+      avg_degree: 10
+      epsilon: 0.80
+  contagion:
+    gamma: 0.0
+    tmax: 120
+    dt: 1
+    initial_infected: 0.10
+    assignment:
+      mode: "iid"
+      probs: [0.6, 0.4]
+    kernels:
+      - id: "k1"
+        type: "sigmoid"
+        rho_l: 0.001
+        rho_h: 0.04
+        w: 0.5
+        k0: 4.0
+      - id: "k2"
+        type: "sigmoid"
+        rho_l: 0.015
+        rho_h: 0.45
+        w: 1.2
+        k0: 6.0
+
+model:
+  stan_file: "src/models/model_complex_contagion.stan"
+  K: 2
+  logit_p_location: "empirical"
+  logit_p_scale: 2.0
+  logit_rho_location: "empirical"
+  logit_rho_scale: 2.0
+  logit_rho_l_location: "empirical_floor"
+  logit_rho_l_scale: 2.0
+  logit_rho_h_location: "empirical_ceiling"
+  logit_rho_h_scale: 2.0
+  w_rate: 2.0
+  k0_location: 10.0
+  k0_scale: 3.0
+  empirical_prior_floor: 1.0e-6
+  empirical_prior_cap: 0.999999
+  empirical_floor_levels: 3
+  empirical_ceiling_levels: 4
+
+  sampling:
+    chains: 4
+    iter_warmup: 1000
+    iter_sampling: 1000
+    adapt_delta: 0.90
+    max_treedepth: 12
+
+output:
+  posterior_mode: "compact"
+
+sweep:
+  K: [2, 3]
+  stan_file:
+    - "src/models/model_simple_contagion.stan"
+    - "src/models/model_complex_contagion.stan"
+    - "src/models/non_parametric_monotonic_empirical_bayes.stan"

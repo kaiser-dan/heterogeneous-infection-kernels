@@ -1,0 +1,15 @@
+name: "base_data_prep_survival"
+source: "twitter"
+processed_dir: "data/processed/twitter_survival"
+twitter:
+  q_sc: 0.192
+  q_cc: 0.180
+  mn_mode: "survival"
+  full_only: true
+backboning_method: "threshold"
+backboning_params:
+  threshold: 0.0
+recency:
+  enabled: false
+  window_hours: 24
+kmax: 20

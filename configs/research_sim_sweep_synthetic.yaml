@@ -77,7 +77,7 @@ analysis:
     nested_draws: 5
     seed: 123
     non_nested_stats: ["deviance", "neg_loglik", "l1_rate"]
-    nested_statistic: "mahal_non_centrality"
+    nested_stats: ["mahal_non_centrality"]
     simple_match:
       stan_file: "model_simple_contagion.stan"
       K: 1

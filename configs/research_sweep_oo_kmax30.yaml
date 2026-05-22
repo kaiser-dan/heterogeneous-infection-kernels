@@ -1,0 +1,27 @@
+# ============================================================================
+# Research Sweep - Operation Outbreak (Sim 165) - kmax=30 boundary test
+# Tests whether super-linearity at nu=20 is a kmax boundary artifact
+# ============================================================================
+name: "research_sweep_oo_kmax30"
+
+source: "oo"
+oo:
+  sim_id: 165
+  backbone_method: "disparity"
+  backbone_threshold: 0.3
+  kmax: 30
+
+model:
+  stan_file: "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  K: 1
+  concentration: 1.0
+  deviation_scale: 1.0
+  logit_p_location: "empirical"
+  logit_p_scale: 2.0
+  V_max_local: 1000
+
+sweep:
+  K: [1]
+  stan_file: [
+    "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  ]

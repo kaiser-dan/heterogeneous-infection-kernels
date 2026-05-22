@@ -1,0 +1,57 @@
+# ============================================================================
+# Synthetic Validation Sweep for OO Mixture Models
+# ============================================================================
+name: "research_sweep_synthetic_oo_models"
+source: "synthetic"
+wandb_enabled: false
+
+synthetic:
+  dataset_name: "sim_validation_oo_models_v1"
+  seed: 41
+  kmax: 20
+  graph:
+    type: "sbm"
+    params:
+      n: 180
+      avg_degree: 14
+      epsilon: 0.90
+  contagion:
+    gamma: 0.1
+    tmax: 450
+    dt: 1
+    initial_infected: 0.1
+    assignment:
+      mode: "block_flip"
+      omega: 0.1
+    kernels:
+      - id: "k1"
+        type: "simple"
+        beta: 0.01
+      - id: "k2"
+        type: "simple"
+        beta: 0.04
+
+model:
+  stan_file: "mixture_non_parametric"
+  K: 1
+  concentration: 1.0
+  deviation_scale: 1.0
+  sigma_scale: 0.5
+  pi_concentration: 4.0
+  logit_mu_location: "empirical"
+  logit_mu_scale: 0.75
+  drop_zero_exposure_bin: true
+  V_max_local: 10000
+  sampling:
+    chains: 2
+    iter_warmup: 600
+    iter_sampling: 600
+    adapt_delta: 0.95
+
+sweep:
+  K: [1, 2]
+  stan_file: [
+    "mixture_simple_contagion",
+    "mixture_complex_contagion",
+    "mixture_non_parametric"
+  ]

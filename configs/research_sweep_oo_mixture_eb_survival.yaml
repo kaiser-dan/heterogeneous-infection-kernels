@@ -1,0 +1,54 @@
+# ============================================================================
+# OO Sim 165 Sweep - Mixture Models (Empirical Bayes Priors, survival M/N)
+# ============================================================================
+name: "research_sweep_oo_mixture_eb_survival"
+
+source: "oo"
+oo:
+  sim_id: 165
+  backbone_method: "disparity"
+  backbone_threshold: 0.3
+  kmax: 20
+  drop_zero_exposure_bin: true
+  mn_mode: "survival"
+  data_name: "sim_165_backbone_disparity_survival_exposures"
+
+model:
+  stan_file: "src/models/mixture_non_parametric.stan"
+  K: 1
+
+  sigma_scale: 1.0
+  pi_concentration: 1.0
+
+  empirical_floor_levels: 3
+  empirical_ceiling_levels: 4
+  empirical_prior_floor: 1.0e-6
+  empirical_prior_cap: 0.999999
+
+  logit_rho_location: "empirical_floor"
+  logit_rho_scale: 2.0
+
+  logit_rho_l_location: "empirical_floor"
+  logit_rho_l_scale: 2.0
+  logit_rho_h_location: "empirical_ceiling"
+  logit_rho_h_scale: 2.0
+  w_rate: 0.5
+  k0_location: 10.0
+  k0_scale: 5.0
+
+  logit_mu_location: "empirical"
+  logit_mu_scale: 2.0
+
+  sampling:
+    chains: 1
+    iter_warmup: 500
+    iter_sampling: 500
+    adapt_delta: 0.95
+
+sweep:
+  K: [1, 2]
+  stan_file: [
+    "src/models/mixture_simple_contagion.stan",
+    "src/models/mixture_complex_contagion.stan",
+    "src/models/mixture_non_parametric.stan"
+  ]

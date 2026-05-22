@@ -1,0 +1,58 @@
+# Synthetic verification sweep -- March 25 2026
+# Small network, known NP kernel, all 3 models at K=1
+# Goal: confirm NP EB recovers true kernel from full population M/N
+# Expected wall time: ~15 min on VACC
+name: "synth_verify_20260325"
+source: "synthetic"
+wandb_enabled: false
+
+synthetic:
+  dataset_name: "synth_verify_20260325"
+  seed: 42
+  kmax: 30
+  graph:
+    type: "sbm"
+    params:
+      n: 512
+      avg_degree: 10
+      epsilon: 0.80
+  contagion:
+    gamma: 0.0
+    tmax: 120
+    dt: 1
+    initial_infected: 0.10
+    assignment:
+      mode: "iid"
+      probs: [1.0]
+    kernels:
+      - id: "k1"
+        type: "nonparametric"
+        values: [0.004, 0.008, 0.018, 0.04, 0.08, 0.14, 0.20, 0.26, 0.30, 0.32,
+                 0.33, 0.34, 0.35, 0.355, 0.36, 0.363, 0.366, 0.368, 0.37, 0.372,
+                 0.373, 0.374, 0.375, 0.376, 0.377, 0.378, 0.379, 0.380, 0.381, 0.382]
+
+model:
+  stan_file: "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  K: 1
+  logit_p_location: "empirical"
+  logit_p_scale: 2.0
+  empirical_prior_floor: 1.0e-6
+  empirical_prior_cap: 0.999999
+  empirical_floor_levels: 3
+  empirical_ceiling_levels: 4
+  sampling:
+    chains: 1
+    iter_warmup: 200
+    iter_sampling: 200
+    adapt_delta: 0.9
+    max_treedepth: 12
+
+output:
+  posterior_mode: "compact"
+
+sweep:
+  K: [1]
+  stan_file:
+    - "src/models/model_simple_contagion.stan"
+    - "src/models/model_complex_contagion.stan"
+    - "src/models/non_parametric_monotonic_empirical_bayes.stan"

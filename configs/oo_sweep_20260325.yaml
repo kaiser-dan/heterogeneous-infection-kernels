@@ -1,0 +1,47 @@
+# OO Sim 165 - kmax30 full model sweep - March 25 2026
+# SC, CC, NP EB at K=1
+name: "oo_sweep_20260325"
+
+source: "oo"
+oo:
+  data_name: "sim_165_backbone_disparity_kmax30"
+  sim_id: 165
+  backbone_method: "disparity"
+  backbone_threshold: 0.3
+  kmax: 30
+
+model:
+  stan_file: "src/models/non_parametric_monotonic_empirical_bayes.stan"
+  K: 1
+  logit_p_location: "empirical"
+  logit_p_scale: 2.0
+  logit_rho_location: "empirical_floor"
+  logit_rho_scale: 2.0
+  logit_rho_l_location: "empirical_floor"
+  logit_rho_l_scale: 2.0
+  logit_rho_h_location: "empirical_ceiling"
+  logit_rho_h_scale: 2.0
+  w_rate: 2.0
+  k0_location: 10.0
+  k0_scale: 3.0
+  empirical_prior_floor: 1.0e-6
+  empirical_prior_cap: 0.999999
+  empirical_floor_levels: 3
+  empirical_ceiling_levels: 4
+
+  sampling:
+    chains: 1
+    iter_warmup: 500
+    iter_sampling: 500
+    adapt_delta: 0.95
+    max_treedepth: 12
+
+output:
+  posterior_mode: "compact"
+
+sweep:
+  K: [1]
+  stan_file:
+    - "src/models/non_parametric_monotonic_empirical_bayes.stan"
+    - "src/models/model_simple_contagion.stan"
+    - "src/models/model_complex_contagion.stan"
