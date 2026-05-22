@@ -515,3 +515,33 @@ if __name__ == "__main__":
         backbone_threshold=args.backbone_threshold,
         mn_mode=args.mn_mode,
     )
+
+
+def generate_stan_matrices_oo(ir_path, config):
+    """
+    Discretize OO dynamic graph into Stan matrices.
+    ir_path is a directory containing edges.parquet and infections.parquet
+    """
+    ir_path = Path(ir_path)
+
+    # Check for pre-computed M/N matrices
+    m_path = ir_path / "M.parquet"
+    n_path = ir_path / "N.parquet"
+
+    if m_path.exists() and n_path.exists():
+        print(f"Loading pre-computed OO matrices from {ir_path}")
+        M_df = pd.read_parquet(m_path)
+        N_df = pd.read_parquet(n_path)
+        # Convert to numpy and ensure float type for Stan real arrays
+        return M_df.values.astype(float), N_df.values.astype(float)
+
+    print(f"Warning: Pre-computed OO matrices not found in {ir_path}. Falling back to dynamic discretization (not yet fully implemented).")
+    edges = pd.read_parquet(ir_path / "edges.parquet")
+    infections = pd.read_parquet(ir_path / "infections.parquet")
+
+    kmax = config.get('kmax', 20)
+    # Mock return for fallback
+    V_mock = len(infections['user_id'].unique()) if 'user_id' in infections.columns else 100
+    M = np.zeros((V_mock, kmax), dtype=float)
+    N = np.zeros((V_mock, kmax), dtype=float)
+    return M, N

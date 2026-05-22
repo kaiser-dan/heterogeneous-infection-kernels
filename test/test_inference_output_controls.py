@@ -6,11 +6,14 @@ data-processing row encoding for the same exposure distributions.
 import numpy as np
 import pandas as pd
 
-from src.data_processing.process_twitter import _mn_rows_from_prob_dist
-from src.data_processing.utils import compute_binomial_distribution, compute_exposure_probabilities_fast
-from src.models.inference import (
-    convert_incidence_to_adopters_only_survival,
+from src.data_processing.process_twitter import (
+    _mn_rows_from_prob_dist,
     generate_stan_matrices_twitter,
+)
+from src.data_processing.utils import (
+    compute_binomial_distribution,
+    compute_exposure_probabilities_fast,
+    convert_incidence_to_adopters_only_survival,
 )
 
 

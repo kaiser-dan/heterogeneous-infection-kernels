@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from src.models.inference import generate_stan_matrices_twitter
+from src.data_processing.process_twitter import generate_stan_matrices_twitter
 
 
 def test_survival_overflow_is_right_censored_for_adopters_k_metric():

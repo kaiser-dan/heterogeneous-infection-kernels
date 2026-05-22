@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from src.models.inference import _load_precomputed_twitter_mn
+from src.data_processing.process_twitter import _load_precomputed_twitter_mn
 
 
 def _write_mn_pair(full_dir: Path, metric: str, q: float, users, m_rows, n_rows):

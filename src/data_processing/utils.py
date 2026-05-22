@@ -320,3 +320,31 @@ def compute_exposure_probabilities_fast(A, q):
 
 def compute_binomial_distribution(N, q):
     return {k: binom(N, k) * (q**k) * ((1.0 - q)**(N - k)) for k in range(N + 1)}
+
+
+def convert_incidence_to_adopters_only_survival(M):
+    """
+    Convert an incidence-style event matrix into an adopters-only survival target.
+
+    Rows without any event mass are dropped. For retained rows:
+    - M is unchanged
+    - N[nu] is the probability mass of adopting strictly after nu
+
+    For deterministic one-hot incidence rows, this yields the usual
+    "add 1 to every pre-adoption bin" construction.
+    """
+    M = np.asarray(M, dtype=float)
+    if M.ndim != 2:
+        raise ValueError(f"M must be a 2D matrix. Got shape {M.shape}.")
+
+    adopted_mask = M.sum(axis=1) > 0
+    M_adopters = M[adopted_mask].copy()
+    N_survival = np.zeros_like(M_adopters)
+
+    if M_adopters.shape[1] > 1:
+        tail_mass = np.flip(np.cumsum(np.flip(M_adopters, axis=1), axis=1), axis=1)
+        N_survival[:, :-1] = tail_mass[:, 1:]
+
+    M_adopters = np.clip(M_adopters, 0.0, None)
+    N_survival = np.clip(N_survival, 0.0, None)
+    return M_adopters, N_survival, adopted_mask
