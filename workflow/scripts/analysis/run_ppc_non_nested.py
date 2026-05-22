@@ -10,7 +10,30 @@ def simple_kernel(rho: float, kmax: int) -> np.ndarray:
     return 1.0 - (1.0 - float(rho)) ** nu
 
 
-def load_mn(summary_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+def _sorted_value_cols(columns) -> list[str]:
+    value_cols = [str(column) for column in columns if str(column) != "user_id"]
+    return sorted(value_cols, key=lambda col: int(col) if str(col).isdigit() else str(col))
+
+
+def _read_matrix_parquet(path: Path) -> tuple[list[str], list[str], np.ndarray]:
+    df = pd.read_parquet(path).copy()
+    if "user_id" in df.columns:
+        user_ids = df["user_id"].astype(str).tolist()
+    else:
+        user_ids = [str(idx) for idx in range(len(df))]
+        df.insert(0, "user_id", user_ids)
+
+    value_cols = _sorted_value_cols(df.columns)
+    values = (
+        df[value_cols]
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+        .to_numpy(dtype=float)
+    )
+    return user_ids, value_cols, values
+
+
+def load_mn(summary_dir: Path) -> tuple[list[str], list[str], np.ndarray, np.ndarray]:
     if not summary_dir.exists() or not summary_dir.is_dir():
         raise ValueError(f"Expected summary directory with M/N parquet files: {summary_dir}")
 
@@ -19,11 +42,13 @@ def load_mn(summary_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     if not m_path.exists() or not n_path.exists():
         raise ValueError(f"Missing M.parquet or N.parquet in summary directory: {summary_dir}")
 
-    M = pd.read_parquet(m_path).values
-    N = pd.read_parquet(n_path).values
+    user_ids, value_cols, M = _read_matrix_parquet(m_path)
+    n_user_ids, n_value_cols, N = _read_matrix_parquet(n_path)
+    if user_ids != n_user_ids or value_cols != n_value_cols:
+        raise ValueError("M and N must share identical user_id ordering and exposure columns.")
     if M.shape != N.shape:
         raise ValueError("M and N must have identical shape.")
-    return M.astype(float), N.astype(float)
+    return user_ids, value_cols, M.astype(float), N.astype(float)
 
 
 def extract_rho_samples(draws: pd.DataFrame) -> np.ndarray:
@@ -91,7 +116,7 @@ def run_non_nested_ppc(
     seed: int,
     stats: list[str],
 ):
-    M_obs, N_obs = load_mn(summary_dir)
+    _, _, M_obs, N_obs = load_mn(summary_dir)
     kmax = M_obs.shape[1]
 
     draws_df = pd.read_parquet(simple_posterior)

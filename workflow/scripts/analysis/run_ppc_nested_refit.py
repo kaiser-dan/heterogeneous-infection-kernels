@@ -15,12 +15,43 @@ from src.complexity_measures import compute_malahbois_complexity  # noqa: E402
 from src.models.inference import run_stan_inference  # noqa: E402
 
 
+SUPPORTED_STAT_NAMES = (
+    "mahal_non_centrality",
+    "mahal_mode_non_centrality",
+    "mahal_median_total",
+    "mahal_median_centered",
+)
+
+
 def simple_kernel(rho: float, kmax: int) -> np.ndarray:
     nu = np.arange(1, kmax + 1, dtype=float)
     return 1.0 - (1.0 - float(rho)) ** nu
 
 
-def load_mn(summary_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+def _sorted_value_cols(columns) -> list[str]:
+    value_cols = [str(column) for column in columns if str(column) != "user_id"]
+    return sorted(value_cols, key=lambda col: int(col) if str(col).isdigit() else str(col))
+
+
+def _read_matrix_parquet(path: Path) -> tuple[list[str], list[str], np.ndarray]:
+    df = pd.read_parquet(path).copy()
+    if "user_id" in df.columns:
+        user_ids = df["user_id"].astype(str).tolist()
+    else:
+        user_ids = [str(idx) for idx in range(len(df))]
+        df.insert(0, "user_id", user_ids)
+
+    value_cols = _sorted_value_cols(df.columns)
+    values = (
+        df[value_cols]
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+        .to_numpy(dtype=float)
+    )
+    return user_ids, value_cols, values
+
+
+def load_mn(summary_dir: Path) -> tuple[list[str], list[str], np.ndarray, np.ndarray]:
     if not summary_dir.exists() or not summary_dir.is_dir():
         raise ValueError(f"Expected summary directory with M/N parquet files: {summary_dir}")
 
@@ -29,11 +60,13 @@ def load_mn(summary_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     if not m_path.exists() or not n_path.exists():
         raise ValueError(f"Missing M.parquet or N.parquet in summary directory: {summary_dir}")
 
-    M = pd.read_parquet(m_path).values
-    N = pd.read_parquet(n_path).values
+    user_ids, value_cols, M = _read_matrix_parquet(m_path)
+    n_user_ids, n_value_cols, N = _read_matrix_parquet(n_path)
+    if user_ids != n_user_ids or value_cols != n_value_cols:
+        raise ValueError("M and N must share identical user_id ordering and exposure columns.")
     if M.shape != N.shape:
         raise ValueError("M and N must have identical shape.")
-    return M.astype(float), N.astype(float)
+    return user_ids, value_cols, M.astype(float), N.astype(float)
 
 
 def extract_rho_samples(draws: pd.DataFrame) -> np.ndarray:
@@ -60,20 +93,31 @@ def extract_mu_samples(draws: pd.DataFrame) -> np.ndarray:
     return draws[mu_cols].to_numpy(dtype=float)
 
 
-def stat_from_malahbois(mu_samples: np.ndarray, rho_samples: np.ndarray, stat_name: str) -> float:
+def stat_values_from_malahbois(mu_samples: np.ndarray, rho_samples: np.ndarray) -> dict[str, float]:
     result = compute_malahbois_complexity(mu_samples=mu_samples, rho_samples=rho_samples)
+    return {
+        "mahal_non_centrality": float(result.non_centrality),
+        "mahal_mode_non_centrality": float(result.mode_non_centrality),
+        "mahal_median_total": float(np.median(result.total_distance)),
+        "mahal_median_centered": float(np.median(result.centered_distance)),
+    }
 
-    if stat_name == "mahal_non_centrality":
-        return float(result.non_centrality)
-    if stat_name == "mahal_median_total":
-        return float(np.median(result.total_distance))
-    if stat_name == "mahal_median_centered":
-        return float(np.median(result.centered_distance))
 
-    raise ValueError(
-        "Unsupported nested statistic. Use one of: "
-        "mahal_non_centrality,mahal_median_total,mahal_median_centered"
-    )
+def stat_from_malahbois(mu_samples: np.ndarray, rho_samples: np.ndarray, stat_name: str) -> float:
+    return stat_values_from_malahbois(mu_samples=mu_samples, rho_samples=rho_samples)[stat_name]
+
+
+def parse_stats(stats_arg: str) -> list[str]:
+    stats = [s.strip() for s in stats_arg.split(",") if s.strip()]
+    if not stats:
+        raise ValueError("No nested PPC statistics were provided.")
+
+    invalid = [s for s in stats if s not in SUPPORTED_STAT_NAMES]
+    if invalid:
+        raise ValueError(
+            f"Unknown statistic(s): {invalid}. Valid options: {list(SUPPORTED_STAT_NAMES)}"
+        )
+    return stats
 
 
 def fit_one_dataset(
@@ -105,9 +149,9 @@ def run_nested_ppc(
     summary_output: Path,
     draws: int,
     seed: int,
-    statistic: str,
+    stats: list[str],
 ):
-    M_obs, N_obs = load_mn(summary_dir)
+    user_ids, value_cols, M_obs, N_obs = load_mn(summary_dir)
     Y = np.rint(M_obs + N_obs).astype(int)
     kmax = Y.shape[1]
 
@@ -116,7 +160,7 @@ def run_nested_ppc(
 
     rho_obs = extract_rho_samples(simple_obs_df)
     mu_obs = extract_mu_samples(nonparam_obs_df)
-    t_obs = stat_from_malahbois(mu_obs, rho_obs, statistic)
+    t_obs_by_stat = stat_values_from_malahbois(mu_obs, rho_obs)
 
     rng = np.random.default_rng(seed)
     replace = rho_obs.size < draws
@@ -133,8 +177,12 @@ def run_nested_ppc(
 
             rep_summary_dir = tmp_root / f"rep_{rep_id}" / "summary"
             rep_summary_dir.mkdir(parents=True, exist_ok=True)
-            pd.DataFrame(M_rep).to_parquet(rep_summary_dir / "M.parquet", index=False)
-            pd.DataFrame(N_rep).to_parquet(rep_summary_dir / "N.parquet", index=False)
+            m_rep_df = pd.DataFrame(M_rep, columns=value_cols)
+            n_rep_df = pd.DataFrame(N_rep, columns=value_cols)
+            m_rep_df.insert(0, "user_id", user_ids)
+            n_rep_df.insert(0, "user_id", user_ids)
+            m_rep_df.to_parquet(rep_summary_dir / "M.parquet", index=False)
+            n_rep_df.to_parquet(rep_summary_dir / "N.parquet", index=False)
 
             rep_simple_dir = tmp_root / f"rep_{rep_id}" / "fit_simple"
             rep_nonparam_dir = tmp_root / f"rep_{rep_id}" / "fit_nonparam"
@@ -155,33 +203,37 @@ def run_nested_ppc(
 
                 rho_rep = extract_rho_samples(simple_rep_df)
                 mu_rep = extract_mu_samples(nonparam_rep_df)
-                t_rep = stat_from_malahbois(mu_rep, rho_rep, statistic)
+                t_rep_by_stat = stat_values_from_malahbois(mu_rep, rho_rep)
 
-                rows.append(
-                    {
-                        "rep_id": rep_id,
-                        "draw_idx": int(draw_idx),
-                        "rho_draw": rho_draw,
-                        "stat_name": statistic,
-                        "t_obs": float(t_obs),
-                        "t_rep": float(t_rep),
-                        "is_extreme": bool(t_rep >= t_obs),
-                        "status": "ok",
-                    }
-                )
+                for stat_name in stats:
+                    t_obs = float(t_obs_by_stat[stat_name])
+                    t_rep = float(t_rep_by_stat[stat_name])
+                    rows.append(
+                        {
+                            "rep_id": rep_id,
+                            "draw_idx": int(draw_idx),
+                            "rho_draw": rho_draw,
+                            "stat_name": stat_name,
+                            "t_obs": t_obs,
+                            "t_rep": t_rep,
+                            "is_extreme": bool(t_rep >= t_obs),
+                            "status": "ok",
+                        }
+                    )
             except Exception as exc:  # noqa: BLE001
-                rows.append(
-                    {
-                        "rep_id": rep_id,
-                        "draw_idx": int(draw_idx),
-                        "rho_draw": rho_draw,
-                        "stat_name": statistic,
-                        "t_obs": float(t_obs),
-                        "t_rep": np.nan,
-                        "is_extreme": False,
-                        "status": f"error:{type(exc).__name__}",
-                    }
-                )
+                for stat_name in stats:
+                    rows.append(
+                        {
+                            "rep_id": rep_id,
+                            "draw_idx": int(draw_idx),
+                            "rho_draw": rho_draw,
+                            "stat_name": stat_name,
+                            "t_obs": float(t_obs_by_stat[stat_name]),
+                            "t_rep": np.nan,
+                            "is_extreme": False,
+                            "status": f"error:{type(exc).__name__}",
+                        }
+                    )
 
     details_df = pd.DataFrame(rows)
     details_output.parent.mkdir(parents=True, exist_ok=True)
@@ -191,18 +243,17 @@ def run_nested_ppc(
     if valid.empty:
         raise RuntimeError("All nested PPC replicates failed during re-fit.")
 
-    summary_df = pd.DataFrame(
-        [
-            {
-                "stat_name": statistic,
-                "n_reps_requested": int(draws),
-                "n_reps_succeeded": int(len(valid)),
-                "ppp_value": float(valid["is_extreme"].mean()),
-                "t_obs": float(t_obs),
-                "t_rep_median": float(valid["t_rep"].median()),
-            }
-        ]
+    summary_df = (
+        valid.groupby("stat_name", as_index=False)
+        .agg(
+            n_reps_succeeded=("rep_id", "count"),
+            ppp_value=("is_extreme", "mean"),
+            t_obs=("t_obs", "median"),
+            t_rep_median=("t_rep", "median"),
+        )
+        .sort_values("stat_name")
     )
+    summary_df.insert(1, "n_reps_requested", int(draws))
     summary_df.to_parquet(summary_output, index=False)
 
 
@@ -219,15 +270,26 @@ def main():
     parser.add_argument("--draws", type=int, default=20)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument(
+        "--stats",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated list from: "
+            "mahal_non_centrality,mahal_mode_non_centrality,mahal_median_total,mahal_median_centered"
+        ),
+    )
+    parser.add_argument(
         "--statistic",
         type=str,
-        default="mahal_non_centrality",
-        help="One of: mahal_non_centrality,mahal_median_total,mahal_median_centered",
+        default=None,
+        help="Backward-compatible singular alias for --stats.",
     )
     args = parser.parse_args()
 
     simple_params = json.loads(args.simple_instance_params)
     nonparam_params = json.loads(args.nonparam_instance_params)
+    stats_arg = args.stats if args.stats is not None else (args.statistic or "mahal_non_centrality")
+    stats = parse_stats(stats_arg)
 
     run_nested_ppc(
         summary_dir=args.summary_dir,
@@ -240,7 +302,7 @@ def main():
         summary_output=args.summary_output,
         draws=int(args.draws),
         seed=int(args.seed),
-        statistic=args.statistic,
+        stats=stats,
     )
 
 

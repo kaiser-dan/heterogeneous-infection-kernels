@@ -83,7 +83,7 @@ model {
 
     Delta ~ dirichlet(rep_vector(CONCENTRATION, kmax));
 
-    sigma ~ exponential(DEVIATION_SCALE);
+    sigma ~ normal(0, DEVIATION_SCALE)T[0,];
 
     // global mixture weights
     pi ~ dirichlet(rep_vector(1.0, K));
@@ -130,6 +130,9 @@ generated quantities {
     // mixture indicator
     array[V] int<lower=1, upper=K> z;
 
+    // per-node marginal log-likelihood (for WAIC/LOO/model comparison)
+    array[V] real log_lik;
+
     for (i in 1:V){
         vector[K] lps;
         for (k in 1:K){
@@ -142,6 +145,7 @@ generated quantities {
         }
 
         real log_denom = log_sum_exp(lps);
+        log_lik[i] = log_denom;
         for (k in 1:K){
             post_prob[i, k] = exp(lps[k] - log_denom);
         }

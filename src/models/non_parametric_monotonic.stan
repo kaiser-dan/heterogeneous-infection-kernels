@@ -14,6 +14,9 @@ data {
     // N[i,j] = number of infections failing to occur (expected) when node i has j infected neighbors
     array[V, kmax] real<lower=0> N;
 
+    // Row-level likelihood weights (e.g., IPW under case-control subsampling)
+    vector<lower=0>[V] ROW_WEIGHT;
+
     // HYPERPARAMETER - exponential distribution scale for kernel mode deviations
     real<lower=1e-6> DEVIATION_SCALE;
 
@@ -96,7 +99,7 @@ model {
             }
         }
 
-        target += log_sum_exp(lps);
+        target += ROW_WEIGHT[i] * log_sum_exp(lps);
     }
 }
 
@@ -134,7 +137,7 @@ generated quantities {
         }
 
         real log_denom = log_sum_exp(lps);
-        log_lik[i] = log_denom;
+        log_lik[i] = ROW_WEIGHT[i] * log_denom;
 
         for (k in 1:K){
             post_prob[i, k] = exp(lps[k] - log_denom);
@@ -143,4 +146,3 @@ generated quantities {
         z[i] = categorical_rng(to_vector(post_prob[i]));
     }
 }
-
