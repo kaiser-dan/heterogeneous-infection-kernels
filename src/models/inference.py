@@ -469,16 +469,17 @@ def run_stan_inference(summary_path, output_dir, instance_params, config_path=No
         for key in ['q', 'exposure_metric', 'source']:
             if key in instance_params: config[key] = instance_params[key]
         
-    if not cmdstanpy.cmdstan_path():
+    try:
+        cmdstanpy.cmdstan_path()
+    except ValueError as exc:
         raise RuntimeError(
             "CmdStan is not installed. Run `uv run python -m cmdstanpy.install_cmdstan` once."
-        )
+        ) from exc
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     source = config.get('source', 'twitter')
-    # ... rest of function
     kmax = config.get('kmax', 20)
     
     loader = DATASET_LOADERS.get(source)
