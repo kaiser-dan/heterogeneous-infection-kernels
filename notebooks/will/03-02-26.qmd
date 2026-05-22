@@ -1,0 +1,164 @@
+---
+title: "Monsted Fig 3 — Three-Way Data Comparison"
+date: "2026-03-02"
+format: html
+---
+
+```{python}
+#| label: setup
+#| warning: false
+#| output: false
+import sys
+sys.path.insert(0, "../..")
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.lines as mlines
+import duckdb
+from pathlib import Path
+
+DERIVED = Path("../../data/derived")
+PROCESSED_FULL = Path("../../data/processed/twitter/full")
+```
+
+## Three-Way Comparison: Transcribed vs Reproduce Script vs Pipeline
+
+Three independent sources of the same Monsted et al. (2017) Figure 3 data,
+plotted together to confirm agreement. Data only — no model fits.
+
+1. **Transcribed** — hand-transcribed bar heights from the published figure
+2. **Reproduce script** — standalone replication at q_sc=0.192, q_cc=0.18
+3. **Pipeline** — M/N parquets aggregated from `process_twitter.py`
+
+```{python}
+#| label: load-data
+#| warning: false
+#| output: false
+
+# 1. Transcribed figure values
+transcribed = pd.read_csv(DERIVED / "monsted_fig3_transcribed.csv", comment='#')
+
+# 2. Reproduce script output
+reproduce = pd.read_csv(DERIVED / "monsted_fig3_our_computed.csv")
+
+# 3. Pipeline M/N parquets — sum columns with DuckDB
+def load_pipeline_sums(metric, q_val):
+    """Load pipeline M/N parquets and return column sums as dicts keyed by int k."""
+    con = duckdb.connect()
+    m_path = str(PROCESSED_FULL / f"M_{metric}_q{q_val}.parquet")
+    n_path = str(PROCESSED_FULL / f"N_{metric}_q{q_val}.parquet")
+
+    cols_info = con.execute(
+        f"DESCRIBE SELECT * FROM read_parquet('{m_path}')"
+    ).fetchall()
+    exposure_cols = [c[0] for c in cols_info if c[0] != "user_id"]
+
+    sum_stmt = ", ".join([f'SUM("{c}") AS "{c}"' for c in exposure_cols])
+
+    m_sums = con.execute(
+        f"SELECT {sum_stmt} FROM read_parquet('{m_path}')"
+    ).fetchone()
+    n_sums = con.execute(
+        f"SELECT {sum_stmt} FROM read_parquet('{n_path}')"
+    ).fetchone()
+    con.close()
+
+    m_dict = {int(exposure_cols[i]): float(m_sums[i]) for i in range(len(exposure_cols))}
+    n_dict = {int(exposure_cols[i]): float(n_sums[i]) for i in range(len(exposure_cols))}
+    return m_dict, n_dict
+
+pipe_sc_m, pipe_sc_n = load_pipeline_sums("k", 0.192)
+pipe_cc_m, pipe_cc_n = load_pipeline_sums("kappa", 0.18)
+```
+
+```{python}
+#| label: fig-three-way
+#| fig-cap: "Monsted Fig 3 data: transcribed (bars), reproduce script (blue squares), pipeline (red diamonds). All at q_sc=0.192, q_cc=0.18."
+
+fig, axes = plt.subplots(2, 2, figsize=(7.5, 6.0))
+
+layout = [
+    ('A', 'SC', axes[0, 0], 7, '% retweeted',     None),
+    ('A', 'CC', axes[0, 1], 8, None,               None),
+    ('B', 'SC', axes[1, 0], 7, 'Number retweeted', 'k'),
+    ('B', 'CC', axes[1, 1], 8, None,               r'$\kappa$'),
+]
+
+for panel, model, ax, kmax, ylabel, xlabel in layout:
+    ks = np.arange(1, kmax + 1)
+
+    # --- Transcribed ---
+    t = transcribed[(transcribed['panel'] == panel) & (transcribed['model'] == model)]
+    obs = t.set_index('x')['observed'].reindex(ks).values
+
+    # --- Reproduce script ---
+    r = reproduce[reproduce['model'] == model].set_index('k')
+    if panel == 'A':
+        repro_vals = r['pct_retweeted'].reindex(ks).values
+    else:
+        repro_vals = r['N_adopted'].reindex(ks).values
+
+    # --- Pipeline ---
+    if model == 'SC':
+        m_dict, n_dict = pipe_sc_m, pipe_sc_n
+    else:
+        m_dict, n_dict = pipe_cc_m, pipe_cc_n
+
+    if panel == 'A':
+        pipe_vals = np.array([
+            100.0 * m_dict.get(k, 0.0) / (m_dict.get(k, 0.0) + n_dict.get(k, 0.0))
+            if (m_dict.get(k, 0.0) + n_dict.get(k, 0.0)) > 0 else 0.0
+            for k in ks
+        ])
+    else:
+        pipe_vals = np.array([m_dict.get(k, 0.0) for k in ks])
+
+    # Gray bars (transcribed)
+    ax.bar(ks, obs, color='#b0b0b0', width=0.65, edgecolor='#555555',
+           linewidth=0.6, zorder=2)
+
+    # Blue squares (reproduce script)
+    ax.scatter(ks, repro_vals, s=42, marker='s', color='#2980b9', zorder=5)
+
+    # Red diamonds (pipeline)
+    ax.scatter(ks, pipe_vals, s=32, marker='D', color='#c0392b', zorder=6)
+
+    ax.set_xlim(0.25, kmax + 0.75)
+    ax.set_xticks(ks)
+    ax.tick_params(axis='both', labelsize=8)
+    if xlabel:
+        ax.set_xlabel(xlabel, fontsize=10)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=9)
+    if panel == 'A':
+        ax.set_ylim(0, 0.065)
+    else:
+        ax.set_ylim(0, 58)
+    if model == 'CC':
+        ax.set_facecolor('#ebebeb')
+
+axes[0, 0].set_title('Simple contagion', fontsize=10, pad=6)
+axes[0, 1].set_title('Complex contagion', fontsize=10, pad=6)
+
+for ax, label in zip(axes[:, 0], ['A', 'B']):
+    ax.text(-0.22, 1.08, label, transform=ax.transAxes,
+            fontsize=13, fontweight='bold', va='top', ha='left')
+
+# Legend
+bar_h  = plt.Rectangle((0, 0), 1, 1, fc='#b0b0b0', ec='#555555', lw=0.6)
+repo_h = mlines.Line2D([], [], marker='s', color='#2980b9', markersize=6, linestyle='None')
+pipe_h = mlines.Line2D([], [], marker='D', color='#c0392b', markersize=5, linestyle='None')
+
+for ax in axes[0, :]:
+    ax.legend(
+        handles=[bar_h, repo_h, pipe_h],
+        labels=['Transcribed (paper)', 'Reproduce script', 'Pipeline'],
+        fontsize=7, loc='upper left', framealpha=0.85,
+        handlelength=1.2, handletextpad=0.5,
+    )
+
+plt.tight_layout(h_pad=1.2, w_pad=0.8)
+fig.savefig("figures/monsted_fig3_three_way.png", dpi=200, bbox_inches='tight')
+plt.show()
+```

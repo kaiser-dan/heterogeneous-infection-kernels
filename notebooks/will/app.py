@@ -1375,7 +1375,7 @@ def server(input: Inputs, output: Outputs, session: Session) -> None:
     return None
 
 
-_static_assets = ["dashboard_files","dashboard_files/libs/quarto-html/tippy.css","dashboard_files/libs/quarto-html/quarto-syntax-highlighting-587c61ba64f3a5504c4d52d930310e48.css","dashboard_files/libs/quarto-html/quarto-syntax-highlighting-dark-b758ccaa5987ceb1b75504551e579abf.css","dashboard_files/libs/bootstrap/bootstrap-icons.css","dashboard_files/libs/bootstrap/bootstrap-8431028aa60a0a713098bbb6f796631d.min.css","dashboard_files/libs/bootstrap/bootstrap-dark-8431028aa60a0a713098bbb6f796631d.min.css","dashboard_files/libs/clipboard/clipboard.min.js","dashboard_files/libs/quarto-html/quarto.js","dashboard_files/libs/quarto-html/tabsets/tabsets.js","dashboard_files/libs/quarto-html/axe/axe-check.js","dashboard_files/libs/quarto-html/popper.min.js","dashboard_files/libs/quarto-html/tippy.umd.min.js","dashboard_files/libs/quarto-html/anchor.min.js","dashboard_files/libs/bootstrap/bootstrap.min.js","dashboard_files/libs/quarto-dashboard/quarto-dashboard.js","dashboard_files/libs/quarto-dashboard/stickythead.js","dashboard_files/libs/quarto-dashboard/web-components.js","dashboard_files/libs/quarto-dashboard/components.js"]
+_static_assets = ["dashboard_files"]
 _static_assets = {"/" + sa: Path(__file__).parent / sa for sa in _static_assets}
 
 app = App(

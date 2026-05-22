@@ -1,0 +1,575 @@
+---
+title: "Synthetic v3 + Empirical -- Model Selection & Kernel Recovery"
+format:
+  html:
+    code-fold: true
+    self-contained: true
+jupyter: python3
+---
+
+```{python}
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from pathlib import Path
+
+RESULTS = Path("../..") / "results"
+FIG_DIR = Path("../../figures/03-27-26")
+FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+# True sigmoid kernel function
+def sigmoid_kernel(k, rho_l, rho_h, w, k0):
+    return rho_l + (rho_h - rho_l) / (1 + np.exp(-w * (k - k0)))
+
+# Ground truth parameters for each K_true
+TRUE_PARAMS = {
+    1: [
+        dict(pi=1.0, rho_l=0.005, rho_h=0.25,  w=0.8, k0=5.0),
+    ],
+    2: [
+        dict(pi=0.6, rho_l=0.001, rho_h=0.04,  w=0.5, k0=4.0),
+        dict(pi=0.4, rho_l=0.015, rho_h=0.45,  w=1.2, k0=6.0),
+    ],
+    3: [
+        dict(pi=0.5, rho_l=0.0005, rho_h=0.015, w=0.3, k0=3.0),
+        dict(pi=0.3, rho_l=0.008,  rho_h=0.18,  w=0.7, k0=5.0),
+        dict(pi=0.2, rho_l=0.03,   rho_h=0.55,  w=1.5, k0=8.0),
+    ],
+}
+
+MODEL_LABEL = {
+    "model_simple_contagion":                  "SC",
+    "model_complex_contagion":                 "CC",
+    "non_parametric_monotonic_empirical_bayes": "NP",
+}
+MODEL_COLOR = {"SC": "#4C72B0", "CC": "#DD8452", "NP": "#55A868"}
+MODEL_LS    = {"SC": "--",      "CC": "-",        "NP": ":"}
+
+knu = np.arange(1, 21)
+
+def load_waic(k_true):
+    rows = []
+    sweep = f"synth_model_sel_k{k_true}_v3_20260327"
+    dname = f"synth_model_sel_k{k_true}_20260325"
+    base  = RESULTS / sweep / "synthetic" / dname
+    for f in sorted(base.glob("K~*/stan_file~*/model_comparison.parquet")):
+        kfit = int(f.parts[-3].split("~")[1])
+        sf   = f.parts[-2].split("~")[1]
+        label = MODEL_LABEL.get(sf, sf)
+        df = pd.read_parquet(f)
+        rows.append({"K_fit": kfit, "model": label, "waic": df.iloc[0]["waic"]})
+    return pd.DataFrame(rows)
+
+def load_kernel(k_true, k_fit, stan_file_slug):
+    sweep = f"synth_model_sel_k{k_true}_v3_20260327"
+    dname = f"synth_model_sel_k{k_true}_20260325"
+    p = (RESULTS / sweep / "synthetic" / dname
+         / f"K~{k_fit}" / f"stan_file~{stan_file_slug}"
+         / "kernel_mode_summary.parquet")
+    if not p.exists():
+        return None
+    return pd.read_parquet(p)
+```
+
+```{python}
+#| label: fig-waic
+#| fig-cap: "WAIC model selection: synthetic v3 (4 chains / 1000 warmup / 1000 samples). Each panel = one K_true dataset (n=512, SBM, kmax=20). x-axis = K_fit, y-axis = ΔWAIC from best fit per panel. Dashed vertical = K_true. CC K=1 wins for K_true=1 (Δ=0, next=+1.5). CC K=2 wins for K_true=2 (Δ=0, runner-up CC K=3=+1.6). CC K=2 wins for K_true=3 (Δ=0, CC K=3=+1.0, CC K=1=+2.8) -- K_true=3 is ambiguous. NP excluded (no WAIC on VACC ppc-implementation branch)."
+
+fig, axes = plt.subplots(1, 3, figsize=(12, 4), sharey=False)
+fig.suptitle("Synthetic v3 -- WAIC model selection  |  4ch/1000wu/1000s  |  n=512 SBM kmax=20", fontsize=11)
+
+for ax, k_true in zip(axes, [1, 2, 3]):
+    df = load_waic(k_true)
+    if df.empty:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+        continue
+    best = df["waic"].min()
+    df["dWAIC"] = df["waic"] - best
+    for model, grp in df.groupby("model"):
+        grp = grp.sort_values("K_fit")
+        ax.plot(grp["K_fit"], grp["dWAIC"],
+                color=MODEL_COLOR[model], ls=MODEL_LS[model],
+                marker="o", ms=6, lw=2, label=model)
+    ax.axvline(k_true, color="black", ls=":", lw=1.2, alpha=0.6, label=f"K_true={k_true}")
+    ax.set_title(f"K_true={k_true}  (true: CC sigmoid × {k_true})", fontsize=10)
+    ax.set_xlabel("K_fit")
+    ax.set_ylabel("ΔWAIC from best" if k_true == 1 else "")
+    ax.set_xticks([1, 2, 3])
+    ax.legend(fontsize=8)
+
+plt.tight_layout()
+fig.savefig(FIG_DIR / "fig_synth_v3_waic.png", dpi=150, bbox_inches="tight")
+plt.show()
+```
+
+```{python}
+#| label: fig-kernel-k1
+#| fig-cap: "K_true=1 kernel recovery. CC K_fit=1 and NP K_fit=1: posterior median (solid) + 90% CI (shaded). True sigmoid: rho_l=0.005, rho_h=0.25, w=0.8, k0=5 (dashed black). Single component -- no label-switching, median and CI are valid. 4ch/1000wu/1000s, n=512."
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
+fig.suptitle("K_true=1 kernel recovery  |  v3: 4ch/1000wu/1000s  |  rho_l=0.005, rho_h=0.25, w=0.8, k0=5", fontsize=10)
+
+true_p = TRUE_PARAMS[1][0]
+h_true = sigmoid_kernel(knu, true_p["rho_l"], true_p["rho_h"], true_p["w"], true_p["k0"])
+
+for ax, slug, label in zip(axes,
+    ["model_complex_contagion", "non_parametric_monotonic_empirical_bayes"],
+    ["CC K_fit=1", "NP K_fit=1"]):
+
+    df = load_kernel(1, 1, slug)
+    if df is None:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+        continue
+
+    color = MODEL_COLOR["CC"] if "complex" in slug else MODEL_COLOR["NP"]
+    comp = df[df["component"] == 1].sort_values("nu")
+    ax.fill_between(comp["nu"], comp["ci_low"], comp["ci_high"], alpha=0.25, color=color)
+    ax.plot(comp["nu"], comp["median"], color=color, lw=2, label=f"{label} (median)")
+    ax.plot(knu, h_true, "k--", lw=1.8, label="True sigmoid")
+    ax.set_title(label)
+    ax.set_xlabel("Exposure k")
+    ax.set_ylabel("c(ν)" if ax == axes[0] else "")
+    ax.set_xlim(1, 20)
+    ax.legend(fontsize=9)
+    ax.set_ylim(bottom=0)
+
+plt.tight_layout()
+fig.savefig(FIG_DIR / "fig_synth_v3_kernel_k1.png", dpi=150, bbox_inches="tight")
+plt.show()
+```
+
+```{python}
+#| label: fig-kernel-k2
+#| fig-cap: "K_true=2 kernel recovery. CC K_fit=2: MAP joint estimate per component (solid), sorted by h(k=20) to align with true components. CI bands omitted -- label-switching across chains makes pooled CIs uninterpretable (R_hat~7 on z). MAP joint is from a single consistent Stan optimization, no switching. CC K_fit=1 and NP K_fit=1 use median + 90% CI (single component, valid). True: comp 1 (pi=0.6, rho_h=0.04, low), comp 2 (pi=0.4, rho_h=0.45, high)."
+
+true_params_2 = TRUE_PARAMS[2]
+h_true_2 = [sigmoid_kernel(knu, p["rho_l"], p["rho_h"], p["w"], p["k0"]) for p in true_params_2]
+true_colors_2 = ["#1a7abf", "#b84c00"]
+true_labels_2 = [f"True comp {i+1} (pi={p['pi']}, rho_h={p['rho_h']})" for i, p in enumerate(true_params_2)]
+
+fig, axes = plt.subplots(1, 3, figsize=(14, 4), sharey=False)
+fig.suptitle("K_true=2 kernel recovery  |  v3: 4ch/1000wu/1000s  |  n=512 SBM", fontsize=10)
+
+# Panel 1: CC K_fit=2 -- use map_joint, sorted by ceiling
+ax = axes[0]
+df_cc2 = load_kernel(2, 2, "model_complex_contagion")
+if df_cc2 is not None:
+    comp_ids = sorted(df_cc2["component"].unique(),
+                      key=lambda c: df_cc2[df_cc2["component"]==c]["map_joint"].iloc[-1])
+    for i, cid in enumerate(comp_ids):
+        comp = df_cc2[df_cc2["component"]==cid].sort_values("nu")
+        ax.plot(comp["nu"], comp["map_joint"], color=true_colors_2[i], lw=2,
+                marker="o", ms=3, label=f"MAP comp {i+1}")
+    for h_t, c, lbl in zip(h_true_2, true_colors_2, true_labels_2):
+        ax.plot(knu, h_t, color=c, ls="--", lw=1.8, label=lbl)
+ax.set_title("CC K_fit=2\n(MAP joint, sorted by ceiling)")
+ax.set_xlabel("Exposure k"); ax.set_ylabel("c(ν)")
+ax.legend(fontsize=7.5); ax.set_xlim(1, 20); ax.set_ylim(bottom=0)
+
+# Panel 2: CC K_fit=1 -- single component, use median + CI
+ax = axes[1]
+df_cc1 = load_kernel(2, 1, "model_complex_contagion")
+if df_cc1 is not None:
+    comp = df_cc1[df_cc1["component"]==1].sort_values("nu")
+    ax.fill_between(comp["nu"], comp["ci_low"], comp["ci_high"], alpha=0.2, color=MODEL_COLOR["CC"])
+    ax.plot(comp["nu"], comp["median"], color=MODEL_COLOR["CC"], lw=2, label="CC K_fit=1 (median)")
+    for h_t, c, lbl in zip(h_true_2, true_colors_2, true_labels_2):
+        ax.plot(knu, h_t, color=c, ls="--", lw=1.8, label=lbl)
+ax.set_title("CC K_fit=1\n(underfit: single component)")
+ax.set_xlabel("Exposure k")
+ax.legend(fontsize=7.5); ax.set_xlim(1, 20); ax.set_ylim(bottom=0)
+
+# Panel 3: NP K_fit=1 -- single component, use median + CI
+ax = axes[2]
+df_np1 = load_kernel(2, 1, "non_parametric_monotonic_empirical_bayes")
+if df_np1 is not None:
+    comp = df_np1[df_np1["component"]==1].sort_values("nu")
+    ax.fill_between(comp["nu"], comp["ci_low"], comp["ci_high"], alpha=0.2, color=MODEL_COLOR["NP"])
+    ax.plot(comp["nu"], comp["median"], color=MODEL_COLOR["NP"], lw=2, label="NP K_fit=1 (median)")
+    for h_t, c, lbl in zip(h_true_2, true_colors_2, true_labels_2):
+        ax.plot(knu, h_t, color=c, ls="--", lw=1.8, label=lbl)
+ax.set_title("NP K_fit=1\n(aggregate, median + 90% CI)")
+ax.set_xlabel("Exposure k")
+ax.legend(fontsize=7.5); ax.set_xlim(1, 20); ax.set_ylim(bottom=0)
+
+plt.tight_layout()
+fig.savefig(FIG_DIR / "fig_synth_v3_kernel_k2.png", dpi=150, bbox_inches="tight")
+plt.show()
+```
+
+```{python}
+#| label: fig-kernel-k3
+#| fig-cap: "K_true=3 kernel recovery. CC K_fit=3 and CC K_fit=2 (WAIC winner): MAP joint per component, sorted by ceiling. NP K_fit=1: median + 90% CI. True: comp 1 (pi=0.5, rho_h=0.015), comp 2 (pi=0.3, rho_h=0.18), comp 3 (pi=0.2, rho_h=0.55). WAIC selects K=2 over K=3 by only 1.0 unit -- model selection ambiguous at n=512."
+
+true_params_3 = TRUE_PARAMS[3]
+h_true_3 = [sigmoid_kernel(knu, p["rho_l"], p["rho_h"], p["w"], p["k0"]) for p in true_params_3]
+true_colors_3 = ["#1a7abf", "#e07b00", "#b02020"]
+true_labels_3 = [f"True comp {i+1} (pi={p['pi']}, rho_h={p['rho_h']})" for i, p in enumerate(true_params_3)]
+
+fig, axes = plt.subplots(1, 3, figsize=(14, 4), sharey=False)
+fig.suptitle("K_true=3 kernel recovery  |  v3: 4ch/1000wu/1000s  |  n=512 SBM", fontsize=10)
+
+for ax, (k_fit, slug, title) in zip(axes, [
+    (3, "model_complex_contagion",                  "CC K_fit=3 (MAP joint)"),
+    (2, "model_complex_contagion",                  "CC K_fit=2 WAIC winner (MAP joint)"),
+    (1, "non_parametric_monotonic_empirical_bayes", "NP K_fit=1 (median + 90% CI)"),
+]):
+    df_k = load_kernel(3, k_fit, slug)
+    if df_k is None:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+        continue
+
+    if "non_param" in slug:
+        comp = df_k[df_k["component"]==1].sort_values("nu")
+        ax.fill_between(comp["nu"], comp["ci_low"], comp["ci_high"], alpha=0.2, color=MODEL_COLOR["NP"])
+        ax.plot(comp["nu"], comp["median"], color=MODEL_COLOR["NP"], lw=2, label="NP K_fit=1")
+    else:
+        comp_ids = sorted(df_k["component"].unique(),
+                          key=lambda c: df_k[df_k["component"]==c]["map_joint"].iloc[-1])
+        for i, cid in enumerate(comp_ids):
+            comp = df_k[df_k["component"]==cid].sort_values("nu")
+            c = true_colors_3[i] if i < len(true_colors_3) else "gray"
+            ax.plot(comp["nu"], comp["map_joint"], color=c, lw=2,
+                    marker="o", ms=3, label=f"MAP comp {i+1}")
+
+    for h_t, c, lbl in zip(h_true_3, true_colors_3, true_labels_3):
+        ax.plot(knu, h_t, color=c, ls="--", lw=1.5, label=lbl)
+
+    ax.set_title(title)
+    ax.set_xlabel("Exposure k")
+    ax.set_ylabel("c(ν)" if ax == axes[0] else "")
+    ax.legend(fontsize=7); ax.set_xlim(1, 20); ax.set_ylim(bottom=0)
+
+plt.tight_layout()
+fig.savefig(FIG_DIR / "fig_synth_v3_kernel_k3.png", dpi=150, bbox_inches="tight")
+plt.show()
+```
+
+```{python}
+#| label: fig-waic-heatmap
+#| fig-cap: "WAIC heatmap: each cell = ΔWAIC from row minimum. Rows = K_true (dataset), columns = model × K_fit. Green = best per row, red = worse. Correct model (CC K_fit=K_true) should be green/near-zero. NP excluded (no WAIC)."
+
+fig, axes = plt.subplots(1, 3, figsize=(12, 3))
+fig.suptitle("ΔWAIC from row best  |  synthetic v3 (4ch/1000wu/1000s, n=512)", fontsize=11)
+
+for ax, k_true in zip(axes, [1, 2, 3]):
+    df = load_waic(k_true)
+    if df.empty:
+        continue
+    best = df["waic"].min()
+    df["dWAIC"] = (df["waic"] - best).round(1)
+    pivot = df.pivot(index="model", columns="K_fit", values="dWAIC")
+    pivot = pivot.reindex(index=[m for m in ["SC","CC","NP"] if m in pivot.index])
+
+    im = ax.imshow(pivot.values, aspect="auto", cmap="RdYlGn_r",
+                   vmin=0, vmax=pivot.values.max() + 1)
+    ax.set_xticks(range(len(pivot.columns))); ax.set_xticklabels([f"K={c}" for c in pivot.columns])
+    ax.set_yticks(range(len(pivot.index)));   ax.set_yticklabels(pivot.index)
+    for i in range(len(pivot.index)):
+        for j in range(len(pivot.columns)):
+            val = pivot.values[i, j]
+            if not np.isnan(val):
+                ax.text(j, i, f"{val:.1f}", ha="center", va="center",
+                        fontsize=9, color="black" if val < pivot.values.max()*0.6 else "white")
+    ax.set_title(f"K_true={k_true}")
+    ax.set_xlabel("K_fit")
+    plt.colorbar(im, ax=ax, shrink=0.8)
+
+plt.tight_layout()
+fig.savefig(FIG_DIR / "fig_synth_v3_waic_heatmap.png", dpi=150, bbox_inches="tight")
+plt.show()
+```
+
+```{python}
+#| label: fig-kernel-grid
+#| fig-cap: "3×3 kernel recovery grid: rows = K_true (1, 2, 3), columns = K_fit (1, 2, 3). All CC fits. K_fit=1: posterior median + 90% CI (single component, no label-switching). K_fit=2,3: MAP joint per component sorted by ceiling (label-switching makes pooled CI uninterpretable). True components shown as dashed lines. Diagonal (K_fit=K_true) is the correctly-specified model. Off-diagonal shows overfit (K_fit>K_true, extra components collapse) and underfit (K_fit<K_true, single curve compromises between true components). 4ch/1000wu/1000s, n=512 SBM."
+
+TRUE_COLORS = {
+    1: ["black"],
+    2: ["#1a7abf", "#b84c00"],
+    3: ["#1a7abf", "#e07b00", "#b02020"],
+}
+
+fig, axes = plt.subplots(3, 3, figsize=(14, 12))
+fig.suptitle("CC kernel recovery grid  |  rows=K_true, cols=K_fit  |  MAP joint (K_fit>1) / median+CI (K_fit=1)\nv3: 4ch/1000wu/1000s, n=512 SBM kmax=20", fontsize=11)
+
+for row, k_true in enumerate([1, 2, 3]):
+    true_params = TRUE_PARAMS[k_true]
+    h_trues = [sigmoid_kernel(knu, p["rho_l"], p["rho_h"], p["w"], p["k0"]) for p in true_params]
+    tcolors = TRUE_COLORS[k_true]
+
+    for col, k_fit in enumerate([1, 2, 3]):
+        ax = axes[row, col]
+        df_k = load_kernel(k_true, k_fit, "model_complex_contagion")
+
+        # Border: green if K_fit==K_true (diagonal), gray otherwise
+        for spine in ax.spines.values():
+            spine.set_linewidth(2.5 if k_fit == k_true else 0.8)
+            spine.set_color("#2ca02c" if k_fit == k_true else "gray")
+
+        if df_k is not None:
+            if k_fit == 1:
+                # Single component: median + CI
+                comp = df_k[df_k["component"] == 1].sort_values("nu")
+                ax.fill_between(comp["nu"], comp["ci_low"], comp["ci_high"],
+                                alpha=0.25, color=MODEL_COLOR["CC"])
+                ax.plot(comp["nu"], comp["median"], color=MODEL_COLOR["CC"],
+                        lw=2, label="Inferred (median)")
+            else:
+                # Multi-component: MAP joint sorted by ceiling
+                comp_ids = sorted(df_k["component"].unique(),
+                                  key=lambda c: df_k[df_k["component"]==c]["map_joint"].iloc[-1])
+                for i, cid in enumerate(comp_ids):
+                    comp = df_k[df_k["component"]==cid].sort_values("nu")
+                    c = tcolors[i] if i < len(tcolors) else "gray"
+                    ax.plot(comp["nu"], comp["map_joint"], color=c, lw=2,
+                            marker="o", ms=2.5, label=f"MAP comp {i+1}")
+
+        # True curves
+        for h_t, c in zip(h_trues, tcolors):
+            ax.plot(knu, h_t, color=c, ls="--", lw=1.5, alpha=0.7)
+
+        ax.set_xlim(1, 20)
+        ax.set_ylim(bottom=0)
+        if row == 2:
+            ax.set_xlabel("Exposure k")
+        if col == 0:
+            ax.set_ylabel(f"K_true={k_true}\nc(ν)")
+        if row == 0:
+            ax.set_title(f"K_fit={k_fit}", fontsize=10)
+
+        # Diagonal label
+        if k_fit == k_true:
+            ax.text(0.97, 0.05, "correct K", transform=ax.transAxes,
+                    ha="right", va="bottom", fontsize=7.5, color="#2ca02c", fontweight="bold")
+
+plt.tight_layout()
+fig.savefig(FIG_DIR / "fig_synth_v3_kernel_grid.png", dpi=150, bbox_inches="tight")
+plt.show()
+```
+
+```{python}
+#| label: empirical-setup
+OO_ADO_BASE = RESULTS / "oo_k123_adopters_20260326/oo/sim_165_backbone_disparity_kmax30"
+TW_ADO_BASE = RESULTS / "twitter_k123_adopters_20260326/twitter/default_data_prep_survival"
+
+SLUG_MAP = {
+    "SC":  "model_simple_contagion",
+    "CC":  "model_complex_contagion",
+    "NP":  "non_parametric_monotonic_empirical_bayes",
+}
+
+def load_emp_waic(base):
+    rows = []
+    for f in sorted(base.glob("K~*/stan_file~*/model_comparison.parquet")):
+        k   = int(f.parts[-3].split("~")[1])
+        sf  = f.parts[-2].split("~")[1]
+        lbl = MODEL_LABEL.get(sf, sf)
+        df  = pd.read_parquet(f)
+        rows.append({"K_fit": k, "model": lbl, "waic": df.iloc[0]["waic"]})
+    return pd.DataFrame(rows)
+
+def load_emp_kernel(base, k_fit, slug):
+    p = base / f"K~{k_fit}" / f"stan_file~{slug}" / "kernel_mode_summary.parquet"
+    return pd.read_parquet(p) if p.exists() else None
+```
+
+```{python}
+#| label: fig-emp-waic
+#| fig-cap: "Adopters-only WAIC model selection: OO Sim 165 (335/617 nodes, kmax=30) and Twitter cascade (197/196530 nodes, kmax=50). ΔWAIC from best fit per dataset. SC/CC K=1,2,3 shown; NP excluded (no WAIC on VACC branch). OO: SC K=1 wins (Δ=0), all models worse with K. Twitter: CC K=1 wins (Δ=0), ~76 units above SC at all K."
+
+oo_waic = load_emp_waic(OO_ADO_BASE)
+tw_waic = load_emp_waic(TW_ADO_BASE)
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+fig.suptitle("Empirical adopters-only WAIC model selection  |  SC/CC K=1,2,3  |  NP WAIC pending", fontsize=11)
+
+for ax, df, title in zip(axes,
+    [oo_waic, tw_waic],
+    ["OO Sim 165 adopters (335 nodes, kmax=30)", "Twitter adopters (197 nodes, kmax=50)"]):
+
+    best = df["waic"].min()
+    df = df.copy(); df["dWAIC"] = df["waic"] - best
+    for model, grp in df.groupby("model"):
+        grp = grp.sort_values("K_fit")
+        ax.plot(grp["K_fit"], grp["dWAIC"],
+                color=MODEL_COLOR[model], ls=MODEL_LS[model],
+                marker="o", ms=6, lw=2, label=model)
+    ax.axhline(0, color="black", lw=0.8, ls=":")
+    ax.set_title(title, fontsize=9)
+    ax.set_xlabel("K_fit"); ax.set_xticks([1, 2, 3])
+    ax.set_ylabel("ΔWAIC from best")
+    ax.legend(fontsize=9)
+
+plt.tight_layout()
+fig.savefig(FIG_DIR / "fig_emp_adopters_waic.png", dpi=150, bbox_inches="tight")
+plt.show()
+```
+
+```{python}
+#| label: fig-emp-kernels-k1
+#| fig-cap: "Empirical adopters-only posterior kernels, K_fit=1. Left: OO Sim 165 (SC wins). Right: Twitter cascade (CC wins). All three models (SC, CC, NP) overlaid on each panel. Posterior median (solid) + 90% CI (shaded). OO: near-linear ramp, c(30)~0.009. Twitter: CC rises fast then plateaus, SC keeps climbing. 4ch/1000wu/1000s."
+
+fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), sharey=False)
+fig.suptitle("Empirical adopters-only K_fit=1 posterior kernels  |  median + 90% CI", fontsize=11)
+
+dataset_cfg = [
+    (OO_ADO_BASE,  "OO Sim 165 (kmax=30)",  30, "SC K=1 wins"),
+    (TW_ADO_BASE,  "Twitter (kmax=50)",      50, "CC K=1 wins"),
+]
+
+for ax, (base, title, kmax, winner) in zip(axes, dataset_cfg):
+    for m_key in ["SC", "CC", "NP"]:
+        df = load_emp_kernel(base, 1, SLUG_MAP[m_key])
+        if df is None:
+            continue
+        comp = df[df["component"] == 1].sort_values("nu")
+        color = MODEL_COLOR[m_key]
+        ls = MODEL_LS[m_key]
+        ax.fill_between(comp["nu"], comp["ci_low"], comp["ci_high"],
+                        alpha=0.18, color=color)
+        ax.plot(comp["nu"], comp["median"], color=color, lw=2, ls=ls, label=m_key)
+    ax.set_title(title, fontsize=10)
+    ax.set_xlabel("Exposure k")
+    ax.set_xlim(1, kmax)
+    ax.set_ylim(bottom=0)
+    ax.text(0.97, 0.05, winner, transform=ax.transAxes,
+            ha="right", va="bottom", fontsize=8, color="#2ca02c", fontweight="bold")
+    ax.legend(fontsize=9)
+
+axes[0].set_ylabel("c(ν | adopts)")
+
+plt.tight_layout()
+fig.savefig(FIG_DIR / "fig_emp_adopters_kernels_k1.png", dpi=150, bbox_inches="tight")
+plt.show()
+```
+
+```{python}
+#| label: fig-emp-kernels-k1-summary
+#| fig-cap: "Empirical adopters-only K_fit=1 posterior kernels. Rows=dataset (OO/Twitter), cols=model (CC/SC/NP). Posterior median (solid) + 90% CI (shaded). OO: SC wins WAIC -- SC/CC/NP all agree on near-linear ramp, c(30)~0.009. Twitter: CC wins WAIC -- CC saturates ~0.03, SC keeps climbing linearly, NP similarly unbounded. Green border + star = WAIC winner per row. 4ch/1000wu/1000s."
+
+DATASET_CFG = [
+    (OO_ADO_BASE,  "OO Sim 165",  30),
+    (TW_ADO_BASE,  "Twitter",     50),
+]
+# OO row=0: SC wins. Twitter row=1: CC wins.
+ROW_WINNER = {0: "SC", 1: "CC"}
+MODEL_COLS  = ["CC", "SC", "NP"]
+
+fig, axes = plt.subplots(2, 3, figsize=(13, 7))
+fig.suptitle(
+    "Empirical adopters-only K_fit=1 posteriors  |  median + 90% CI\n"
+    "OO: 335 nodes, kmax=30  |  Twitter: 197 nodes, kmax=50",
+    fontsize=11,
+)
+
+for row, (base, dname, kmax) in enumerate(DATASET_CFG):
+    winner = ROW_WINNER[row]
+    for col, m_key in enumerate(MODEL_COLS):
+        ax = axes[row, col]
+        color = MODEL_COLOR[m_key]
+        is_winner = (m_key == winner)
+
+        # Reset all spines first, then set winner border
+        for spine in ax.spines.values():
+            spine.set_linewidth(0.8)
+            spine.set_color("gray")
+        if is_winner:
+            for spine in ax.spines.values():
+                spine.set_linewidth(3.0)
+                spine.set_color("#2ca02c")
+
+        df = load_emp_kernel(base, 1, SLUG_MAP[m_key])
+        if df is not None:
+            comp = df[df["component"] == 1].sort_values("nu")
+            ax.fill_between(comp["nu"], comp["ci_low"], comp["ci_high"],
+                            alpha=0.25, color=color)
+            ax.plot(comp["nu"], comp["median"], color=color, lw=2, label=m_key)
+            ax.legend(fontsize=9)
+
+        ax.set_xlim(1, kmax)
+        ax.set_ylim(bottom=0)
+        if row == 1:
+            ax.set_xlabel("Exposure k")
+        if col == 0:
+            ax.set_ylabel(f"{dname}\nc(ν | adopts)")
+
+        # Column title: add star for winner row=0 label
+        if row == 0:
+            title = f"★ {m_key}" if is_winner else m_key
+            ax.set_title(title, fontsize=11,
+                         color="#2ca02c" if is_winner else "black", fontweight="bold" if is_winner else "normal")
+
+        # Per-row winner label inside panel
+        if is_winner:
+            ax.text(0.5, 0.97, f"WAIC winner (vs SC/CC/NP, K=1)",
+                    transform=ax.transAxes, ha="center", va="top",
+                    fontsize=8, color="#2ca02c", fontweight="bold",
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#2ca02c", alpha=0.8))
+
+plt.tight_layout()
+fig.savefig(FIG_DIR / "fig_emp_adopters_k1_summary.png", dpi=150, bbox_inches="tight")
+plt.show()
+```
+
+```{python}
+#| label: fig-emp-kernels-by-model
+#| fig-cap: "Empirical adopters-only kernel fits by model. One figure per (model, dataset). Cols=K_fit (1,2,3). K_fit=1: posterior median + 90% CI. K_fit=2,3: MAP joint components sorted by ceiling. 4ch/1000wu/1000s."
+
+comp_styles = ["-", "--", ":"]
+tab10 = plt.cm.tab10
+
+for m_key in ["CC", "SC", "NP"]:
+    color = MODEL_COLOR[m_key]
+    for base, dname, kmax in DATASET_CFG:
+
+        fig, axes = plt.subplots(1, 3, figsize=(13, 4))
+        fig.suptitle(
+            f"{m_key} kernel fits  |  {dname}  |  K_fit=1: median+CI  |  K_fit>1: MAP joint\n"
+            f"kmax={kmax}, adopters-only survival analysis",
+            fontsize=10,
+        )
+
+        for col, k_fit in enumerate([1, 2, 3]):
+            ax = axes[col]
+
+            for spine in ax.spines.values():
+                spine.set_linewidth(0.8)
+                spine.set_color("gray")
+
+            df = load_emp_kernel(base, k_fit, SLUG_MAP[m_key])
+            if df is not None:
+                if k_fit == 1:
+                    comp = df[df["component"] == 1].sort_values("nu")
+                    ax.fill_between(comp["nu"], comp["ci_low"], comp["ci_high"],
+                                    alpha=0.25, color=color)
+                    ax.plot(comp["nu"], comp["median"], color=color, lw=2,
+                            label=f"{m_key} K=1")
+                else:
+                    comp_ids = sorted(
+                        df["component"].unique(),
+                        key=lambda c: df[df["component"] == c]["map_joint"].iloc[-1],
+                    )
+                    for i, cid in enumerate(comp_ids):
+                        comp = df[df["component"] == cid].sort_values("nu")
+                        ax.plot(
+                            comp["nu"], comp["map_joint"],
+                            color=tab10(i * 0.15), lw=2,
+                            ls=comp_styles[i % len(comp_styles)],
+                            label=f"comp {i+1}",
+                        )
+                ax.legend(fontsize=8)
+
+            ax.set_xlim(1, kmax)
+            ax.set_ylim(bottom=0)
+            ax.set_xlabel("Exposure k")
+            ax.set_title(f"K_fit={k_fit}", fontsize=10)
+            if col == 0:
+                ax.set_ylabel("c(ν | adopts)")
+
+        plt.tight_layout()
+        fname = f"fig_emp_adopters_kernels_{m_key.lower()}_{dname.replace(' ', '_').lower()}.png"
+        fig.savefig(FIG_DIR / fname, dpi=150, bbox_inches="tight")
+        plt.show()
+```

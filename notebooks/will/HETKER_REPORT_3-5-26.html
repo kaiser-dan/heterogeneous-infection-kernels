@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.8.26">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>hetker_report_3-5-26</title>
+<style>
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+</style>
+
+
+<script src="HETKER_REPORT_3-5-26_files/libs/clipboard/clipboard.min.js"></script>
+<script src="HETKER_REPORT_3-5-26_files/libs/quarto-html/quarto.js" type="module"></script>
+<script src="HETKER_REPORT_3-5-26_files/libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="HETKER_REPORT_3-5-26_files/libs/quarto-html/axe/axe-check.js" type="module"></script>
+<script src="HETKER_REPORT_3-5-26_files/libs/quarto-html/popper.min.js"></script>
+<script src="HETKER_REPORT_3-5-26_files/libs/quarto-html/tippy.umd.min.js"></script>
+<script src="HETKER_REPORT_3-5-26_files/libs/quarto-html/anchor.min.js"></script>
+<link href="HETKER_REPORT_3-5-26_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="HETKER_REPORT_3-5-26_files/libs/quarto-html/quarto-syntax-highlighting-587c61ba64f3a5504c4d52d930310e48.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="HETKER_REPORT_3-5-26_files/libs/bootstrap/bootstrap.min.js"></script>
+<link href="HETKER_REPORT_3-5-26_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="HETKER_REPORT_3-5-26_files/libs/bootstrap/bootstrap-d6a003b94517c951b2d65075d42fb01b.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+
+
+</head>
+
+<body class="fullcontent quarto-light">
+
+<div id="quarto-content" class="page-columns page-rows-contents page-layout-article">
+
+<main class="content" id="quarto-document-content">
+
+
+
+
+<section id="hetker-project-report-3-5-26" class="level1">
+<h1>HetKer Project Report — 3-5-26</h1>
+<section id="summary-of-work-3-2-26-to-3-5-26" class="level2">
+<h2 class="anchored" data-anchor-id="summary-of-work-3-2-26-to-3-5-26">Summary of Work (3-2-26 to 3-5-26)</h2>
+<hr>
+<section id="pipeline-validation-and-testing" class="level3">
+<h3 class="anchored" data-anchor-id="pipeline-validation-and-testing">1. Pipeline Validation and Testing</h3>
+<p>Wrote <code>test/test_pipeline_vs_reproduce.py</code> — 16 unit tests comparing pipeline M/N parquet output against the Monsted author replication script at production q values (q_sc=0.192, q_cc=0.18). All passing within 1pp for adoption probability. Validated against hand-transcribed Monsted Fig 3 bar heights.</p>
+<hr>
+</section>
+<section id="dashboard-overhaul" class="level3">
+<h3 class="anchored" data-anchor-id="dashboard-overhaul">2. Dashboard Overhaul</h3>
+<p>Rewired <code>dashboard.qmd</code> to read from pipeline M/N parquets via DuckDB instead of raw on-the-fly binomial smoothing. Fixed a cascade of bugs:</p>
+<ul>
+<li>100x scale mismatch between Monsted tab and Main Dashboard tab</li>
+<li>NaN <code>m_name</code> crash (stan_file param missing from optimal-q YAML configs)</li>
+<li>NaN <code>y_max</code> crash on ylim</li>
+<li>Model overlay SQL bug (<code>mu%</code> matching latent <code>c</code> rows — changed to <code>mu[%</code>)</li>
+<li>Kernel reconstruction fallback when Stan generated quantities have NULL mu (due to log-overflow in original Stan code — <code>log(c)</code> instead of <code>log_inv_logit(alpha)</code>)</li>
+<li>Jupyter kernel fix: switched from python3 (base conda, broken scipy) to hetker (.venv Python 3.13)</li>
+</ul>
+<p>Added an estimator dropdown (mean / median / marginal MAP / joint MAP) to kernel overlay. All models Playwright-verified.</p>
+<p><strong>Dashboard launch:</strong> <code>QUARTO_PYTHON=.venv/bin/python3 quarto preview dashboard.qmd --port 4242</code></p>
+<hr>
+</section>
+<section id="new-inference-sweeps-at-optimal-q" class="level3">
+<h3 class="anchored" data-anchor-id="new-inference-sweeps-at-optimal-q">3. New Inference Sweeps at Optimal q</h3>
+<p>Created two new sweep configs at production q values:</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 20%">
+<col style="width: 8%">
+<col style="width: 22%">
+<col style="width: 8%">
+<col style="width: 22%">
+<col style="width: 17%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Sweep</th>
+<th>q</th>
+<th>Metric</th>
+<th>K</th>
+<th>Models</th>
+<th>Jobs</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>research_sweep_twitter_optimal_q_sc</code></td>
+<td>0.192</td>
+<td>k</td>
+<td>1, 2</td>
+<td>SC, CC, NP mono</td>
+<td>6</td>
+</tr>
+<tr class="even">
+<td><code>research_sweep_twitter_optimal_q_cc</code></td>
+<td>0.18</td>
+<td>kappa</td>
+<td>1, 2</td>
+<td>SC, CC, NP mono</td>
+<td>6</td>
+</tr>
+</tbody>
+</table>
+<p>All 12 jobs completed on VACC and synced locally. Results in <code>results/research_sweep_twitter_optimal_q_sc/</code> and <code>results/research_sweep_twitter_optimal_q_cc/</code>.</p>
+<hr>
+</section>
+<section id="model-reparameterization-critical-fix" class="level3">
+<h3 class="anchored" data-anchor-id="model-reparameterization-critical-fix">4. Model Reparameterization (Critical Fix)</h3>
+<p><strong>Root cause of scale mismatch identified:</strong></p>
+<ul>
+<li>NP model: simplex constraint forces mu to sum to 1 across kmax=20 levels (~0.05 each), but true Twitter adoption rates are ~0.0002. Simplex is structurally wrong — adoption probabilities per exposure level do not sum to 1.</li>
+<li>Parametric: Beta(1,10) prior on rho has E=0.091, but data needs rho~0.00015 — prior is 607x too high.</li>
+</ul>
+<p><strong>Fix: logit-Normal reparameterization for all models</strong></p>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Model</th>
+<th>Parameter</th>
+<th>Prior</th>
+<th>Posterior median</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>SC</td>
+<td>rho</td>
+<td>Normal(-10, 2) on logit</td>
+<td>~4.5e-5</td>
+</tr>
+<tr class="even">
+<td>CC</td>
+<td>rho_l</td>
+<td>Normal(-10, 2) on logit</td>
+<td>~4.5e-5</td>
+</tr>
+<tr class="odd">
+<td>CC</td>
+<td>rho_h</td>
+<td>Normal(-6, 2.5) on logit</td>
+<td>~2.5e-3</td>
+</tr>
+<tr class="even">
+<td>NP mono</td>
+<td>logit_p location</td>
+<td>-7.5</td>
+<td>~5.5e-4</td>
+</tr>
+</tbody>
+</table>
+<p>All 3 sweeps (twitter, optimal_q_sc, optimal_q_cc) rerun on VACC with fixed priors.</p>
+<p><strong>Stan model fixes also applied:</strong> - Added <code>log_lik</code> to generated quantities for WAIC computation - Fixed overflow: <code>log(c)</code> → <code>log_inv_logit(alpha)</code> in generated quantities (was producing NaN for all mu when sigma~25) - NP non-monotonic dropped from all configs (not well-motivated scientifically)</p>
+<p><strong>Joint MAP estimator:</strong> NaN due to individual draw overflow in <code>c</code> computation — cosmetic, other 3 estimators (mean, median, marginal MAP) all work.</p>
+<hr>
+</section>
+<section id="np-mono-sigma-prior-fix-oo-dataset" class="level3">
+<h3 class="anchored" data-anchor-id="np-mono-sigma-prior-fix-oo-dataset">5. NP Mono Sigma Prior Fix (OO Dataset)</h3>
+<p>OO dataset (Sim 165, backbone disparity): NP mono sigma was blowing up to 27 with Exp(1) prior — model was fitting per-user heterogeneity instead of kernel shape.</p>
+<p><strong>Fix:</strong> Changed <code>Exp(1)</code> to <code>HalfNormal(0, 1)</code> in <code>non_parametric_monotonic_empirical_bayes.stan</code>.</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 9%">
+<col style="width: 45%">
+<col style="width: 45%">
+</colgroup>
+<thead>
+<tr class="header">
+<th></th>
+<th>K=1</th>
+<th>K=2</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>sigma (old, Exp(1))</td>
+<td>~27</td>
+<td>~27</td>
+</tr>
+<tr class="even">
+<td>sigma (new, HalfNormal)</td>
+<td>1.50 (95% CI: 1.28–1.72)</td>
+<td>0.53 (95% CI: 0.11–0.92)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>kmax=30 boundary test:</strong> The convex uptick at nu=20 (kmax=20) was a boundary artifact — kmax=30 kernel is smooth and approximately linear/gently concave. No evidence of complex contagion in OO Sim 165. SC model is adequate.</p>
+<hr>
+</section>
+<section id="open-issues-deferred-items" class="level3">
+<h3 class="anchored" data-anchor-id="open-issues-deferred-items">6. Open Issues / Deferred Items</h3>
+<ul>
+<li><strong>NP mono sigma still needs checking on Twitter data</strong> — prior fix applied to OO sweep only; confirm sigma is reasonable in optimal_q Twitter runs</li>
+<li><strong>q mismatch for fast-path loading:</strong> Pipeline parquets use q=0.192/0.18 but inference runs use q=0.2/1.0. Dashboard has fallback (on-the-fly computation) but fast path not working everywhere. Fix: rerun pipeline at q=0.2/1.0 or rerun inference at q=0.192/0.18.</li>
+<li><strong>WAIC values:</strong> Need to verify log_lik is correctly computed in all Stan models post-fix. Check inference_summary.parquet for elpd_waic column.</li>
+<li><strong>Parametric K=1 models:</strong> mu values were NULL pre-fix — verify they are now finite after Stan overflow fix.</li>
+</ul>
+<hr>
+</section>
+<section id="agent-instructions-for-twitter-sweep-notebook-3-5-26.qmd" class="level3">
+<h3 class="anchored" data-anchor-id="agent-instructions-for-twitter-sweep-notebook-3-5-26.qmd">7. Agent Instructions for Twitter Sweep Notebook (3-5-26.qmd)</h3>
+<p><strong>Notebook location:</strong> <code>notebooks/will/3-5-26.qmd</code> <strong>Environment:</strong> <code>QUARTO_PYTHON=.venv/bin/python3 quarto render notebooks/will/3-5-26.qmd</code> <strong>Kernel:</strong> <code>hetker</code></p>
+<section id="section-1-setup" class="level4">
+<h4 class="anchored" data-anchor-id="section-1-setup">Section 1 — Setup</h4>
+<p>Standard imports: duckdb, pandas, numpy, matplotlib, pathlib. Set <code>RESULTS_ROOT = Path("../../results")</code> from notebook location. Focus on <code>research_sweep_twitter_optimal_q_sc</code> and <code>research_sweep_twitter_optimal_q_cc</code> — these are the primary results with corrected priors.</p>
+</section>
+<section id="section-2-empirical-probability-of-adoption" class="level4">
+<h4 class="anchored" data-anchor-id="section-2-empirical-probability-of-adoption">Section 2 — Empirical Probability of Adoption</h4>
+<p>Load M and N parquets for both q_sc=0.192 (k metric) and q_cc=0.18 (kappa metric):</p>
+<pre><code>data/processed/twitter/full/M_k_q0.192.parquet
+data/processed/twitter/full/N_k_q0.192.parquet
+data/processed/twitter/full/M_kappa_q0.18.parquet
+data/processed/twitter/full/N_kappa_q0.18.parquet</code></pre>
+<p>Compute <code>P_adopt(k) = 100 * M[k] / (M[k] + N[k])</code> (percentage). Plot: bar chart of P(adopt|k) vs k for both metrics, with binomial 95% CI error bars. Save to <code>figures/3-5-26/empirical_adoption.png</code>.</p>
+</section>
+<section id="section-3-n-and-m-matrices" class="level4">
+<h4 class="anchored" data-anchor-id="section-3-n-and-m-matrices">Section 3 — N and M Matrices</h4>
+<p>Side-by-side bar charts of M[k] and N[k] for both metrics. Log scale y-axis. Include total counts. Save to <code>figures/3-5-26/M_N_matrices.png</code>.</p>
+</section>
+<section id="section-4-kernel-fits" class="level4">
+<h4 class="anchored" data-anchor-id="section-4-kernel-fits">Section 4 — Kernel Fits</h4>
+<p>Load <code>kernel_mode_summary.parquet</code> from all optimal_q runs. Columns include: <code>nu</code>, <code>mean</code>, <code>median</code>, <code>map_marginal</code>, plus path-derived model identifiers.</p>
+<p>For each (sweep × K) combination, plot all 3 models (SC, CC, NP mono) overlaid. Use <code>mean</code> estimator as primary curve. Overlay empirical P(adopt|k) in light gray background.</p>
+<p>Layout: 2×2 grid (rows: SC metric / CC metric, cols: K=1 / K=2). Save to <code>figures/3-5-26/kernel_fits.png</code>.</p>
+</section>
+<section id="section-5-waic-comparison" class="level4">
+<h4 class="anchored" data-anchor-id="section-5-waic-comparison">Section 5 — WAIC Comparison</h4>
+<p>Load <code>inference_summary.parquet</code> from all optimal_q runs. Check for <code>elpd_waic</code>, <code>waic</code>, or <code>looic</code> columns. Compute ΔWAIC (subtract best model within each group; lower = better). Bar chart faceted by K=1 / K=2, colored by model. Annotate bars with ΔWAIC values. Save to <code>figures/3-5-26/waic_comparison.png</code>.</p>
+</section>
+<section id="section-6-summary-table" class="level4">
+<h4 class="anchored" data-anchor-id="section-6-summary-table">Section 6 — Summary Table</h4>
+<p>DataFrame with all runs: sweep, K, model, q, metric, WAIC, rho_mean, rho_sd, sigma_mean (NP only). Display as styled table, best model highlighted per group.</p>
+</section>
+<section id="notes-for-agent" class="level4">
+<h4 class="anchored" data-anchor-id="notes-for-agent">Notes for agent</h4>
+<ul>
+<li>NP non-monotonic was dropped from optimal_q sweeps — do not expect it</li>
+<li><code>research_sweep_twitter</code> uses old Beta priors — focus on optimal_q sweeps</li>
+<li>Joint MAP estimator is NaN — use <code>mean</code> or <code>map_marginal</code></li>
+<li><code>dashboard.qmd</code> has working data loading code to reference</li>
+<li>Check parquet column names before assuming — read one file with <code>pd.read_parquet(path).columns.tolist()</code></li>
+</ul>
+</section>
+</section>
+</section>
+</section>
+
+</main>
+<!-- /main column -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp('/' + window.location.host + '/');
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>

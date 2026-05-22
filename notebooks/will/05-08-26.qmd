@@ -1,0 +1,676 @@
+---
+title: "Simpson's Contagion Sweeps — Initial Results"
+format:
+  html:
+    code-fold: true
+    self-contained: true
+jupyter: python3
+---
+
+```{python}
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import yaml
+import json
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path("../..").resolve()))
+from workflow.lib.experiment_plan import build_synthetic_instances
+
+RESULTS = Path("../..") / "results"
+INST_DIR = "K~1/stan_file~non_parametric_monotonic"
+```
+
+## Background
+
+
+
+
+The original master equation in the Simpson's contagion paper assumes that the infection rate follows a powerlaw kernel that is the probability that is in a group(fully connected clique) of $n$ agents $i$ of which are infected the transmission rate is 
+
+$$\beta(i | \lambda, \nu)=\lambda \nu^\alpha$$
+
+Where $\lambda$ controls the base rate of infection and $\nu$ controls the non-linearity. When $nu = 1$ the kernel is linear.
+
+We write down a Approximate master equation(AME) to track the evolution of the system. We track the evolution *within* each group excactly and approximate the between group infecetions with a moment closure $\rho(t)$. Which averages transmission probabilities over all groups. 
+
+We see that $\hat{beta}(n,i,t) = \frac{\int_0^\infty \int_0^\infty \lambda i^\nu G_i^{(n,\lambda,\nu)}(t) d\lambda d\nu}{\int_0^\infty \int_0^\infty G_i^{(n,\lambda,\nu)}(t) d\lambda d\nu}$
+
+
+We can then tract the *kernel variation* as 
+
+$$\delta \tilde{\beta}(t) = \frac{\tilde{\beta}(t) - \tilde{\beta}(t-1)}{\tilde{\beta}(t)}$$
+
+There is also a second version of the kernel variation, a stranger and rarer type of variation. 
+
+
+$$ \Delta \tilde{\beta}(n,i) = \frac{\int_0^\infty \int_0^\infty i^\nu - (i-1)^{\nu} h_i^{n,\lambda,\nu}d\lambda d\nu}{\int_0^\infty \int_0^\infty h_i^{n,\lambda,\nu} d\lambda d\nu}$$
+
+
+
+So $\delta \tilde{\beta}$ tracks the kernel variation averaged over all groups at time t. Wheras $\Delta \tilde{\beta}$ tracks the kernel variation *within* each group, averaged over all groups. This helps control for the selection bias 
+
+
+
+
+
+
+```{python}
+def delta_beta(c):
+    """Compute increments δβ(ν) = c(ν) - c(ν-1), with c(0)=0 implied."""
+    c = np.asarray(c)
+    return np.diff(np.concatenate([[0], c]))
+
+
+def load_sweep(config_path, sweep_name):
+    """Load all completed kernel_mode_summary files, tagged with their parameters."""
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    instances = build_synthetic_instances(config)
+
+    rows = []
+    for inst in instances:
+        data_name = inst["data_name"]
+        p = RESULTS / sweep_name / "synthetic" / data_name / INST_DIR / "kernel_mode_summary.parquet"
+        if not p.exists():
+            continue
+        df = pd.read_parquet(p)
+        df = df[df["source_param"] == "mu"].copy()
+        # flatten overrides into columns
+        ov = inst["overrides"]
+        df["epsilon"]   = ov.get("graph", {}).get("params", {}).get("epsilon", float("nan"))
+        df["data_name"] = data_name
+        rows.append((ov, df))
+    return instances, rows
+
+
+def power_law_kernel(lam, alpha, nu_max):
+    nu = np.arange(1, nu_max + 1, dtype=float)
+    return nu, np.clip(lam * nu**alpha, 0, 1)
+
+
+def fit_log_slope(nu, vals):
+    """Fit log(mu) ~ b*log(nu) and return b (apparent exponent)."""
+    mask = (nu > 0) & (vals > 0)
+    if mask.sum() < 3:
+        return float("nan")
+    b = np.polyfit(np.log(nu[mask]), np.log(vals[mask]), 1)[0]
+    return b
+```
+
+## Mechanism A — Degree heterogeneity (same kernel, unequal blocks)
+
+```{python}
+with open("../../configs/simpson_mech_a_20260508.yaml") as f:
+    cfg_a = yaml.safe_load(f)
+
+_, rows_a = load_sweep("../../configs/simpson_mech_a_20260508.yaml", "simpson_mech_a_20260508")
+
+# Decode phi and alpha from overrides
+records_a = []
+for ov, df in rows_a:
+    phi   = ov.get("graph", {}).get("params", {}).get("phi", 0.5)
+    eps   = ov.get("graph", {}).get("params", {}).get("epsilon", float("nan"))
+    kerns = ov.get("contagion", {}).get("kernels", [{}])
+    alpha = kerns[0].get("alpha", float("nan"))
+    lam   = kerns[0].get("lam", float("nan"))
+    for _, row in df.iterrows():
+        records_a.append(dict(phi=phi, epsilon=eps, alpha=alpha, lam=lam,
+                              nu=row["nu"], median=row["median"],
+                              ci_low=row["ci_low"], ci_high=row["ci_high"]))
+
+df_a = pd.DataFrame(records_a)
+print(f"Completed: {df_a['data_name'].nunique() if 'data_name' in df_a.columns else len(rows_a)}/{64} datasets")
+print(f"Parameter grid: alpha={sorted(df_a.alpha.unique())}, phi={sorted(df_a.phi.unique())}, epsilon={sorted(df_a.epsilon.unique())}")
+```
+
+### Inferred vs. true kernel — ε=0.9 (highest assortativity)
+
+Each panel: posterior median (solid) ± 90% CI vs. true power-law kernel (dashed black).
+
+```{python}
+eps_show = 0.9
+alphas = sorted(df_a.alpha.unique())
+phis   = sorted(df_a.phi.unique())
+NU_MAX = 20
+
+fig, axes = plt.subplots(len(alphas), len(phis), figsize=(14, 10), sharey="row", sharex=True)
+cmap = plt.get_cmap("Blues")
+phi_colors = {phi: cmap(0.35 + 0.55 * i / max(1, len(phis)-1)) for i, phi in enumerate(phis)}
+
+for ri, alpha in enumerate(alphas):
+    for ci, phi in enumerate(phis):
+        ax = axes[ri, ci]
+        sub = df_a[(df_a.alpha == alpha) & (df_a.phi == phi) & (df_a.epsilon == eps_show)]
+
+        # true kernel
+        nu_t, k_t = power_law_kernel(0.15, alpha, NU_MAX)
+        ax.plot(nu_t, k_t, "k--", lw=1.8, alpha=0.7, label="True" if ci == 0 else None, zorder=4)
+
+        if len(sub) > 0:
+            sub = sub.sort_values("nu")
+            nu_inf = sub["nu"].values
+            ax.plot(nu_inf, sub["median"].values, color=phi_colors[phi], lw=2, zorder=3,
+                    label=f"Inferred" if ci == 0 else None)
+            ax.fill_between(nu_inf, sub["ci_low"].values, sub["ci_high"].values,
+                            color=phi_colors[phi], alpha=0.18)
+
+            # compute and annotate apparent exponent
+            b_inferred = fit_log_slope(nu_inf, sub["median"].values)
+            ax.annotate(f"b̂={b_inferred:.2f}", xy=(0.97, 0.07), xycoords="axes fraction",
+                        ha="right", fontsize=8, color=phi_colors[phi])
+        else:
+            ax.text(0.5, 0.5, "pending", transform=ax.transAxes, ha="center", va="center",
+                    fontsize=9, color="gray")
+
+        ax.axhline(0, color="gray", lw=0.5, ls=":")
+        ax.set_xlim(0.5, NU_MAX + 0.5)
+        ax.set_ylim(bottom=0)
+        ax.grid(True, alpha=0.15, ls=":")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        if ri == 0:
+            ax.set_title(f"φ={phi}", fontsize=10)
+        if ci == 0:
+            ax.set_ylabel(f"α={alpha}\np(infect|ν)", fontsize=9)
+        if ri == len(alphas) - 1:
+            ax.set_xlabel("ν (infected neighbours)", fontsize=9)
+
+fig.suptitle(
+    f"Mechanism A — inferred vs. true kernel (ε={eps_show})\n"
+    "b̂ = apparent log-log exponent of inferred kernel (true α ≤ 1)",
+    fontsize=12, y=1.01,
+)
+plt.tight_layout()
+plt.show()
+```
+
+### δβ(ν) — incremental infection rate, ε=0.9
+
+The Simpson signature: each block's true δβ is **declining** (sublinear kernel), but the K=1 inferred δβ may be **rising** (apparent complex contagion).
+
+```{python}
+# Pick one representative φ per panel to avoid clutter (largest imbalance)
+phi_show = max(phis)
+
+fig, axes = plt.subplots(1, len(alphas), figsize=(14, 4), sharey=False)
+
+for ci, alpha in enumerate(alphas):
+    ax = axes[ci]
+    sub = df_a[(df_a.alpha == alpha) & (df_a.phi == phi_show) & (df_a.epsilon == eps_show)]
+
+    # true δβ
+    nu_t, k_t = power_law_kernel(0.15, alpha, NU_MAX)
+    db_true = delta_beta(k_t)
+    ax.plot(np.arange(1, NU_MAX + 1), db_true, "k--", lw=2, label="True δβ", zorder=4)
+
+    if len(sub) > 0:
+        sub = sub.sort_values("nu")
+        db_inf  = delta_beta(sub["median"].values)
+        db_low  = delta_beta(sub["ci_low"].values)
+        db_high = delta_beta(sub["ci_high"].values)
+        nu_inf  = sub["nu"].values
+        ax.plot(nu_inf, db_inf, color=phi_colors[phi_show], lw=2, label="Inferred δβ", zorder=3)
+        ax.fill_between(nu_inf, db_low, db_high, color=phi_colors[phi_show], alpha=0.18)
+
+    ax.axhline(0, color="gray", lw=0.5, ls=":")
+    ax.set_title(f"α={alpha}", fontsize=10)
+    ax.set_xlabel("ν", fontsize=10)
+    ax.set_xlim(0.5, NU_MAX + 0.5)
+    ax.grid(True, alpha=0.15, ls=":")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    if ci == 0:
+        ax.set_ylabel("δβ(ν) = c(ν) − c(ν−1)", fontsize=10)
+        ax.legend(fontsize=9)
+
+fig.suptitle(
+    f"Mechanism A — δβ increments (ε={eps_show}, φ={phi_show})\n"
+    "Declining true δβ + rising inferred δβ = Simpson's contagion",
+    fontsize=11, y=1.02,
+)
+plt.tight_layout()
+plt.show()
+```
+
+### Apparent exponent vs. true α — all ε
+
+```{python}
+# Compute apparent exponent for every completed run
+exponent_rows = []
+for ov, df in rows_a:
+    phi   = ov.get("graph", {}).get("params", {}).get("phi", 0.5)
+    eps   = ov.get("graph", {}).get("params", {}).get("epsilon", float("nan"))
+    kerns = ov.get("contagion", {}).get("kernels", [{}])
+    alpha = kerns[0].get("alpha", float("nan"))
+    sub = df[df["source_param"] == "mu"].sort_values("nu")
+    b = fit_log_slope(sub["nu"].values.astype(float), sub["median"].values)
+    exponent_rows.append(dict(phi=phi, epsilon=eps, alpha=alpha, apparent_exponent=b))
+
+exp_df_a = pd.DataFrame(exponent_rows)
+
+fig, axes = plt.subplots(1, len(alphas), figsize=(13, 4), sharey=True)
+eps_vals = sorted(exp_df_a.epsilon.unique())
+eps_colors = {e: plt.cm.plasma(i / max(1, len(eps_vals)-1)) for i, e in enumerate(eps_vals)}
+
+for ci, alpha in enumerate(alphas):
+    ax = axes[ci]
+    sub = exp_df_a[exp_df_a.alpha == alpha]
+
+    for phi in sorted(sub.phi.unique()):
+        psub = sub[sub.phi == phi].sort_values("epsilon")
+        ax.plot(psub.epsilon, psub.apparent_exponent,
+                marker="o", ms=6, lw=1.5, label=f"φ={phi}", alpha=0.85)
+
+    ax.axhline(alpha, color="black", lw=1.5, ls="--", alpha=0.7, label=f"True α={alpha}")
+    ax.axhline(1.0,   color="gray",  lw=1.0, ls=":",  alpha=0.5, label="Linear (b=1)")
+    ax.set_xlabel("ε (assortativity)", fontsize=10)
+    ax.set_title(f"True α={alpha}", fontsize=10)
+    ax.set_ylim(0, None)
+    ax.grid(True, alpha=0.2, ls=":")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    if ci == 0:
+        ax.set_ylabel("Apparent log-log exponent b̂", fontsize=10)
+        ax.legend(fontsize=8)
+
+fig.suptitle(
+    "Mechanism A — apparent exponent b̂ vs. ε, coloured by φ\n"
+    "b̂ > true α means Simpson inflation; b̂ > 1 means apparent complex contagion",
+    fontsize=11, y=1.02,
+)
+plt.tight_layout()
+plt.show()
+```
+
+### Paper-style figure: δβ̃ vs. Δβ̃ cloud plot (Mechanism A)
+
+For Mechanism A, the intrinsic kernel is exactly the same for all nodes, meaning $\delta\beta_{dense}(\nu) = \delta\beta_{sparse}(\nu) = \delta\beta_{true}(\nu)$. Because of this, the composition-weighted average $\Delta \tilde{\beta}(\nu)$ perfectly overlaps the true $\delta\beta(\nu)$. The paradox occurs entirely because the inferred $\delta\tilde{\beta}$ pulls away from $\Delta \tilde{\beta}$ due to the structural coarse-graining of the network topologies.
+
+```{python}
+# Illustrative single panel for Mechanism A: α=0.7, φ=0.8 (strong degree heterogeneity), ε=0.9
+a_lookup = {}
+for inst in insts_a_all if 'insts_a_all' in locals() else build_synthetic_instances(cfg_a):
+    ov = inst["overrides"]
+    eps   = ov.get("graph", {}).get("params", {}).get("epsilon")
+    phi_v = ov.get("graph", {}).get("params", {}).get("phi")
+    kerns = ov.get("contagion", {}).get("kernels", [])
+    a_v   = kerns[0].get("alpha") if kerns else None
+    if eps == 0.9 and phi_v == 0.8:
+        a_lookup[a_v] = inst["data_name"]
+
+if 0.7 in a_lookup:
+    fig, ax = plt.subplots(figsize=(7, 5))
+    make_paper_panel(ax, a_lookup[0.7], "simpson_mech_a_20260508",
+                     alpha=0.7, lam_hi=0.15, lam_lo=0.15, phi=0.8, nu_max=25)
+    ax.set_xlabel("Number of infectious neighbours  ν", fontsize=12)
+    ax.set_ylabel("Contagion rate variation  δβ", fontsize=12)
+    ax.legend(fontsize=9, loc="upper right")
+    ax.set_title(
+        r"Simpson's contagion — Mechanism A  (α=0.7, λ=0.15, φ=0.8, ε=0.9)"
+        "\nSince λ is identical for all nodes, Δβ̃ exactly matches the true δβ."
+        r"  |  Inferred $\delta\tilde{\beta}$ still rises due to topology!",
+        fontsize=9,
+    )
+    plt.tight_layout()
+    plt.show()
+```
+
+
+## Results 
+
+In this test we construct a stochastic block model 
+
+```{python}
+_, rows_b = load_sweep("../../configs/simpson_mech_b_20260508.yaml", "simpson_mech_b_20260508")
+
+records_b = []
+for ov, df in rows_b:
+    eps    = ov.get("graph", {}).get("params", {}).get("epsilon", float("nan"))
+    omega  = ov.get("contagion", {}).get("assignment", {}).get("omega", 0.0)
+    kerns  = ov.get("contagion", {}).get("kernels", [{}, {}])
+    alpha  = kerns[0].get("alpha", float("nan"))
+    lam_hi = kerns[0].get("lam", float("nan"))
+    lam_lo = kerns[1].get("lam", float("nan")) if len(kerns) > 1 else float("nan")
+    for _, row in df.iterrows():
+        records_b.append(dict(epsilon=eps, omega=omega, alpha=alpha,
+                              lam_hi=lam_hi, lam_lo=lam_lo,
+                              contrast=round(lam_hi / lam_lo, 2) if lam_lo > 0 else float("nan"),
+                              nu=row["nu"], median=row["median"],
+                              ci_low=row["ci_low"], ci_high=row["ci_high"]))
+
+df_b = pd.DataFrame(records_b)
+n_done = len(rows_b)
+print(f"Completed: {n_done}/192 datasets")
+if n_done > 0:
+    print(f"alpha={sorted(df_b.alpha.unique())}")
+    print(f"lam_lo={sorted(df_b.lam_lo.unique())}")
+    print(f"epsilon={sorted(df_b.epsilon.unique())}")
+    print(f"omega={sorted(df_b.omega.unique())}")
+```
+
+### Inferred vs. true kernel — ε=0.9, ω=0.0
+
+```{python}
+eps_show, omega_show = 0.9, 0.0
+lam_los = sorted(df_b.lam_lo.unique()) if len(df_b) > 0 else []
+
+if len(df_b) == 0 or len(lam_los) == 0:
+    print("Mechanism B results still pending — check back once sweep completes.")
+else:
+    fig, axes = plt.subplots(len(alphas), len(lam_los), figsize=(14, 10), sharey="row", sharex=True)
+    cmap_b = plt.get_cmap("Oranges")
+    lo_colors = {l: cmap_b(0.35 + 0.55 * i / max(1, len(lam_los)-1)) for i, l in enumerate(lam_los)}
+
+    for ri, alpha in enumerate(alphas):
+        for ci, lam_lo in enumerate(lam_los):
+            ax = axes[ri, ci]
+            sub = df_b[
+                (df_b.alpha == alpha) & (df_b.lam_lo == lam_lo) &
+                (df_b.epsilon == eps_show) & (df_b.omega == omega_show)
+            ]
+
+            # true kernel for HIGH block (what each block actually uses)
+            nu_t, k_hi = power_law_kernel(0.3, alpha, NU_MAX)
+            nu_t, k_lo = power_law_kernel(lam_lo, alpha, NU_MAX)
+            ax.plot(nu_t, k_hi, "k--", lw=1.5, alpha=0.6,
+                    label="True hi" if ci == 0 else None, zorder=4)
+            ax.plot(nu_t, k_lo, color="gray", lw=1.5, ls=":", alpha=0.6,
+                    label="True lo" if ci == 0 else None, zorder=4)
+
+            if len(sub) > 0:
+                sub = sub.sort_values("nu")
+                ax.plot(sub["nu"], sub["median"], color=lo_colors[lam_lo], lw=2, zorder=3,
+                        label="Inferred" if ci == 0 else None)
+                ax.fill_between(sub["nu"], sub["ci_low"], sub["ci_high"],
+                                color=lo_colors[lam_lo], alpha=0.18)
+                b = fit_log_slope(sub["nu"].values.astype(float), sub["median"].values)
+                ax.annotate(f"b̂={b:.2f}", xy=(0.97, 0.07), xycoords="axes fraction",
+                            ha="right", fontsize=8, color=lo_colors[lam_lo])
+            else:
+                ax.text(0.5, 0.5, "pending", transform=ax.transAxes,
+                        ha="center", va="center", fontsize=9, color="gray")
+
+            ax.set_xlim(0.5, NU_MAX + 0.5)
+            ax.set_ylim(bottom=0)
+            ax.grid(True, alpha=0.15, ls=":")
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            if ri == 0:
+                ax.set_title(f"λ_lo={lam_lo}\n(ratio={0.3/lam_lo:.1f}×)", fontsize=9)
+            if ci == 0:
+                ax.set_ylabel(f"α={alpha}\np(infect|ν)", fontsize=9)
+            if ri == len(alphas) - 1:
+                ax.set_xlabel("ν (infected neighbours)", fontsize=9)
+
+    fig.suptitle(
+        f"Mechanism B — inferred vs. true kernel (ε={eps_show}, ω={omega_show})\n"
+        "Columns: λ_hi/λ_lo contrast ratio. b̂ = apparent exponent of inferred kernel.",
+        fontsize=12, y=1.01,
+    )
+    plt.tight_layout()
+    plt.show()
+```
+
+### δβ(ν) — incremental infection rate, ε=0.9, ω=0.0
+
+Two true curves (one per block, both declining) vs. aggregate inferred δβ.
+
+```{python}
+if len(df_b) == 0:
+    print("Mechanism B results still pending.")
+else:
+    lam_lo_show = min(lam_los)  # strongest contrast
+    fig, axes = plt.subplots(1, len(alphas), figsize=(14, 4), sharey=False)
+
+    for ci, alpha in enumerate(alphas):
+        ax = axes[ci]
+        sub = df_b[
+            (df_b.alpha == alpha) & (df_b.lam_lo == lam_lo_show) &
+            (df_b.epsilon == eps_show) & (df_b.omega == omega_show)
+        ]
+
+        # true δβ for each block
+        nu_t, k_hi = power_law_kernel(0.3, alpha, NU_MAX)
+        nu_t, k_lo_vals = power_law_kernel(lam_lo_show, alpha, NU_MAX)
+        ax.plot(np.arange(1, NU_MAX+1), delta_beta(k_hi),
+                color="#1a237e", lw=2, ls="--", label=f"True hi (λ={0.3})", zorder=4)
+        ax.plot(np.arange(1, NU_MAX+1), delta_beta(k_lo_vals),
+                color="#b71c1c", lw=2, ls="--", label=f"True lo (λ={lam_lo_show})", zorder=4)
+
+        if len(sub) > 0:
+            sub = sub.sort_values("nu")
+            db_inf  = delta_beta(sub["median"].values)
+            db_low  = delta_beta(sub["ci_low"].values)
+            db_high = delta_beta(sub["ci_high"].values)
+            nu_inf  = sub["nu"].values
+            ax.plot(nu_inf, db_inf, color="#e65100", lw=2.5, label="Inferred δβ", zorder=3)
+            ax.fill_between(nu_inf, db_low, db_high, color="#e65100", alpha=0.18)
+        else:
+            ax.text(0.5, 0.5, "pending", transform=ax.transAxes,
+                    ha="center", va="center", fontsize=9, color="gray")
+
+        ax.axhline(0, color="gray", lw=0.5, ls=":")
+        ax.set_title(f"α={alpha}", fontsize=10)
+        ax.set_xlabel("ν", fontsize=10)
+        ax.set_xlim(0.5, NU_MAX + 0.5)
+        ax.grid(True, alpha=0.15, ls=":")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        if ci == 0:
+            ax.set_ylabel("δβ(ν) = c(ν) − c(ν−1)", fontsize=10)
+            ax.legend(fontsize=8)
+
+    fig.suptitle(
+        f"Mechanism B — δβ increments (ε={eps_show}, ω={omega_show}, λ_lo={lam_lo_show})\n"
+        "Both true δβ curves decline; rising inferred δβ = Simpson's contagion",
+        fontsize=11, y=1.02,
+    )
+    plt.tight_layout()
+    plt.show()
+```
+
+### Apparent exponent vs. rate contrast — all ε
+
+```{python}
+if len(df_b) == 0:
+    print("Mechanism B results still pending.")
+else:
+    exp_rows_b = []
+    for ov, df in rows_b:
+        eps    = ov.get("graph", {}).get("params", {}).get("epsilon", float("nan"))
+        omega  = ov.get("contagion", {}).get("assignment", {}).get("omega", 0.0)
+        kerns  = ov.get("contagion", {}).get("kernels", [{}, {}])
+        alpha  = kerns[0].get("alpha", float("nan"))
+        lam_lo = kerns[1].get("lam", float("nan")) if len(kerns) > 1 else float("nan")
+        sub = df[df["source_param"] == "mu"].sort_values("nu")
+        b = fit_log_slope(sub["nu"].values.astype(float), sub["median"].values)
+        exp_rows_b.append(dict(epsilon=eps, omega=omega, alpha=alpha, lam_lo=lam_lo,
+                               contrast=round(0.3/lam_lo, 1) if lam_lo > 0 else float("nan"),
+                               apparent_exponent=b))
+    exp_df_b = pd.DataFrame(exp_rows_b)
+
+    # fix omega=0 for clean view
+    sub_b = exp_df_b[exp_df_b.omega == 0.0]
+    contrasts = sorted(sub_b.contrast.unique())
+
+    fig, axes = plt.subplots(1, len(alphas), figsize=(13, 4), sharey=True)
+    for ci, alpha in enumerate(alphas):
+        ax = axes[ci]
+        asub = sub_b[sub_b.alpha == alpha]
+        for eps in sorted(asub.epsilon.unique()):
+            esub = asub[asub.epsilon == eps].sort_values("contrast")
+            ax.plot(esub.contrast, esub.apparent_exponent,
+                    marker="o", ms=6, lw=1.5, label=f"ε={eps}", alpha=0.85)
+
+        ax.axhline(alpha, color="black", lw=1.5, ls="--", alpha=0.7, label=f"True α={alpha}")
+        ax.axhline(1.0,   color="gray",  lw=1.0, ls=":",  alpha=0.5)
+        ax.set_xlabel("λ_hi / λ_lo (rate contrast)", fontsize=10)
+        ax.set_title(f"True α={alpha}", fontsize=10)
+        ax.set_ylim(0, None)
+        ax.grid(True, alpha=0.2, ls=":")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        if ci == 0:
+            ax.set_ylabel("Apparent log-log exponent b̂", fontsize=10)
+            ax.legend(fontsize=8)
+
+    fig.suptitle(
+        "Mechanism B — apparent exponent b̂ vs. rate contrast, ω=0 (ε coloured)\n"
+        "b̂ > α = Simpson inflation; b̂ > 1 = apparent complex contagion",
+        fontsize=11, y=1.02,
+    )
+    plt.tight_layout()
+    plt.show()
+```
+
+## Paper-style figure: δβ̃ vs. Δβ̃ cloud plot (Mechanism B)
+
+```{python}
+DATA = Path("../..") / "data" / "processed" / "synthetic"
+
+def load_instance_data(data_name, sweep_name):
+    M   = pd.read_parquet(DATA / data_name / "M.parquet").values
+    N   = pd.read_parquet(DATA / data_name / "N.parquet").values
+    kms = pd.read_parquet(
+        RESULTS / sweep_name / "synthetic" / data_name / INST_DIR / "kernel_mode_summary.parquet"
+    )
+    kms = kms[kms["source_param"] == "mu"].sort_values("nu").reset_index(drop=True)
+    return M, N, kms
+
+
+def make_paper_panel(ax, data_name, sweep_name, alpha, lam_hi, lam_lo,
+                     phi=0.5, n_nodes=512, nu_max=25):
+    split = int(n_nodes * phi)   # nodes 0..split-1 → k_hi,  split..n-1 → k_lo
+    M, N, kms = load_instance_data(data_name, sweep_name)
+
+    nu_arr    = np.arange(1, nu_max + 1, dtype=float)
+    prev_arr  = np.concatenate([[0.0], nu_arr[:-1]])           # [0,1,2,...,nu_max-1]
+    db_hi_arr = lam_hi * (nu_arr**alpha - prev_arr**alpha)     # declining for alpha<1
+    db_lo_arr = lam_lo * (nu_arr**alpha - prev_arr**alpha)
+
+    # ── Gray cloud: per-node TRUE kernel variation, sized by event count ──
+    # db_true[node, nu_idx] = λ_block · (ν^α − (ν−1)^α)  for ν = nu_idx+1
+    is_hi    = np.arange(n_nodes) < split
+    db_true  = np.where(is_hi[:, None], db_hi_arr[None, :], db_lo_arr[None, :])  # (n, nu_max)
+    total    = (M[:, 1:nu_max+1] + N[:, 1:nu_max+1]).astype(float)               # (n, nu_max)
+    valid    = total > 0
+    ni, vi   = np.where(valid)
+    ax.scatter(vi + 1, db_true[ni, vi],
+               s=np.sqrt(total[ni, vi]) * 10,
+               color="gray", alpha=0.06, linewidths=0, zorder=1)
+
+    # ── Δβ̃: event-weighted average of per-block true δβ ─────────────────
+    total_hi  = (M[:split,  1:nu_max+1] + N[:split,  1:nu_max+1]).sum(axis=0)
+    total_lo  = (M[split:,  1:nu_max+1] + N[split:,  1:nu_max+1]).sum(axis=0)
+    total_all = total_hi + total_lo
+    Delta_beta = np.where(
+        total_all > 0,
+        (total_hi * db_hi_arr + total_lo * db_lo_arr) / total_all,
+        np.nan,
+    )
+    ax.plot(nu_arr, Delta_beta, color="black", lw=2, ls="--",
+            marker="x", ms=5, markevery=2, zorder=4, label=r"$\Delta\tilde{\beta}(n,\nu)$")
+
+    # ── True per-block δβ (colored dashed, both declining) ───────────────
+    ax.plot(nu_arr, db_hi_arr, color="#1565c0", lw=1.8, ls="--", alpha=0.85, zorder=3,
+            label=f"True δβ hi  λ={lam_hi}")
+    ax.plot(nu_arr, db_lo_arr, color="#e65100", lw=1.8, ls="--", alpha=0.85, zorder=3,
+            label=f"True δβ lo  λ={lam_lo}")
+
+    # ── δβ̃: inferred K=1 kernel variation (black solid + circles) ────────
+    nu_inf    = kms["nu"].values.astype(float)
+    med       = kms["median"].values
+    lo_ci     = kms["ci_low"].values
+    hi_ci     = kms["ci_high"].values
+    db_inf    = np.diff(np.concatenate([[0.0], med]))
+    db_inf_lo = np.diff(np.concatenate([[0.0], lo_ci]))
+    db_inf_hi = np.diff(np.concatenate([[0.0], hi_ci]))
+    mask = nu_inf <= nu_max
+    ax.plot(nu_inf[mask], db_inf[mask], color="black", lw=2.5,
+            marker="o", ms=4.5, zorder=5, label=r"$\delta\tilde{\beta}(n,\nu)$")
+    ax.fill_between(nu_inf[mask], db_inf_lo[mask], db_inf_hi[mask],
+                    color="black", alpha=0.10, zorder=2)
+
+    ax.set_xlim(0.5, nu_max + 0.5)
+    ax.set_ylim(bottom=0)
+    ax.axhline(0, color="gray", lw=0.4, ls=":")
+    ax.grid(True, alpha=0.12, ls=":")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+```
+
+```{python}
+# Illustrative single panel: α=0.7, λ_lo=0.05 (strongest contrast), ε=0.9
+with open("../../configs/simpson_mech_b_20260508.yaml") as f:
+    cfg_b_raw = yaml.safe_load(f)
+insts_b_all = build_synthetic_instances(cfg_b_raw)
+
+b_lookup = {}
+for inst in insts_b_all:
+    ov     = inst["overrides"]
+    eps    = ov.get("graph", {}).get("params", {}).get("epsilon")
+    omega  = ov.get("contagion", {}).get("assignment", {}).get("omega", 0.0)
+    kerns  = ov.get("contagion", {}).get("kernels", [])
+    a      = kerns[0].get("alpha") if kerns else None
+    ll     = kerns[1].get("lam")   if len(kerns) > 1 else None
+    if eps == 0.9 and omega == 0.0:
+        b_lookup[(a, ll)] = inst["data_name"]
+
+fig, ax = plt.subplots(figsize=(7, 5))
+make_paper_panel(ax, b_lookup[(0.7, 0.05)], "simpson_mech_b_20260508",
+                 alpha=0.7, lam_hi=0.3, lam_lo=0.05, nu_max=25)
+ax.set_xlabel("Number of infectious neighbours  ν", fontsize=12)
+ax.set_ylabel("Contagion rate variation  δβ", fontsize=12)
+ax.legend(fontsize=9, loc="upper right")
+ax.set_title(
+    r"Simpson's contagion — Mechanism B  (α=0.7, λ_hi=0.3, λ_lo=0.05, ε=0.9)"
+    "\nGray cloud: per-node true δβ sized by event count"
+    r"  |  Cloud shifts up as ν grows  →  apparent $\delta\tilde{\beta}$ rises",
+    fontsize=9,
+)
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# Full 4×4 grid
+alphas_p  = sorted({k[0] for k in b_lookup})
+lam_los_p = sorted({k[1] for k in b_lookup})
+LAM_HI    = 0.3
+
+nrows, ncols = len(alphas_p), len(lam_los_p)
+fig, axes = plt.subplots(nrows, ncols,
+                         figsize=(4.5 * ncols, 3.8 * nrows),
+                         sharey=False, sharex=True)
+
+for ri, alpha in enumerate(alphas_p):
+    for ci, lam_lo in enumerate(lam_los_p):
+        ax  = axes[ri, ci]
+        dn  = b_lookup.get((alpha, lam_lo))
+        kms_path = (RESULTS / "simpson_mech_b_20260508" / "synthetic"
+                    / dn / INST_DIR / "kernel_mode_summary.parquet")
+        if dn is None or not kms_path.exists():
+            ax.text(0.5, 0.5, "no data", transform=ax.transAxes, ha="center")
+            continue
+        make_paper_panel(ax, dn, "simpson_mech_b_20260508",
+                         alpha=alpha, lam_hi=LAM_HI, lam_lo=lam_lo, nu_max=25)
+        if ri == 0:
+            ax.set_title(f"λ_lo={lam_lo}  ({LAM_HI/lam_lo:.0f}× contrast)", fontsize=10)
+        if ci == 0:
+            ax.set_ylabel(f"α={alpha}\nδβ", fontsize=9)
+            if ri == 0:
+                ax.legend(fontsize=7, loc="upper right")
+        if ri == nrows - 1:
+            ax.set_xlabel("ν (infected neighbours)", fontsize=9)
+
+fig.suptitle(
+    r"Mechanism B — $\delta\tilde{\beta}$ vs $\Delta\tilde{\beta}$ grid  (ε=0.9, ω=0, λ_hi=0.3)"
+    "\nGray cloud: per-node true δβ  |  Black solid: inferred δβ̃  |  Black dashed: Δβ̃  |  Colored: per-block true δβ",
+    fontsize=10, y=1.01,
+)
+plt.tight_layout()
+plt.show()
+```

@@ -64,3 +64,15 @@ notebooks/will/test_mixture_results/
 reports/
 output/
 ~/
+
+# Local artifacts / accidental files
+$TMP_CFG
+.playwright-cli/
+build
+build/
+logs/
+memory/
+gurobi.log
+monstead-results.png
+figures/
+guides/

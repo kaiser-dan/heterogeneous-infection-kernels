@@ -1,0 +1,334 @@
+---
+title: "Recent Results Writeup"
+date: "2026-03-12"
+format: html
+toc: true
+---
+
+```{python}
+#| label: setup
+#| warning: false
+#| output: false
+from pathlib import Path
+import re
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.stats import beta
+
+ROOT = Path(".")
+REPO_ROOT = Path("../..")
+FIG_DIR = Path("figures") / "03-12-26"
+FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+SOURCE_NOTEBOOKS = [
+    Path("03-07-26.qmd"),
+    Path("03-08-26.qmd"),
+    Path("03-10-26.qmd"),
+]
+
+FIGURES = {
+    "oo_fit": Path("figures/03-08-26/oo_fit_eb_vs_weak_03-08-26.png"),
+    "oo_mn": Path("figures/03-08-26/oo_mn_matrices_03-08-26.png"),
+    "twitter_fit": Path("figures/03-08-26/twitter_fit_comparison_03-08-26.png"),
+    "twitter_mn_k": Path("figures/03-08-26/twitter_mn_matrices_k_03-08-26.png"),
+    "twitter_mn_kappa": Path("figures/03-08-26/twitter_mn_matrices_kappa_03-08-26.png"),
+    "inc_surv_k_old": Path("figures/03-10-26/mn_matrix_compare_k_q0p192_03-10-26.png"),
+    "inc_surv_kappa_old": Path("figures/03-10-26/mn_matrix_compare_kappa_q0p18_03-10-26.png"),
+    "inc_surv_k_old_hist": Path("figures/03-10-26/mn_row_sum_hist_compare_k_q0p192_03-10-26.png"),
+    "inc_surv_kappa_old_hist": Path("figures/03-10-26/mn_row_sum_hist_compare_kappa_q0p18_03-10-26.png"),
+    "inc_surv_k_new": Path("figures/03-10-26/mn_matrix_compare_k_q1p0_03-10-26.png"),
+    "inc_surv_kappa_new": Path("figures/03-10-26/mn_matrix_compare_kappa_q1p0_03-10-26.png"),
+    "inc_surv_k_new_hist": Path("figures/03-10-26/mn_row_sum_hist_compare_k_q1p0_03-10-26.png"),
+    "inc_surv_kappa_new_hist": Path("figures/03-10-26/mn_row_sum_hist_compare_kappa_q1p0_03-10-26.png"),
+}
+```
+
+```{python}
+#| label: oo-monotonic-helpers
+#| warning: false
+#| output: false
+def load_oo_empirical(drop_zero_bin=True):
+    base = REPO_ROOT / "data" / "processed" / "oo" / "sim_165_backbone_disparity"
+    m_df = pd.read_parquet(base / "M.parquet")
+    n_df = pd.read_parquet(base / "N.parquet")
+
+    cols = sorted([c for c in m_df.columns if str(c).isdigit()], key=lambda c: int(str(c)))
+    if drop_zero_bin:
+        cols = [c for c in cols if int(str(c)) > 0]
+
+    levels = np.array([int(str(c)) for c in cols], dtype=int)
+    m_sum = m_df[cols].sum(axis=0).to_numpy(dtype=float)
+    n_sum = n_df[cols].sum(axis=0).to_numpy(dtype=float)
+    return levels, m_sum, n_sum
+
+
+def load_pi_summary(run_dir):
+    summary_path = Path(run_dir) / "inference_summary.parquet"
+    if not summary_path.exists():
+        return None
+
+    df = pd.read_parquet(summary_path)
+    rows = []
+    for idx, row in df.iterrows():
+        m = re.match(r"^pi\[(\d+)\]$", str(idx))
+        if m:
+            rows.append(
+                {
+                    "component": int(m.group(1)),
+                    "mean": float(row["Mean"]),
+                }
+            )
+
+    if not rows:
+        return None
+    return pd.DataFrame(rows).sort_values("component")
+
+
+def aggregate_model_curve(kernel_df, pi_df):
+    if kernel_df is None or kernel_df.empty:
+        return None
+
+    levels = np.sort(kernel_df["nu"].unique())
+    comps = np.sort(kernel_df["component"].unique())
+    curve = pd.DataFrame({"level": levels, "fit": 0.0, "lower": 0.0, "upper": 0.0})
+
+    if pi_df is None or pi_df.empty:
+        weights = {int(c): 1.0 / len(comps) for c in comps}
+    else:
+        weights = {int(r.component): float(r.mean) for r in pi_df.itertuples()}
+        total_w = sum(weights.get(int(c), 0.0) for c in comps)
+        if total_w <= 0:
+            weights = {int(c): 1.0 / len(comps) for c in comps}
+        else:
+            weights = {int(c): weights.get(int(c), 0.0) / total_w for c in comps}
+
+    for c in comps:
+        sub = kernel_df[kernel_df["component"] == c].sort_values("nu")
+        w = weights.get(int(c), 0.0)
+        curve["fit"] += w * sub["mean"].to_numpy(dtype=float)
+        curve["lower"] += w * sub["ci_low"].to_numpy(dtype=float)
+        curve["upper"] += w * sub["ci_high"].to_numpy(dtype=float)
+
+    return curve
+
+
+def load_monotonic_curve(sweep_name, K):
+    run_dir = REPO_ROOT / "results" / sweep_name / f"{K - 1:03d}_K{K}_mono_eb"
+    km_path = run_dir / "kernel_mode_summary.parquet"
+    if not km_path.exists():
+        return None
+    kernel_df = pd.read_parquet(km_path)
+    pi_df = load_pi_summary(run_dir)
+    return aggregate_model_curve(kernel_df, pi_df)
+```
+
+
+
+## Rejiggered Twitter Data 
+
+The cleanest validation panel for the rejiggered Twitter incidence pipeline is the three-way Monsted Figure 3 comparison at the production `q` values (`q_sc = 0.192`, `q_cc = 0.18`). This compares the hand-transcribed paper values, the author reproduction script, and our pipeline output.
+
+![](figures/monsted_fig3_three_way.png)
+
+## OO Fits: EB vs WEAK
+
+Okay so we want to get our models to fit the data. Its not. Why not? 
+Here is why: 
+
+The biggest problem, especially with the twitter data, but also with the OO data is *class imbalance*. Almost all of the data we have is for negative exposure counts, we have vanishingly small amounts of data for positive exposure counts. 
+
+This means that our prior can dominate the posterior if it is centered at the wrong scale. 
+
+We test two kinds of priors: Empirical Bayes (EB) and Weakly Informative (WEAK). 
+
+Another change we make is dropping the zero-exposure bin. The OO matrices are stored with columns `0..kmax-1`, but the Stan kernels are indexed as exposure levels `1..kmax`. If we keep the zero-exposure column, that column gets treated as exposure level `1`, which shifts the entire likelihood by one exposure level and lets the zero-exposure mass dominate the fit.
+
+For the empirical Bayes prior center, we first compute the aggregate rate per exposure level
+
+$$
+\begin{aligned}
+D_k &= \frac{\sum_i M_{i,k}}{\sum_i (M_{i,k} + N_{i,k})} \\
+\text{empirical\_floor} &= \operatorname{logit}\left(\text{mean of the first 3 valid } D_k\right) \\
+\text{empirical} &= \operatorname{logit}\left(\frac{\sum_{i,k} M_{i,k}}{\sum_{i,k}(M_{i,k}+N_{i,k})}\right) \\
+\text{empirical\_ceiling} &= \operatorname{logit}\left(\max \text{ of the last 4 valid } D_k\right)
+\end{aligned}
+$$
+
+| EB quantity | Logit value | inverse logit vale |
+|---|---:|---:|
+| `empirical_floor` | `-6.9797` | `0.00093` |
+| `empirical` | `-6.2690` | `0.00189` |
+| `empirical_ceiling` | `-4.3967` | `0.01217` |
+
+
+The other strategy is just to select a VERY wide prior on the logit scale that spans many order of magnitude. We select a zero centered normal prior on the logit scale with a standard deviation of 5. The 95% credible interval on 5e-5 to 0.99995. So this very weak prior should totally cover the values we care about. 
+
+| Family |Previous | Current EB sweep | Current WEAK sweep |
+|---|---|---|---|
+| SC | Pre-rewrite `model_simple_contagion.stan`: `rho ~ Beta(1, 10)`. Early rewritten `model_mixture_simple_contagion.stan`: `logit_rho ~ Normal(-4, 2)`. | `logit_rho ~ Normal(empirical_floor, 2.0)` = `Normal(-6.9797, 2.0)` | `logit_rho ~ Normal(0.0, 5.0)` |
+| CC | Pre-rewrite `model_complex_contagion.stan`: `rho_l ~ Beta(1, 10)`, `rho_h ~ Beta(1, 1)`, `w ~ Exponential(0.5)`, `k0 ~ Normal(kmax/2, kmax/2)` | `logit_rho_l ~ Normal(empirical_floor, 2.0)`, `logit_rho_h ~ Normal(empirical_ceiling, 2.0)`, `w ~ Exponential(0.5)`, `k0 ~ Normal(10, 5)` | `logit_rho_l ~ Normal(0.0, 5.0)`, `logit_rho_h ~ Normal(0.0, 5.0)`, same `w`, same `k0` |
+| NP monotonic | Pre-rewrite `non_parametric_monotonic.stan`: `logit_p ~ Normal(0, 2.0)` by default, with monotone simplex increments `Delta ~ Dirichlet(1.0)`. Old code also allowed `logit_p_location = empirical`. | Current monotonic EB sweep: `logit_p ~ Normal(empirical, 2.0)` with the same monotone simplex-increment construction | Current monotonic weak sweep: `logit_p ~ Normal(0.0, 5.0)` with the same monotone simplex-increment construction |
+
+But we leave the rest of the hyperparamters alone
+
+| Quantity | New | Old |
+|---|---|---|
+| `sigma` | `HalfNormal(0, 1.0)` | `Exponential(DEVIATION_SCALE)` |
+| `pi` | `Dirichlet(1.0)` | `Dirichlet(1.0)` |
+| `z_alpha` | `Normal(0, 1)` | `Normal(0, 1)` |
+
+```{python}
+#| label: oo-monotonic-fit-eb-vs-weak
+#| fig-cap: "OO Sim 165 monotonic nonparametric fits under empirical-Bayes and weak priors, using the newly run drop-zero sweeps."
+levels, M_sum, N_sum = load_oo_empirical(drop_zero_bin=True)
+total = M_sum + N_sum
+with np.errstate(divide="ignore", invalid="ignore"):
+    obs_p = np.where(total > 0, M_sum / total, np.nan)
+
+mask = total > 0
+lower = np.where(M_sum[mask] == 0, 0.0, beta.ppf(0.025, M_sum[mask], N_sum[mask] + 1))
+upper = np.where(N_sum[mask] == 0, 1.0, beta.ppf(0.975, M_sum[mask] + 1, N_sum[mask]))
+yerr = np.vstack([obs_p[mask] - lower, upper - obs_p[mask]])
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 4.8), sharey=True)
+styles = [
+    ("research_sweep_oo_monotonic_eb", "EB monotonic NP", "#1f77b4", "-"),
+    ("research_sweep_oo_monotonic_weak", "WEAK monotonic NP", "#d62728", "--"),
+]
+
+for ax, K in zip(axes, [1, 2]):
+    ax.bar(levels, np.nan_to_num(obs_p, nan=0.0), width=0.84, color="0.87", alpha=0.95, label="Empirical", zorder=1)
+    ax.errorbar(levels[mask], obs_p[mask], yerr=yerr, fmt="none", ecolor="0.45", elinewidth=0.8, capsize=2, zorder=2)
+
+    ymax = np.nanmax(obs_p[mask]) if np.any(mask) else 0.01
+    for sweep_name, label, color, ls in styles:
+        curve = load_monotonic_curve(sweep_name, K)
+        if curve is None:
+            continue
+        ax.plot(curve["level"], curve["fit"], color=color, lw=2.1, ls=ls, label=label, zorder=3)
+        ax.fill_between(curve["level"], curve["lower"], curve["upper"], color=color, alpha=0.12, zorder=2)
+        ymax = max(ymax, float(np.nanmax(curve["upper"])))
+
+    ax.set_title(f"K = {K}")
+    ax.set_xlabel("Exposure level")
+    ax.set_ylabel("P(adopt | exposure)")
+    ax.set_ylim(0, ymax * 1.08 if ymax > 0 else 0.01)
+    ax.grid(alpha=0.2, zorder=0)
+
+handles, labels = axes[0].get_legend_handles_labels()
+uniq = dict(zip(labels, handles))
+fig.legend(uniq.values(), uniq.keys(), loc="upper center", ncol=3, framealpha=0.95)
+fig.tight_layout(rect=[0, 0, 1, 0.92])
+
+oo_mono_fit_fig = FIG_DIR / "oo_monotonic_fit_eb_vs_weak_03-12-26.png"
+fig.savefig(oo_mono_fit_fig, dpi=220, bbox_inches="tight")
+oo_mono_fit_fig
+```
+
+The corresponding OO M/N matrices give the empirical support behind those fits.
+
+![](figures/03-08-26/oo_mn_matrices_03-08-26.png)
+
+### Conclusions
+
+- For the monotonic NP model, the `K=1` EB and weak fits are visually very close; the prior regime alone does not fix the underfit.
+- The `K=2` weak monotonic fit is not trustworthy as-is: that run finished with divergences and poor mixing on `pi`.
+- The OO M/N matrices remain the key reference object for why these monotonic fits struggle: almost all mass is concentrated at very low adoption probabilities.
+
+## Twitter Fits
+
+The March 8 notebook collected the main Twitter fit comparison at the production / interesting q values.
+
+![](figures/03-08-26/twitter_fit_comparison_03-08-26.png)
+
+The same March 8 work also produced survival-fit panels. These completed runs are the `K=1` retry and adopters-only survival sweeps.
+
+### Survival Retry Fits
+
+![](figures/03-08-26_weighted_vacc_refit/twitter_fit_comparison_survival_03-08-26.png)
+
+### Survival Adopters-Only Fits
+
+![](figures/03-08-26_weighted_vacc_refit/twitter_fit_comparison_survival_adopters_only_03-08-26.png)
+
+We see a similar story for the twitter data. For all models EXCEPT for the simple, the K=1 consistently underfits(estimates a lower infection probability than is observed in the data) the data with the simple contagion overfits(estimates a higher infection probability than is observed in the data). So what is happening? 
+
+The problem is that when we include accounts/individuals with zero expousre events or infection events we end up with a massive data imbalance. We end up with two classes of nodes, those with zero exposure events and those with positive exposure events. The problem is that for the twitter data we cannot simply exclude the zero exposure nodes because then the value of the nodes would be different from what it is in actuallity.
+
+
+
+
+
+
+
+### SC Metric (`k`)
+
+![](figures/03-08-26/twitter_mn_matrices_k_03-08-26.png)
+
+### CC Metric (`kappa`)
+
+![](figures/03-08-26/twitter_mn_matrices_kappa_03-08-26.png)
+
+### Readout
+
+- These Twitter panels come from the recent optimal-q incidence setup.
+- The survival fit panels come from the March 8 retry and adopters-only survival sweeps, both at `K=1`.
+- The matrix views are useful for the broad support pattern, but they do not answer the later incidence-vs-survival question by themselves.
+- The March 10 notebook is the better source for the old-vs-new incidence/survival comparison.
+
+## Incidence vs Survival M/N Diagnostics
+
+The March 10 notebook compares the full Twitter incidence and survival constructions directly.
+
+Important note: those March 10 comparisons are filtered to users who adopt at least once in the survival construction. This was introduced to avoid having the visual dominated by right-censored non-adopters.
+
+## Old / Production q
+
+### SC Metric (`k`), `q = 0.192`
+
+![](figures/03-10-26/mn_matrix_compare_k_q0p192_03-10-26.png)
+
+![](figures/03-10-26/mn_row_sum_hist_compare_k_q0p192_03-10-26.png)
+
+### CC Metric (`kappa`), `q = 0.18`
+
+![](figures/03-10-26/mn_matrix_compare_kappa_q0p18_03-10-26.png)
+
+![](figures/03-10-26/mn_row_sum_hist_compare_kappa_q0p18_03-10-26.png)
+
+## New / Unsmoothed q
+
+### SC Metric (`k`), `q = 1.0`
+
+![](figures/03-10-26/mn_matrix_compare_k_q1p0_03-10-26.png)
+
+![](figures/03-10-26/mn_row_sum_hist_compare_k_q1p0_03-10-26.png)
+
+### CC Metric (`kappa`), `q = 1.0`
+
+![](figures/03-10-26/mn_matrix_compare_kappa_q1p0_03-10-26.png)
+
+![](figures/03-10-26/mn_row_sum_hist_compare_kappa_q1p0_03-10-26.png)
+
+### Readout
+
+- The `q < 1` incidence rows are expected to spread mass across multiple exposure levels because they are smoothed.
+- The `q = 1.0` rows are unsmoothed, but the `full` parquets are still aggregated across interventions by `user_id`, so a small number of users can still have mass in more than one bin.
+- The survival views are now filtered to users who adopt at least once, which makes the survival-vs-incidence comparison much easier to read.
+
+## Synthesis
+
+The last few notebooks support three main points:
+
+1. OO has the clearest EB-vs-WEAK prior comparison in the recent work, and the EB/WEAK difference is easiest to interpret there.
+2. Twitter fits are best summarized using the March 8 incidence-style fit panels, but the matrix-level questions are better answered by the March 10 notebook.
+3. For Twitter incidence vs survival, the meaningful comparison is on the adopter-at-least-once subset; otherwise the survival construction is visually dominated by right-censored non-adopters.
+
+## Follow-Up
+
+Natural next additions to this writeup would be:
+
+1. Add the survival fit panels from the March 8 notebook, if we want one page that contains both incidence and survival fit curves side by side.
+2. Add a row-level heatmap section that matches the dashboard logic exactly, so we can separate row-level sampled views from the aggregated `full` M/N parquets.

@@ -1,0 +1,335 @@
+---
+title: "Twitter Normal vs Survival M/N Diagnostics"
+date: "2026-03-10"
+format: html
+---
+
+```{python}
+#| label: setup
+#| warning: false
+#| output: false
+import sys
+sys.path.insert(0, "../..")
+
+from pathlib import Path
+import re
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import pyarrow.parquet as pq
+```
+
+```{python}
+#| label: constants
+#| warning: false
+#| output: false
+REPO_ROOT = Path("../..")
+PIPELINE_NORMAL = REPO_ROOT / "data" / "processed" / "twitter" / "full"
+PIPELINE_SURVIVAL = REPO_ROOT / "data" / "processed" / "twitter_survival" / "full"
+
+FIG_SET = "03-10-26"
+FIG_DIR = Path("figures") / FIG_SET
+FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+USER_FILTER_MODE = "adopters_once"
+
+SPECS = [
+    {"metric": "k", "q": 1.0, "label": "SC metric (k), q=1.0 (no smoothing)"},
+    {"metric": "k", "q": 0.192, "label": "SC metric (k), q=0.192"},
+    {"metric": "kappa", "q": 1.0, "label": "CC metric (kappa), q=1.0 (no smoothing)"},
+    {"metric": "kappa", "q": 0.18, "label": "CC metric (kappa), q=0.18"},
+]
+```
+
+```{python}
+#| label: helpers
+#| warning: false
+#| output: false
+def _parse_q(path_name, metric, kind):
+    pat = re.compile(rf"^{kind}_{metric}_q(.+)\.parquet$")
+    m = pat.match(path_name)
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def _find_mn_parquets(base_dir, metric, q, atol=1e-9):
+    base_dir = Path(base_dir)
+    m_candidates = []
+    n_candidates = []
+
+    for p in sorted(base_dir.glob(f"M_{metric}_q*.parquet")):
+        q_val = _parse_q(p.name, metric=metric, kind="M")
+        if q_val is not None and abs(q_val - float(q)) <= atol:
+            m_candidates.append(p)
+    for p in sorted(base_dir.glob(f"N_{metric}_q*.parquet")):
+        q_val = _parse_q(p.name, metric=metric, kind="N")
+        if q_val is not None and abs(q_val - float(q)) <= atol:
+            n_candidates.append(p)
+
+    if not m_candidates or not n_candidates:
+        return None, None
+    return m_candidates[0], n_candidates[0]
+
+
+def _aggregate_by_user(users, mat):
+    users = np.asarray(users, dtype=str)
+    unique_users, inverse = np.unique(users, return_inverse=True)
+    out = np.zeros((len(unique_users), mat.shape[1]), dtype=float)
+    np.add.at(out, inverse, mat)
+    return unique_users, out
+
+
+def _load_mn_arrays(base_dir, metric, q):
+    m_path, n_path = _find_mn_parquets(base_dir, metric=metric, q=q)
+    if m_path is None or n_path is None:
+        return None
+
+    m_table = pq.read_table(m_path)
+    n_table = pq.read_table(n_path)
+
+    m_cols = [c for c in m_table.column_names if c != "user_id" and str(c).isdigit()]
+    n_cols = [c for c in n_table.column_names if c != "user_id" and str(c).isdigit()]
+    levels = sorted(set(int(str(c)) for c in m_cols) | set(int(str(c)) for c in n_cols))
+    if not levels:
+        return None
+
+    m_users_raw = np.array(m_table.column("user_id").to_pylist(), dtype=str)
+    n_users_raw = np.array(n_table.column("user_id").to_pylist(), dtype=str)
+
+    m_level_map = {int(str(c)): m_table.column(str(c)).to_numpy().astype(float, copy=False) for c in m_cols}
+    n_level_map = {int(str(c)): n_table.column(str(c)).to_numpy().astype(float, copy=False) for c in n_cols}
+
+    m_mat_raw = np.column_stack([m_level_map.get(lvl, np.zeros(len(m_users_raw), dtype=float)) for lvl in levels])
+    n_mat_raw = np.column_stack([n_level_map.get(lvl, np.zeros(len(n_users_raw), dtype=float)) for lvl in levels])
+
+    m_users, m_mat = _aggregate_by_user(m_users_raw, m_mat_raw)
+    n_users, n_mat = _aggregate_by_user(n_users_raw, n_mat_raw)
+
+    common_users = np.intersect1d(m_users, n_users)
+    if common_users.size == 0:
+        return None
+
+    m_pos = {u: i for i, u in enumerate(m_users)}
+    n_pos = {u: i for i, u in enumerate(n_users)}
+    m_aligned = np.vstack([m_mat[m_pos[u], :] for u in common_users])
+    n_aligned = np.vstack([n_mat[n_pos[u], :] for u in common_users])
+
+    return {"users": common_users, "levels": levels, "M": m_aligned, "N": n_aligned}
+
+
+def _align_modes(normal_data, survival_data):
+    users = np.intersect1d(normal_data["users"], survival_data["users"])
+    levels = sorted(set(normal_data["levels"]) | set(survival_data["levels"]))
+
+    def _align_one(data):
+        user_pos = {u: i for i, u in enumerate(data["users"])}
+        src_rows = np.array([user_pos[u] for u in users], dtype=int)
+
+        M_out = np.zeros((len(users), len(levels)), dtype=float)
+        N_out = np.zeros((len(users), len(levels)), dtype=float)
+        level_to_out = {lvl: j for j, lvl in enumerate(levels)}
+        out_cols = [level_to_out[lvl] for lvl in data["levels"]]
+        M_out[:, out_cols] = data["M"][src_rows, :]
+        N_out[:, out_cols] = data["N"][src_rows, :]
+        return M_out, N_out
+
+    M_norm, N_norm = _align_one(normal_data)
+    M_surv, N_surv = _align_one(survival_data)
+    return users, levels, M_norm, N_norm, M_surv, N_surv
+
+
+def _apply_user_filter(users, M_norm, N_norm, M_surv, N_surv, mode):
+    mode = str(mode).lower()
+    if mode in {"all", "none"}:
+        mask = np.ones(len(users), dtype=bool)
+    elif mode == "adopters_once":
+        mask = M_surv.sum(axis=1) > 0
+    else:
+        raise ValueError(f"Unknown USER_FILTER_MODE={mode!r}")
+
+    return users[mask], M_norm[mask], N_norm[mask], M_surv[mask], N_surv[mask]
+
+
+def _expected_terminal_level_incidence(M, N, levels):
+    levels = np.asarray(levels, dtype=float)
+    return ((M + N) * levels[None, :]).sum(axis=1)
+
+
+def _expected_terminal_level_survival(M, N):
+    return (M + N).sum(axis=1)
+
+
+def _rightmost_occupied_level(M, N, levels):
+    arr = M + N
+    levels = np.asarray(levels, dtype=int)
+    has = (arr > 0).any(axis=1)
+    rev_idx = np.argmax((arr[:, ::-1] > 0), axis=1)
+    col_idx = arr.shape[1] - 1 - rev_idx
+    out = np.zeros(arr.shape[0], dtype=int)
+    out[has] = levels[col_idx[has]]
+    return out
+```
+
+## Matrix Comparison: Normal vs Survival
+
+```{python}
+#| label: matrix-compare
+#| fig-cap: "M and N matrices for normal vs survival construction (log1p scale), aligned to common users and filtered to adopters when requested."
+matrix_summary_rows = []
+
+for spec in SPECS:
+    metric = spec["metric"]
+    q = spec["q"]
+    q_tag = str(q).replace(".", "p")
+
+    normal_data = _load_mn_arrays(PIPELINE_NORMAL, metric=metric, q=q)
+    survival_data = _load_mn_arrays(PIPELINE_SURVIVAL, metric=metric, q=q)
+    if normal_data is None or survival_data is None:
+        matrix_summary_rows.append(
+            {
+                "metric": metric,
+                "q": q,
+                "status": "missing parquet files",
+            }
+        )
+        continue
+
+    users, levels, M_norm, N_norm, M_surv, N_surv = _align_modes(normal_data, survival_data)
+    users, M_norm, N_norm, M_surv, N_surv = _apply_user_filter(
+        users, M_norm, N_norm, M_surv, N_surv, USER_FILTER_MODE
+    )
+    if len(users) == 0:
+        matrix_summary_rows.append(
+            {"metric": metric, "q": q, "status": f"no rows after filter={USER_FILTER_MODE}"}
+        )
+        continue
+
+    fig, axes = plt.subplots(2, 2, figsize=(14.5, 8), sharex=True, sharey=True)
+    panels = [
+        (np.log1p(M_norm), "Normal mode: M (log1p)", "viridis"),
+        (np.log1p(N_norm), "Normal mode: N (log1p)", "magma"),
+        (np.log1p(M_surv), "Survival mode: M (log1p)", "viridis"),
+        (np.log1p(N_surv), "Survival mode: N (log1p)", "magma"),
+    ]
+
+    for ax, (mat, title, cmap) in zip(axes.flat, panels):
+        im = ax.imshow(mat, aspect="auto", interpolation="nearest", cmap=cmap)
+        ax.set_title(title)
+        ax.set_xlabel("Exposure level")
+        ax.set_ylabel("User row index")
+        cbar = fig.colorbar(im, ax=ax, fraction=0.045, pad=0.03)
+        cbar.ax.tick_params(labelsize=8)
+
+    if levels:
+        if len(levels) <= 20:
+            tick_idx = np.arange(len(levels))
+        else:
+            tick_idx = np.linspace(0, len(levels) - 1, 10, dtype=int)
+        tick_labels = [levels[i] for i in tick_idx]
+        for ax in axes[1, :]:
+            ax.set_xticks(tick_idx)
+            ax.set_xticklabels(tick_labels)
+
+    fig.suptitle(
+        f"{spec['label']} | Normal vs Survival M/N Matrices | filter={USER_FILTER_MODE} | n={len(users)}",
+        y=0.995,
+    )
+    fig.tight_layout()
+
+    out_path = FIG_DIR / f"mn_matrix_compare_{metric}_q{q_tag}_03-10-26.png"
+    fig.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.show()
+    plt.close(fig)
+
+    matrix_summary_rows.append(
+        {
+            "metric": metric,
+            "q": q,
+            "status": "ok",
+            "user_filter": USER_FILTER_MODE,
+            "n_users_common": int(len(users)),
+            "n_levels": int(len(levels)),
+            "figure": str(out_path),
+        }
+    )
+
+pd.DataFrame(matrix_summary_rows)
+```
+
+## Rightmost Occupied Exposure Histograms
+
+```{python}
+#| label: rowsum-hists
+#| fig-cap: "Histograms of the rightmost occupied exposure level per user, computed from M+N support. This is the comparable quantity when the question is the maximum exposure level reached under incidence vs survival."
+hist_summary_rows = []
+
+for spec in SPECS:
+    metric = spec["metric"]
+    q = spec["q"]
+    q_tag = str(q).replace(".", "p")
+
+    normal_data = _load_mn_arrays(PIPELINE_NORMAL, metric=metric, q=q)
+    survival_data = _load_mn_arrays(PIPELINE_SURVIVAL, metric=metric, q=q)
+    if normal_data is None or survival_data is None:
+        hist_summary_rows.append({"metric": metric, "q": q, "status": "missing parquet files"})
+        continue
+
+    users, levels, M_norm, N_norm, M_surv, N_surv = _align_modes(normal_data, survival_data)
+    users, M_norm, N_norm, M_surv, N_surv = _apply_user_filter(
+        users, M_norm, N_norm, M_surv, N_surv, USER_FILTER_MODE
+    )
+    if len(users) == 0:
+        hist_summary_rows.append({"metric": metric, "q": q, "status": f"no rows after filter={USER_FILTER_MODE}"})
+        continue
+
+    rightmost_norm = _rightmost_occupied_level(M_norm, N_norm, levels)
+    rightmost_surv = _rightmost_occupied_level(M_surv, N_surv, levels)
+
+    fig, ax = plt.subplots(1, 1, figsize=(12.5, 4.8))
+
+    max_level = max(float(np.max(rightmost_norm)), float(np.max(rightmost_surv)), 1.0)
+    bins = np.arange(0, int(max_level) + 2) - 0.5
+
+    ax.hist(rightmost_norm, bins=bins, alpha=0.50, color="#4C78A8", label="Incidence", edgecolor="none")
+    ax.hist(rightmost_surv, bins=bins, alpha=0.50, color="#E45756", label="Survival", edgecolor="none")
+    ax.set_title("Rightmost occupied exposure level")
+    ax.set_xlabel("Per-user maximum occupied level")
+    ax.set_ylabel("Number of users")
+    ax.set_yscale("log")
+    ax.grid(alpha=0.2, which="both")
+    ax.set_xticks(np.arange(0, int(max_level) + 1, max(1, int(max_level // 10) or 1)))
+    ax.legend(loc="upper right", framealpha=0.95)
+
+    fig.suptitle(
+        f"{spec['label']} | Rightmost occupied exposure histograms | filter={USER_FILTER_MODE} | n={len(users)}",
+        y=1.02,
+    )
+    fig.tight_layout()
+
+    out_path = FIG_DIR / f"mn_row_sum_hist_compare_{metric}_q{q_tag}_03-10-26.png"
+    fig.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.show()
+    plt.close(fig)
+
+    hist_summary_rows.append(
+        {
+            "metric": metric,
+            "q": q,
+            "status": "ok",
+            "user_filter": USER_FILTER_MODE,
+            "n_users_common": int(len(users)),
+            "n_levels": int(len(levels)),
+            "max_rightmost_incidence": int(np.max(rightmost_norm)),
+            "max_rightmost_survival": int(np.max(rightmost_surv)),
+            "max_abs_user_diff": int(np.max(np.abs(rightmost_norm - rightmost_surv))),
+            "figure": str(out_path),
+        }
+    )
+
+pd.DataFrame(hist_summary_rows)
+```

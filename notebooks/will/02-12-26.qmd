@@ -74,12 +74,12 @@ Okay let me tell you right now: This does not work. When we run this test on our
 Let's assume that our kernel mode does not match. I'll tweak my generative model. Let's assume that our kernel mode is drawn from a gaussian with some offset: $\boldsymbol{\alpha} \sim \mathcal{N}(\bar{\boldsymbol{\alpha}}, \boldsymbol{\Sigma})$ where $\bar{\boldsymbol{\alpha}} = \boldsymbol{\mu}_{\text{sc}} + \boldsymbol{\lambda}$ for some offset $\boldsymbol{\lambda}$. I can then write my Mahalanobis distance as a sum of two terms, **spread**, the distance around $\bar{\boldsymbol{\alpha}}$ and **offset** (the distance between the null hypothesis $\boldsymbol{\mu}_{\text{sc}}$ and the alternative hypothesis $\bar{\boldsymbol{\alpha}}$):
 
 $$
-D_M^{(s)} = \underbrace{(\boldsymbol{\alpha}^{(s)} - \bar{\boldsymbol{\alpha}})^\top \boldsymbol{\Sigma}^{-1} (\boldsymbol{\alpha}^{(s)} - \bar{\boldsymbol{\alpha}})}_{\text{spread} \;\sim\; \chi^2_k} \;+\; \underbrace{(\bar{\boldsymbol{\alpha}} - \boldsymbol{\mu}_{\text{sc}})^\top \boldsymbol{\Sigma}^{-1} (\bar{\boldsymbol{\alpha}} - \boldsymbol{\mu}_{\text{sc}})}_{\lambda \;(\text{non-centrality})} \;+\; \text{cross terms}
+D_M^{(s)} = (\boldsymbol{\alpha}^{(s)} - \bar{\boldsymbol{\alpha}})^\top \boldsymbol{\Sigma}^{-1} (\boldsymbol{\alpha}^{(s)} - \bar{\boldsymbol{\alpha}}) + (\bar{\boldsymbol{\alpha}} - \boldsymbol{\mu}_{\text{sc}})^\top \boldsymbol{\Sigma}^{-1} (\bar{\boldsymbol{\alpha}} - \boldsymbol{\mu}_{\text{sc}}) + \text{cross terms}
 $$
 
 Here we want to test $\lambda$ the size of the offset, the squared Mahalanobis distance of the non-parametric posterior mean from the simple contagion reference.
 
-So $D_M \sim \chi^2_k(\lambda)$ — a **non-central** chi-squared. Using a central $\chi^2$ as the reference fails because it ignores $\lambda$.
+So $D_M \sim \chi^2_k(\lambda)$ ia non-central chi-squared. Using a central $\chi^2$ as the reference fails because it ignores $\lambda$.
 
 **Calibrated test**:
 

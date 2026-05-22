@@ -1,0 +1,987 @@
+---
+title: "Twitter + OO Fit Comparison: SC, CC, and NP Monotonic"
+date: "2026-03-06"
+format: html
+---
+
+```{python}
+#| label: setup
+#| warning: false
+#| output: false
+import sys
+sys.path.insert(0, "../..")
+
+from pathlib import Path
+import re
+
+import duckdb
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.special import expit
+from scipy.stats import beta
+```
+
+```{python}
+#| label: constants
+#| warning: false
+#| output: false
+REPO_ROOT = Path("../..")
+RESULTS_BASE = REPO_ROOT / "results"
+DATA_PROCESSED_BASE = REPO_ROOT / "data" / "processed"
+PIPELINE_TWITTER_FULL = DATA_PROCESSED_BASE / "twitter" / "full"
+
+FIG_DIR = Path("figures/03-06-26")
+FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+ESTIMATOR = "mean"
+
+TWITTER_SPECS = [
+    {
+        "group": "Twitter SC metric",
+        "sweep": "research_sweep_twitter_optimal_q_sc",
+        "source": "twitter",
+        "data_name": "default_data_prep",
+        "metric": "k",
+        "q": 0.192,
+        "row_title": "Twitter SC metric (k), q=0.192",
+    },
+    {
+        "group": "Twitter CC metric",
+        "sweep": "research_sweep_twitter_optimal_q_cc",
+        "source": "twitter",
+        "data_name": "default_data_prep",
+        "metric": "kappa",
+        "q": 0.18,
+        "row_title": "Twitter CC metric (kappa), q=0.18",
+    },
+]
+
+OO_SPEC = {
+    "group": "OO Sim 165",
+    "sweep": "research_sweep_oo",
+    "source": "oo",
+    "data_name": "sim_165_backbone_disparity_exposures",
+    "row_title": "OO Sim 165 (backbone disparity)",
+}
+
+TWITTER_MODEL_SPECS = [
+    ("model_simple_contagion", "Simple contagion", "#1f77b4"),
+    ("model_complex_contagion", "Complex contagion", "#d62728"),
+    ("non_parametric_monotonic", "NP monotonic", "#2ca02c"),
+]
+
+OO_MODEL_SPECS = [
+    ("model_simple_contagion", "Simple contagion", "#1f77b4"),
+    ("model_complex_contagion", "Complex contagion", "#d62728"),
+    ("non_parametric_monotonic_empirical_bayes", "NP monotonic", "#2ca02c"),
+]
+
+MODEL_COLORS = {
+    "Simple contagion": "#1f77b4",
+    "Complex contagion": "#d62728",
+    "NP monotonic": "#2ca02c",
+}
+```
+
+## Dashboard-Derived Loaders
+
+```{python}
+#| label: dashboard-loaders
+#| warning: false
+#| output: false
+def _find_pipeline_parquets(metric_key, q_val):
+    m_path = PIPELINE_TWITTER_FULL / f"M_{metric_key}_q{q_val}.parquet"
+    n_path = PIPELINE_TWITTER_FULL / f"N_{metric_key}_q{q_val}.parquet"
+    if m_path.exists() and n_path.exists():
+        return m_path, n_path
+    return None, None
+
+
+def _load_pipeline_mn(m_path, n_path, run_kmax):
+    con = duckdb.connect()
+    cols_info = con.execute(
+        f"DESCRIBE SELECT * FROM read_parquet('{m_path}')"
+    ).fetchall()
+    exposure_cols = [c[0] for c in cols_info if c[0] != "user_id"]
+    sum_stmt = ", ".join([f'SUM("{c}") AS "{c}"' for c in exposure_cols])
+
+    m_sums = con.execute(f"SELECT {sum_stmt} FROM read_parquet('{m_path}')").fetchone()
+    n_sums = con.execute(f"SELECT {sum_stmt} FROM read_parquet('{n_path}')").fetchone()
+    con.close()
+
+    M = np.zeros(run_kmax, dtype=float)
+    N = np.zeros(run_kmax, dtype=float)
+    for i, col_name in enumerate(exposure_cols):
+        k = int(col_name)
+        if 1 <= k <= run_kmax:
+            M[k - 1] = float(m_sums[i])
+            N[k - 1] = float(n_sums[i])
+    return M, N
+
+
+def load_twitter_data(q, metric, run_kmax=50):
+    metric_key = "k" if metric == "k" else "kappa"
+    m_path, n_path = _find_pipeline_parquets(metric_key, float(q))
+    if m_path is None:
+        return np.zeros(run_kmax), np.zeros(run_kmax)
+    return _load_pipeline_mn(m_path, n_path, run_kmax)
+
+
+def _resolve_oo_mn_paths(data_name):
+    """
+    Resolve OO M/N paths from either:
+      1) directory form: data/processed/oo/<name>/{M,N}.parquet
+      2) flat form: data/processed/oo/<name>_{M,N}.parquet
+    If the run name ends with '_exposures', also try the base name.
+    """
+    base = DATA_PROCESSED_BASE / "oo"
+    names = [str(data_name)]
+    if str(data_name).endswith("_exposures"):
+        names.append(str(data_name).replace("_exposures", ""))
+
+    for name in names:
+        d = base / name
+        m_dir = d / "M.parquet"
+        n_dir = d / "N.parquet"
+        if d.is_dir() and m_dir.exists() and n_dir.exists():
+            return m_dir, n_dir, name
+
+        m_flat = base / f"{name}_M.parquet"
+        n_flat = base / f"{name}_N.parquet"
+        if m_flat.exists() and n_flat.exists():
+            return m_flat, n_flat, name
+
+    return None, None, None
+
+
+def load_oo_data(data_name, run_kmax=50):
+    m_path, n_path, _ = _resolve_oo_mn_paths(data_name)
+    if m_path is None or n_path is None:
+        return np.zeros(run_kmax), np.zeros(run_kmax)
+
+    try:
+        m_df = pd.read_parquet(m_path)
+        n_df = pd.read_parquet(n_path)
+
+        valid_cols = [c for c in m_df.columns if str(c).isdigit()]
+        valid_cols = sorted(valid_cols, key=lambda x: int(str(x)))
+
+        M_arr = np.zeros(run_kmax)
+        N_arr = np.zeros(run_kmax)
+
+        m_sums = m_df[valid_cols].sum(axis=0)
+        n_sums = n_df[valid_cols].sum(axis=0)
+
+        for k_val in valid_cols:
+            k = int(str(k_val))
+            if k == 0:
+                continue
+            if k > run_kmax:
+                break
+            idx = k - 1
+            M_arr[idx] = float(m_sums[k_val])
+            N_arr[idx] = float(n_sums[k_val])
+
+        return M_arr, N_arr
+    except Exception:
+        return np.zeros(run_kmax), np.zeros(run_kmax)
+
+
+def load_kernel_summary(run_path):
+    run_dir = Path(run_path)
+
+    # 1) Preferred summary (used by Twitter optimal-q and OO NP)
+    km_path = run_dir / "kernel_mode_summary.parquet"
+    if km_path.exists():
+        try:
+            df_km = pd.read_parquet(km_path)
+            if not df_km.empty and df_km["mean"].notna().any():
+                result = df_km.rename(columns={"nu": "level", "ci_low": "lower", "ci_high": "upper"})
+                for col in ["mean", "median", "map_marginal", "map_joint"]:
+                    if col not in result.columns:
+                        result[col] = result.get("mean", np.nan)
+                return result[
+                    ["component", "level", "mean", "median", "map_marginal", "map_joint", "lower", "upper"]
+                ].sort_values(["component", "level"])
+        except Exception:
+            pass
+
+    # 2) Fallback to inference summary parsing
+    s_path = run_dir / "inference_summary.parquet"
+    if not s_path.exists():
+        return pd.DataFrame(columns=["component", "level", "mean", "median", "map_marginal", "map_joint", "lower", "upper"])
+
+    df_sum = pd.read_parquet(s_path)
+    rows = []
+
+    pat_mu_comp = re.compile(r"^mu\[(\d+),(\d+)\]$")
+    pat_mu_single = re.compile(r"^mu\[(\d+)\]$")
+    pat_c_single = re.compile(r"^c\[(\d+)\]$")  # OO simple/complex format
+    pat_logit_mu = re.compile(r"^logit_mu\[(\d+),(\d+)\]$")
+
+    for idx, row in df_sum.iterrows():
+        idx = str(idx)
+        m = pat_mu_comp.match(idx)
+        if m:
+            rows.append(
+                {
+                    "component": int(m.group(1)),
+                    "level": int(m.group(2)),
+                    "mean": float(row["Mean"]),
+                    "lower": float(row["5%"]),
+                    "upper": float(row["95%"]),
+                }
+            )
+            continue
+
+        m = pat_mu_single.match(idx)
+        if m:
+            rows.append(
+                {
+                    "component": 1,
+                    "level": int(m.group(1)),
+                    "mean": float(row["Mean"]),
+                    "lower": float(row["5%"]),
+                    "upper": float(row["95%"]),
+                }
+            )
+            continue
+
+        m = pat_c_single.match(idx)
+        if m:
+            rows.append(
+                {
+                    "component": 1,
+                    "level": int(m.group(1)),
+                    "mean": float(row["Mean"]),
+                    "lower": float(row["5%"]),
+                    "upper": float(row["95%"]),
+                }
+            )
+            continue
+
+        # parametric fallback from logit_mu
+        m = pat_logit_mu.match(idx)
+        if m:
+            rows.append(
+                {
+                    "component": int(m.group(1)),
+                    "level": int(m.group(2)),
+                    "mean": float(expit(row["Mean"])),
+                    "lower": float(expit(row["5%"])),
+                    "upper": float(expit(row["95%"])),
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame(columns=["component", "level", "mean", "median", "map_marginal", "map_joint", "lower", "upper"])
+
+    df = pd.DataFrame(rows).sort_values(["component", "level"])
+    for col in ["median", "map_marginal", "map_joint"]:
+        df[col] = df["mean"]
+    return df[["component", "level", "mean", "median", "map_marginal", "map_joint", "lower", "upper"]]
+
+
+def load_pi_summary(run_path):
+    summary_path = Path(run_path) / "inference_summary.parquet"
+    if not summary_path.exists():
+        return None
+
+    df = pd.read_parquet(summary_path)
+    rows = []
+    for idx, row in df.iterrows():
+        m = re.match(r"^pi\[(\d+)\]$", str(idx))
+        if m:
+            rows.append(
+                {
+                    "component": int(m.group(1)),
+                    "mean": float(row["Mean"]),
+                    "lower": float(row["5%"]),
+                    "upper": float(row["95%"]),
+                }
+            )
+    if not rows:
+        return None
+    return pd.DataFrame(rows).sort_values("component")
+
+
+def run_path_for(sweep, source, data_name, K, model_slug):
+    return (
+        RESULTS_BASE
+        / sweep
+        / source
+        / data_name
+        / f"K~{K}"
+        / f"stan_file~{model_slug}"
+    )
+
+
+def aggregate_model_curve(kernel_df, pi_df, estimator_col="mean"):
+    if kernel_df is None or kernel_df.empty:
+        return None
+
+    use_col = estimator_col if estimator_col in kernel_df.columns else "mean"
+    levels = np.sort(kernel_df["level"].unique())
+    comps = np.sort(kernel_df["component"].unique())
+
+    curve = pd.DataFrame({"level": levels})
+    curve["fit"] = 0.0
+    curve["lower"] = 0.0
+    curve["upper"] = 0.0
+
+    if pi_df is None or pi_df.empty:
+        weights = {int(c): 1.0 / len(comps) for c in comps}
+    else:
+        weights = {int(r.component): float(r.mean) for r in pi_df.itertuples()}
+        total_w = sum(weights.get(int(c), 0.0) for c in comps)
+        if total_w <= 0:
+            weights = {int(c): 1.0 / len(comps) for c in comps}
+        else:
+            weights = {int(c): weights.get(int(c), 0.0) / total_w for c in comps}
+
+    for c in comps:
+        w = weights.get(int(c), 0.0)
+        sub = kernel_df[kernel_df["component"] == c].sort_values("level")
+        comp = pd.DataFrame(
+            {
+                "level": sub["level"].to_numpy(dtype=int),
+                "fit": sub[use_col].to_numpy(dtype=float),
+                "lower": sub["lower"].to_numpy(dtype=float),
+                "upper": sub["upper"].to_numpy(dtype=float),
+            }
+        )
+        curve = curve.merge(comp, on="level", how="left", suffixes=("", f"_c{c}"))
+        curve["fit"] += w * curve[f"fit_c{c}"].fillna(0.0)
+        curve["lower"] += w * curve[f"lower_c{c}"].fillna(0.0)
+        curve["upper"] += w * curve[f"upper_c{c}"].fillna(0.0)
+        curve = curve.drop(columns=[f"fit_c{c}", f"lower_c{c}", f"upper_c{c}"])
+
+    return curve
+
+
+def load_model_fit_stats(run_path, n=1000):
+    """Same approximation logic as dashboard.qmd."""
+    summary_path = Path(run_path) / "inference_summary.parquet"
+    if not summary_path.exists():
+        return None
+
+    try:
+        df_sum = pd.read_parquet(summary_path)
+        result = {"bic": None, "aic": None, "waic": None, "loo": None}
+
+        if "lp__" in df_sum.index:
+            mean_lp = float(df_sum.loc["lp__", "Mean"])
+            k_est = len(df_sum) - 1
+            result["bic"] = k_est * np.log(n) - 2 * mean_lp
+            result["aic"] = 2 * k_est - 2 * mean_lp
+            result["max_lp"] = mean_lp
+            result["k_est"] = k_est
+
+        log_lik_rows = df_sum[df_sum.index.astype(str).str.startswith("log_lik[")]
+        if not log_lik_rows.empty:
+            e_log_p = log_lik_rows["Mean"].to_numpy(dtype=float)
+            var_log_p = (log_lik_rows["StdDev"].to_numpy(dtype=float)) ** 2
+            lppd = np.sum(e_log_p + 0.5 * var_log_p)
+            p_waic = np.sum(var_log_p)
+            result["waic"] = -2 * (lppd - p_waic)
+            result["loo"] = result["waic"]
+
+        return result
+    except Exception:
+        return None
+
+
+def compute_group_metrics(rows_df):
+    df = rows_df.copy()
+    df["BIC_Selected"] = False
+    df["WAIC_Selected"] = False
+    df["BIC_Selected_Dataset"] = False
+    df["WAIC_Selected_Dataset"] = False
+
+    # Delta/weights by group (same style as dashboard)
+    if "bic" in df.columns:
+        for g, idx in df.groupby("group").groups.items():
+            sub = df.loc[idx]
+            if sub["bic"].notna().any():
+                min_bic = sub["bic"].min()
+                df.loc[idx, "Delta_BIC"] = sub["bic"] - min_bic
+                w = np.exp(-0.5 * df.loc[idx, "Delta_BIC"])
+                w = w.where(df.loc[idx, "Delta_BIC"].notna(), np.nan)
+                w_sum = np.nansum(w.to_numpy(dtype=float))
+                if w_sum > 0:
+                    df.loc[idx, "BIC_Weight"] = w / w_sum
+                df.loc[sub["bic"].idxmin(), "BIC_Selected"] = True
+
+    if "waic" in df.columns:
+        for g, idx in df.groupby("group").groups.items():
+            sub = df.loc[idx]
+            if sub["waic"].notna().any():
+                min_waic = sub["waic"].min()
+                df.loc[idx, "Delta_WAIC"] = sub["waic"] - min_waic
+                w = np.exp(-0.5 * df.loc[idx, "Delta_WAIC"])
+                w = w.where(df.loc[idx, "Delta_WAIC"].notna(), np.nan)
+                w_sum = np.nansum(w.to_numpy(dtype=float))
+                if w_sum > 0:
+                    df.loc[idx, "WAIC_Weight"] = w / w_sum
+                df.loc[sub["waic"].idxmin(), "WAIC_Selected"] = True
+
+    # Global selection within each dataset facet (Twitter vs OO)
+    if "bic" in df.columns:
+        for dataset_name, idx in df.groupby("dataset").groups.items():
+            sub = df.loc[idx]
+            if sub["bic"].notna().any():
+                df.loc[sub["bic"].idxmin(), "BIC_Selected_Dataset"] = True
+
+    if "waic" in df.columns:
+        for dataset_name, idx in df.groupby("dataset").groups.items():
+            sub = df.loc[idx]
+            if sub["waic"].notna().any():
+                df.loc[sub["waic"].idxmin(), "WAIC_Selected_Dataset"] = True
+
+    return df
+
+
+def truncated_panel_ylim(obs_p, model_curves):
+    """Truncate y-axis around fitted means (ignore CI blow-up)."""
+    finite_obs = obs_p[np.isfinite(obs_p)]
+    obs_max = float(finite_obs.max()) if finite_obs.size > 0 else 0.0
+
+    fit_max = 0.0
+    for payload in model_curves.values():
+        cmax = float(np.nanmax(payload["curve"]["fit"].to_numpy(dtype=float)))
+        fit_max = max(fit_max, cmax)
+
+    anchor = max(obs_max, fit_max, 0.005)
+    return 0.0, anchor * 1.20
+```
+
+## Runs Used
+
+```{python}
+#| label: runs-table
+runs = []
+
+for spec in TWITTER_SPECS:
+    for K in [1, 2]:
+        for model_slug, model_label, _ in TWITTER_MODEL_SPECS:
+            p = run_path_for(spec["sweep"], spec["source"], spec["data_name"], K, model_slug)
+            runs.append(
+                {
+                    "group": spec["group"],
+                    "K": K,
+                    "model": model_label,
+                    "path_exists": p.exists(),
+                    "path": str(p),
+                }
+            )
+
+for K in [1, 2]:
+    for model_slug, model_label, _ in OO_MODEL_SPECS:
+        p = run_path_for(OO_SPEC["sweep"], OO_SPEC["source"], OO_SPEC["data_name"], K, model_slug)
+        runs.append(
+            {
+                "group": OO_SPEC["group"],
+                "K": K,
+                "model": model_label,
+                "path_exists": p.exists(),
+                "path": str(p),
+            }
+        )
+
+pd.DataFrame(runs)
+```
+
+## Uncertainty Legend
+
+`Whiskers` on gray bars are empirical 95% intervals for `P(adopt | k)` from observed `M, N` counts (beta-binomial intervals).
+
+`Shaded ribbons` around model lines are posterior uncertainty bands from model summaries (`lower`, `upper`) for fitted kernel values.
+
+## Twitter Fit Comparison (Truncated Y)
+
+```{python}
+#| label: twitter-fit-comparison
+#| fig-cap: "Twitter model fit comparison vs empirical adoption bars. Y-axis is truncated to fitted means so large CI tails do not dominate scale."
+
+fig, axes = plt.subplots(2, 2, figsize=(14, 9), sharey=False)
+
+for row_idx, spec in enumerate(TWITTER_SPECS):
+    for col_idx, K in enumerate([1, 2]):
+        ax = axes[row_idx, col_idx]
+
+        model_curves = {}
+        kmax = 0
+        for model_slug, model_label, color in TWITTER_MODEL_SPECS:
+            run_path = run_path_for(spec["sweep"], spec["source"], spec["data_name"], K, model_slug)
+            kernel_df = load_kernel_summary(run_path)
+            if kernel_df is None or kernel_df.empty:
+                continue
+            pi_df = load_pi_summary(run_path)
+            curve = aggregate_model_curve(kernel_df, pi_df, ESTIMATOR)
+            if curve is None or curve.empty:
+                continue
+            model_curves[model_label] = {"curve": curve, "color": color}
+            kmax = max(kmax, int(curve["level"].max()))
+
+        if kmax == 0:
+            ax.text(0.5, 0.5, "No fits found", transform=ax.transAxes, ha="center", va="center")
+            ax.set_axis_off()
+            continue
+
+        M, N = load_twitter_data(spec["q"], spec["metric"], run_kmax=kmax)
+        total = M + N
+        with np.errstate(divide="ignore", invalid="ignore"):
+            obs_p = np.where(total > 0, M / total, np.nan)
+
+        x = np.arange(1, kmax + 1)
+        ax.bar(x, np.nan_to_num(obs_p, nan=0.0), width=0.84, color="0.85", alpha=0.85, label="Empirical", zorder=1)
+
+        mask = total > 0
+        if np.any(mask):
+            m_obs = M[mask]
+            n_obs = N[mask]
+            lower = np.where(m_obs == 0, 0.0, beta.ppf(0.025, m_obs, n_obs + 1))
+            upper = np.where(n_obs == 0, 1.0, beta.ppf(0.975, m_obs + 1, n_obs))
+            y = obs_p[mask]
+            yerr = np.vstack([y - lower, upper - y])
+            ax.errorbar(x[mask], y, yerr=yerr, fmt="none", ecolor="0.45", elinewidth=0.8, capsize=2, zorder=2)
+
+        for model_label, payload in model_curves.items():
+            curve = payload["curve"]
+            color = payload["color"]
+            ax.plot(curve["level"], curve["fit"], "-o", color=color, lw=2.0, ms=3.3, label=model_label, zorder=5)
+            ax.fill_between(curve["level"], curve["lower"], curve["upper"], color=color, alpha=0.10, zorder=4)
+
+        y0, y1 = truncated_panel_ylim(obs_p, model_curves)
+        ax.set_ylim(y0, y1)
+        ax.set_title(f"{spec['row_title']} | K={K}")
+        ax.set_xlabel("Exposure level")
+        ax.set_ylabel("P(adopt | exposure)")
+        ax.grid(alpha=0.2, zorder=0)
+
+handles, labels = axes[0, 0].get_legend_handles_labels()
+fig.legend(handles, labels, loc="upper center", ncol=4, framealpha=0.95, bbox_to_anchor=(0.5, 1.02))
+fig.tight_layout(rect=[0, 0, 1, 0.97])
+
+twitter_fig = FIG_DIR / "twitter_fit_comparison_sc_cc_truncated.png"
+fig.savefig(twitter_fig, dpi=220, bbox_inches="tight")
+twitter_fig
+```
+
+## OO Sim 165 Fit Comparison
+
+```{python}
+#| label: oo-fit-comparison
+#| fig-cap: "OO Sim 165 fit comparison for SC, CC, and NP monotonic (empirical Bayes variant). Y-axis truncated to fitted means."
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 4.8), sharey=False)
+
+for col_idx, K in enumerate([1, 2]):
+    ax = axes[col_idx]
+
+    model_curves = {}
+    kmax = 0
+    for model_slug, model_label, color in OO_MODEL_SPECS:
+        run_path = run_path_for(OO_SPEC["sweep"], OO_SPEC["source"], OO_SPEC["data_name"], K, model_slug)
+        kernel_df = load_kernel_summary(run_path)
+        if kernel_df is None or kernel_df.empty:
+            continue
+        pi_df = load_pi_summary(run_path)
+        curve = aggregate_model_curve(kernel_df, pi_df, ESTIMATOR)
+        if curve is None or curve.empty:
+            continue
+        model_curves[model_label] = {"curve": curve, "color": color}
+        kmax = max(kmax, int(curve["level"].max()))
+
+    if kmax == 0:
+        ax.text(0.5, 0.5, "No fits found", transform=ax.transAxes, ha="center", va="center")
+        ax.set_axis_off()
+        continue
+
+    M, N = load_oo_data(OO_SPEC["data_name"], run_kmax=kmax)
+    total = M + N
+    with np.errstate(divide="ignore", invalid="ignore"):
+        obs_p = np.where(total > 0, M / total, np.nan)
+
+    x = np.arange(1, kmax + 1)
+    ax.bar(x, np.nan_to_num(obs_p, nan=0.0), width=0.84, color="0.85", alpha=0.85, label="Empirical", zorder=1)
+
+    mask = total > 0
+    if np.any(mask):
+        m_obs = M[mask]
+        n_obs = N[mask]
+        lower = np.where(m_obs == 0, 0.0, beta.ppf(0.025, m_obs, n_obs + 1))
+        upper = np.where(n_obs == 0, 1.0, beta.ppf(0.975, m_obs + 1, n_obs))
+        y = obs_p[mask]
+        yerr = np.vstack([y - lower, upper - y])
+        ax.errorbar(x[mask], y, yerr=yerr, fmt="none", ecolor="0.45", elinewidth=0.8, capsize=2, zorder=2)
+
+    for model_label, payload in model_curves.items():
+        curve = payload["curve"]
+        color = payload["color"]
+        ax.plot(curve["level"], curve["fit"], "-o", color=color, lw=2.0, ms=3.3, label=model_label, zorder=5)
+        ax.fill_between(curve["level"], curve["lower"], curve["upper"], color=color, alpha=0.10, zorder=4)
+
+    y0, y1 = truncated_panel_ylim(obs_p, model_curves)
+    ax.set_ylim(y0, y1)
+    ax.set_title(f"{OO_SPEC['row_title']} | K={K}")
+    ax.set_xlabel("Exposure level")
+    ax.set_ylabel("P(adopt | exposure)")
+    ax.grid(alpha=0.2, zorder=0)
+
+handles, labels = axes[0].get_legend_handles_labels()
+fig.legend(handles, labels, loc="upper center", ncol=4, framealpha=0.95, bbox_to_anchor=(0.5, 1.08))
+fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+oo_fig = FIG_DIR / "oo165_fit_comparison_truncated.png"
+fig.savefig(oo_fig, dpi=220, bbox_inches="tight")
+oo_fig
+```
+
+## OO Fit Diagnostics
+
+```{python}
+#| label: oo-fit-diagnostics
+#| warning: false
+
+m_path, n_path, resolved_name = _resolve_oo_mn_paths(OO_SPEC["data_name"])
+source_check = pd.DataFrame(
+    [
+        {
+            "requested_data_name": OO_SPEC["data_name"],
+            "resolved_data_name": resolved_name,
+            "M_path": str(m_path) if m_path is not None else "missing",
+            "N_path": str(n_path) if n_path is not None else "missing",
+        }
+    ]
+)
+
+kmax_diag = 0
+for K in [1, 2]:
+    for model_slug, model_label, _ in OO_MODEL_SPECS:
+        run_path = run_path_for(OO_SPEC["sweep"], OO_SPEC["source"], OO_SPEC["data_name"], K, model_slug)
+        kernel_df = load_kernel_summary(run_path)
+        if kernel_df is not None and not kernel_df.empty:
+            kmax_diag = max(kmax_diag, int(kernel_df["level"].max()))
+
+kmax_diag = max(kmax_diag, 20)
+M, N = load_oo_data(OO_SPEC["data_name"], run_kmax=kmax_diag)
+total = M + N
+with np.errstate(divide="ignore", invalid="ignore"):
+    obs_p = np.where(total > 0, M / total, np.nan)
+
+ci_low = np.full_like(obs_p, np.nan, dtype=float)
+ci_high = np.full_like(obs_p, np.nan, dtype=float)
+mask = total > 0
+if np.any(mask):
+    m_obs = M[mask]
+    n_obs = N[mask]
+    ci_low[mask] = np.where(m_obs == 0, 0.0, beta.ppf(0.025, m_obs, n_obs + 1))
+    ci_high[mask] = np.where(n_obs == 0, 1.0, beta.ppf(0.975, m_obs + 1, n_obs))
+
+diag_emp_df = pd.DataFrame(
+    {
+        "k": np.arange(1, kmax_diag + 1),
+        "M": M,
+        "N": N,
+        "total": total,
+        "empirical_p": obs_p,
+        "ci_low": ci_low,
+        "ci_high": ci_high,
+    }
+)
+diag_emp_df = diag_emp_df[diag_emp_df["total"] > 0].copy()
+
+model_gap_rows = []
+for K in [1, 2]:
+    for model_slug, model_label, _ in OO_MODEL_SPECS:
+        run_path = run_path_for(OO_SPEC["sweep"], OO_SPEC["source"], OO_SPEC["data_name"], K, model_slug)
+        kernel_df = load_kernel_summary(run_path)
+        if kernel_df is None or kernel_df.empty:
+            continue
+        pi_df = load_pi_summary(run_path)
+        curve = aggregate_model_curve(kernel_df, pi_df, ESTIMATOR)
+        if curve is None or curve.empty:
+            continue
+
+        pred = np.full(kmax_diag, np.nan, dtype=float)
+        levels = curve["level"].to_numpy(dtype=int)
+        fit_vals = curve["fit"].to_numpy(dtype=float)
+        keep = (levels >= 1) & (levels <= kmax_diag)
+        pred[levels[keep] - 1] = fit_vals[keep]
+
+        valid = (total > 0) & np.isfinite(obs_p) & np.isfinite(pred)
+        if not np.any(valid):
+            continue
+
+        weighted_mae = np.sum(total[valid] * np.abs(pred[valid] - obs_p[valid])) / np.sum(total[valid])
+        mean_ratio = float(np.mean(pred[valid] / obs_p[valid]))
+        peak_underfit = float(np.max(obs_p[valid] - pred[valid]))
+
+        model_gap_rows.append(
+            {
+                "K": K,
+                "Model": model_label,
+                "Mean_Model_to_Empirical": mean_ratio,
+                "Weighted_MAE": weighted_mae,
+                "Peak_Underfit": peak_underfit,
+            }
+        )
+
+model_gap_df = pd.DataFrame(model_gap_rows).sort_values(["K", "Weighted_MAE"])
+
+non_monotone_steps = int(np.sum(np.diff(diag_emp_df["empirical_p"].to_numpy(dtype=float)) < 0))
+
+print("OO empirical source check:")
+print(source_check.to_string(index=False))
+print(f"\\nEmpirical OO curve has {len(diag_emp_df)} bins with data and {non_monotone_steps} downward (non-monotone) steps.")
+print("\\nHighest empirical bins (rate + uncertainty):")
+print(
+    diag_emp_df.sort_values("empirical_p", ascending=False)[["k", "total", "empirical_p", "ci_low", "ci_high"]]
+    .head(8)
+    .to_string(index=False, float_format=lambda x: f"{x:0.6f}")
+)
+
+diag_emp_df.to_csv(FIG_DIR / "oo_empirical_bins.csv", index=False)
+model_gap_df.to_csv(FIG_DIR / "oo_model_gap_summary.csv", index=False)
+
+model_gap_df
+```
+
+These diagnostics suggest the OO underfit is mostly structural, not a plotting bug:
+
+- The empirical OO curve is non-monotone (several down-steps), while all compared models impose stronger shape constraints (SC geometric, CC sigmoid, NP monotone).
+- SC/CC are especially conservative at OO scales, and their priors are centered at very low probabilities unless explicitly overridden.
+- NP monotonic (especially `K=2`) narrows the gap but still smooths under sharp empirical peaks.
+
+## OO NP Calibration Side-by-Side (Balanced vs Peak)
+
+```{python}
+#| label: oo-np-balanced-vs-peak
+#| fig-cap: "OO NP monotonic calibration side-by-side: best balanced fit (lowest weighted MAE) vs best peak-matching fit (lowest peak underfit) from completed drop-zero sweeps."
+
+SCORED_SWEEPS = [
+    "research_sweep_oo_prior_np_v3_dropzero",
+    "research_sweep_oo_prior_np_v4_peakpush",
+    "research_sweep_oo_prior_np_v5_k3_refine",
+]
+
+score_frames = []
+for sweep_name in SCORED_SWEEPS:
+    summary_csv = RESULTS_BASE / sweep_name / "oo_fit_gap_summary.csv"
+    if not summary_csv.exists():
+        continue
+    df_s = pd.read_csv(summary_csv)
+    if df_s.empty:
+        continue
+    df_s["sweep"] = sweep_name
+    score_frames.append(df_s)
+
+if not score_frames:
+    raise RuntimeError("No scored OO sweep summaries found for side-by-side calibration plot.")
+
+scores = pd.concat(score_frames, ignore_index=True)
+scores["K"] = pd.to_numeric(scores["K"], errors="coerce")
+candidates = scores[scores["K"] == 3].copy()
+if candidates.empty:
+    candidates = scores.copy()
+
+best_balanced = candidates.nsmallest(1, "weighted_mae").iloc[0].copy()
+best_peak = candidates.nsmallest(1, "peak_underfit").iloc[0].copy()
+
+selected_cfg = pd.DataFrame([best_balanced, best_peak]).reset_index(drop=True)
+selected_cfg.insert(0, "selection", ["Best Balanced", "Best Peak Match"])
+
+
+def _instance_path(row):
+    return RESULTS_BASE / row["sweep"] / "oo" / OO_SPEC["data_name"] / row["instance_id"]
+
+
+fig, axes = plt.subplots(1, 2, figsize=(14.5, 5.0), sharey=False)
+
+for ax, row in zip(axes, selected_cfg.to_dict(orient="records")):
+    run_path = _instance_path(row)
+    kernel_df = load_kernel_summary(run_path)
+    pi_df = load_pi_summary(run_path)
+    curve = aggregate_model_curve(kernel_df, pi_df, ESTIMATOR)
+
+    if curve is None or curve.empty:
+        ax.text(0.5, 0.5, "Missing model curve", transform=ax.transAxes, ha="center", va="center")
+        ax.set_axis_off()
+        continue
+
+    kmax = int(curve["level"].max())
+    M, N = load_oo_data(OO_SPEC["data_name"], run_kmax=kmax)
+    total = M + N
+    with np.errstate(divide="ignore", invalid="ignore"):
+        obs_p = np.where(total > 0, M / total, np.nan)
+
+    x = np.arange(1, kmax + 1)
+    ax.bar(x, np.nan_to_num(obs_p, nan=0.0), width=0.84, color="0.86", alpha=0.9, label="Empirical", zorder=1)
+
+    mask = total > 0
+    if np.any(mask):
+        m_obs = M[mask]
+        n_obs = N[mask]
+        lower = np.where(m_obs == 0, 0.0, beta.ppf(0.025, m_obs, n_obs + 1))
+        upper = np.where(n_obs == 0, 1.0, beta.ppf(0.975, m_obs + 1, n_obs))
+        y = obs_p[mask]
+        yerr = np.vstack([y - lower, upper - y])
+        ax.errorbar(x[mask], y, yerr=yerr, fmt="none", ecolor="0.45", elinewidth=0.8, capsize=2, zorder=2)
+
+    ax.plot(curve["level"], curve["fit"], "-o", color="#2ca02c", lw=2.2, ms=3.8, label="NP monotonic fit", zorder=5)
+    ax.fill_between(curve["level"], curve["lower"], curve["upper"], color="#2ca02c", alpha=0.12, zorder=4)
+
+    y0, y1 = truncated_panel_ylim(obs_p, {"NP monotonic": {"curve": curve}})
+    ax.set_ylim(y0, y1)
+
+    conc = row.get("concentration", np.nan)
+    loc = row.get("logit_p_location", np.nan)
+    scale = row.get("logit_p_scale", np.nan)
+    ax.set_title(
+        f"{row['selection']} | K={int(row['K'])}\nconc={conc}, loc={loc}, scale={scale}",
+        fontsize=10,
+    )
+    ax.set_xlabel("Exposure level (k)")
+    ax.set_ylabel("P(adopt | k)")
+    ax.grid(alpha=0.2, zorder=0)
+
+handles, labels = axes[0].get_legend_handles_labels()
+fig.legend(handles, labels, loc="upper center", ncol=2, framealpha=0.95, bbox_to_anchor=(0.5, 1.04))
+fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+oo_side_by_side_fig = FIG_DIR / "oo_np_calibration_side_by_side_balanced_vs_peak.png"
+fig.savefig(oo_side_by_side_fig, dpi=230, bbox_inches="tight")
+
+selected_cfg[
+    [
+        "selection",
+        "sweep",
+        "instance_id",
+        "weighted_mae",
+        "tail_mae_k10plus",
+        "peak_underfit",
+        "peak_pred",
+    ]
+]
+```
+
+## WAIC/BIC from Dashboard Logic
+
+```{python}
+#| label: model-metrics-table
+metric_rows = []
+
+for spec in TWITTER_SPECS:
+    for K in [1, 2]:
+        for model_slug, model_label, _ in TWITTER_MODEL_SPECS:
+            run_path = run_path_for(spec["sweep"], spec["source"], spec["data_name"], K, model_slug)
+            stats = load_model_fit_stats(run_path, n=1000)
+            if stats is None:
+                continue
+            metric_rows.append(
+                {
+                    "group": f"{spec['group']} | K={K}",
+                    "dataset": "Twitter",
+                    "K": K,
+                    "Model": model_label,
+                    "run_path": str(run_path),
+                    **stats,
+                }
+            )
+
+for K in [1, 2]:
+    for model_slug, model_label, _ in OO_MODEL_SPECS:
+        run_path = run_path_for(OO_SPEC["sweep"], OO_SPEC["source"], OO_SPEC["data_name"], K, model_slug)
+        stats = load_model_fit_stats(run_path, n=1000)
+        if stats is None:
+            continue
+        metric_rows.append(
+            {
+                "group": f"{OO_SPEC['group']} | K={K}",
+                "dataset": "OO",
+                "K": K,
+                "Model": model_label,
+                "run_path": str(run_path),
+                **stats,
+            }
+        )
+
+metrics_df = compute_group_metrics(pd.DataFrame(metric_rows))
+
+cols = [
+    "group",
+    "dataset",
+    "Model",
+    "waic",
+    "Delta_WAIC",
+    "WAIC_Weight",
+    "WAIC_Selected",
+    "WAIC_Selected_Dataset",
+    "bic",
+    "Delta_BIC",
+    "BIC_Weight",
+    "BIC_Selected",
+    "BIC_Selected_Dataset",
+    "k_est",
+]
+cols = [c for c in cols if c in metrics_df.columns]
+metrics_df[cols].sort_values(["group", "bic"])
+```
+
+```{python}
+#| label: model-metrics-plot
+#| fig-cap: "Model selection metrics computed with the same approximation logic as dashboard.qmd."
+
+fig, axes = plt.subplots(2, 2, figsize=(18, 10), sharex=False)
+
+metric_specs = [
+    ("waic", "WAIC", "WAIC_Selected_Dataset"),
+    ("bic", "BIC", "BIC_Selected_Dataset"),
+]
+dataset_order = ["Twitter", "OO"]
+best_text_color = "#7f3c8d"
+
+for row_idx, (metric_col, metric_label, selected_col) in enumerate(metric_specs):
+    for col_idx, dataset_name in enumerate(dataset_order):
+        ax = axes[row_idx, col_idx]
+        sub = metrics_df[(metrics_df["dataset"] == dataset_name) & (metrics_df[metric_col].notna())].copy()
+
+        if sub.empty:
+            ax.text(0.5, 0.5, f"No {metric_label} available", transform=ax.transAxes, ha="center", va="center")
+            ax.set_axis_off()
+            continue
+
+        sub = sub.sort_values(["group", metric_col, "Model"])
+        x = np.arange(len(sub))
+        bars = ax.bar(
+            x,
+            sub[metric_col].to_numpy(dtype=float),
+            color=[MODEL_COLORS.get(m, "0.5") for m in sub["Model"]],
+            alpha=0.9,
+        )
+        ax.set_xticks(x)
+        tick_labels = [f"{g}\n{m}" for g, m in zip(sub["group"], sub["Model"])]
+        tick_texts = ax.set_xticklabels(tick_labels, rotation=35, ha="right")
+
+        selected_idx = set(sub.index[sub[selected_col].fillna(False)])
+        for txt, (row_id, row), bar in zip(tick_texts, sub.iterrows(), bars):
+            if row_id in selected_idx:
+                txt.set_color(best_text_color)
+                txt.set_fontweight("bold")
+                bar.set_edgecolor(best_text_color)
+                bar.set_linewidth(1.8)
+            else:
+                txt.set_color("0.45")
+
+        ax.set_title(f"{metric_label}: {dataset_name} (lower is better)")
+        if col_idx == 0:
+            ax.set_ylabel(metric_label)
+        ax.grid(alpha=0.2, axis="y")
+
+fig.tight_layout()
+metric_fig = FIG_DIR / "waic_bic_by_dataset_selected_text.png"
+fig.savefig(metric_fig, dpi=220, bbox_inches="tight")
+metric_fig
+```

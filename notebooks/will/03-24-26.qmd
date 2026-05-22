@@ -1,0 +1,386 @@
+---
+title: "Synthetic PPC Trial: Simple vs Sigmoid"
+date: "2026-03-24"
+format: html
+toc: true
+jupyter: hetker-venv
+---
+
+```{python}
+#| label: setup
+#| warning: false
+#| output: false
+import json
+import sys
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+REPO_ROOT = Path("../..")
+sys.path.insert(0, str(REPO_ROOT.resolve()))
+FIG_DIR = Path("figures") / "03-24-26"
+FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+RUNS = {
+    "Simple-generated data": {
+        "run_name": "ppc_trial_simple_20260324",
+        "color": "#1b9e77",
+    },
+    "Sigmoid-generated data": {
+        "run_name": "ppc_trial_sigmoid_20260324",
+        "color": "#d95f02",
+    },
+}
+
+PAIR_ID = (
+    "simple=K~1__stan_file~model_simple_contagion__"
+    "nonparam=K~1__stan_file~non_parametric_monotonic_empirical_bayes"
+)
+```
+
+```{python}
+#| label: helpers
+#| warning: false
+#| output: false
+def simple_kernel(beta, kmax):
+    nu = np.arange(1, kmax + 1, dtype=float)
+    return 1.0 - (1.0 - float(beta)) ** nu
+
+
+def sigmoid_kernel(rho_l, rho_h, w, k0, kmax):
+    nu = np.arange(1, kmax + 1, dtype=float)
+    return rho_l + (rho_h - rho_l) / (1.0 + np.exp(-w * (nu - k0)))
+
+
+def load_trial(label, spec):
+    run_name = spec["run_name"]
+    processed_dir = REPO_ROOT / "data" / "processed" / "synthetic" / run_name
+    result_dir = REPO_ROOT / "results" / run_name / "synthetic" / run_name
+
+    metadata = pd.read_parquet(processed_dir / "metadata.parquet").iloc[0]
+    kernels_cfg = json.loads(metadata["kernels_json"])
+    kernel_cfg = kernels_cfg[0]
+    kmax = int(metadata["kmax"])
+    nu = np.arange(1, kmax + 1, dtype=int)
+
+    if kernel_cfg["type"] == "simple":
+        truth = simple_kernel(kernel_cfg["beta"], kmax)
+    elif kernel_cfg["type"] == "sigmoid":
+        truth = sigmoid_kernel(
+            kernel_cfg["rho_l"],
+            kernel_cfg["rho_h"],
+            kernel_cfg["w"],
+            kernel_cfg["k0"],
+            kmax,
+        )
+    else:
+        raise ValueError(f"Unsupported kernel type: {kernel_cfg['type']}")
+
+    simple_dir = result_dir / "K~1" / "stan_file~model_simple_contagion"
+    nonparam_dir = result_dir / "K~1" / "stan_file~non_parametric_monotonic_empirical_bayes"
+    ppc_dir = result_dir / "ppc" / PAIR_ID
+
+    simple_kernel_df = pd.read_parquet(simple_dir / "kernel_mode_summary.parquet").sort_values("nu")
+    nonparam_kernel_df = pd.read_parquet(nonparam_dir / "kernel_mode_summary.parquet").sort_values("nu")
+    simple_post = pd.read_parquet(simple_dir / "posterior_samples.parquet")
+    rho_col = "rho[1]" if "rho[1]" in simple_post.columns else "rho"
+
+    return {
+        "label": label,
+        "run_name": run_name,
+        "metadata": metadata,
+        "kernel_cfg": kernel_cfg,
+        "nu": nu,
+        "truth": truth,
+        "simple_kernel_df": simple_kernel_df,
+        "nonparam_kernel_df": nonparam_kernel_df,
+        "rho_mean": float(simple_post[rho_col].mean()),
+        "rho_median": float(simple_post[rho_col].median()),
+        "non_nested": pd.read_parquet(ppc_dir / "non_nested_summary.parquet").assign(dataset=label),
+        "nested": pd.read_parquet(ppc_dir / "nested_summary.parquet").assign(dataset=label),
+    }
+
+
+def plot_kernel_panel(ax, trial, color):
+    simple_df = trial["simple_kernel_df"]
+    nonparam_df = trial["nonparam_kernel_df"]
+
+    ax.plot(trial["nu"], trial["truth"], color="black", lw=2.4, label="Truth")
+    ax.plot(
+        simple_df["nu"],
+        simple_df["mean"],
+        color=color,
+        lw=2.0,
+        ls="--",
+        label="Simple fit",
+    )
+    ax.fill_between(
+        simple_df["nu"],
+        simple_df["ci_low"],
+        simple_df["ci_high"],
+        color=color,
+        alpha=0.16,
+    )
+    ax.plot(
+        nonparam_df["nu"],
+        nonparam_df["mean"],
+        color=color,
+        lw=2.2,
+        label="Nonparam fit",
+    )
+    ax.fill_between(
+        nonparam_df["nu"],
+        nonparam_df["ci_low"],
+        nonparam_df["ci_high"],
+        color=color,
+        alpha=0.10,
+    )
+    ax.set_title(trial["label"])
+    ax.set_xlabel("Exposure level")
+    ax.set_ylabel("P(adopt | exposure)")
+    ax.set_ylim(0, 1)
+    ax.grid(alpha=0.2)
+
+
+def grouped_bar_plot(ax, df, value_col, title):
+    stats = list(df["stat_name"].unique())
+    datasets = list(df["dataset"].unique())
+    x = np.arange(len(stats), dtype=float)
+    width = 0.36
+
+    for idx, dataset in enumerate(datasets):
+        sub = df[df["dataset"] == dataset].set_index("stat_name").reindex(stats)
+        ax.bar(
+            x + (idx - 0.5) * width,
+            sub[value_col].to_numpy(dtype=float),
+            width=width,
+            label=dataset,
+            color=RUNS[dataset]["color"],
+            alpha=0.88,
+        )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(stats, rotation=15, ha="right")
+    ax.set_ylabel(value_col.replace("_", " "))
+    ax.set_title(title)
+    ax.grid(axis="y", alpha=0.2)
+```
+
+```{python}
+#| label: load-results
+#| warning: false
+#| output: false
+TRIALS = {label: load_trial(label, spec) for label, spec in RUNS.items()}
+
+run_rows = []
+for label, trial in TRIALS.items():
+    cfg = trial["kernel_cfg"]
+    run_rows.append(
+        {
+            "dataset": label,
+            "run_name": trial["run_name"],
+            "truth_type": cfg["type"],
+            "truth_params": json.dumps(cfg, sort_keys=True),
+            "n": int(trial["metadata"]["n"]),
+            "kmax": int(trial["metadata"]["kmax"]),
+            "simple_rho_mean": trial["rho_mean"],
+            "simple_rho_median": trial["rho_median"],
+        }
+    )
+
+run_summary = pd.DataFrame(run_rows)
+non_nested_summary = pd.concat([trial["non_nested"] for trial in TRIALS.values()], ignore_index=True)
+nested_summary = pd.concat([trial["nested"] for trial in TRIALS.values()], ignore_index=True)
+```
+
+## Run Summary
+
+These two runs were generated from the synthetic pipeline that calls `heterogeneous_contagion_process(...)` in `src/dynamics.py`, then fit with the current PPC pair: simple contagion vs monotonic empirical-Bayes nonparametric.
+
+```{python}
+#| label: run-summary-table
+run_summary
+```
+
+## Kernel Recovery
+
+The first panel is the ground-truth kernel used to simulate each dataset. The dashed line is the simple-contagion fit and the solid colored line is the nonparametric monotonic fit.
+
+```{python}
+#| label: kernel-recovery
+#| fig-cap: "Ground-truth kernels and fitted kernels for the March 24 synthetic PPC trials."
+fig, axes = plt.subplots(1, 2, figsize=(13.5, 4.8), sharey=True)
+
+for ax, (label, trial) in zip(axes, TRIALS.items()):
+    plot_kernel_panel(ax, trial, RUNS[label]["color"])
+
+handles, labels = axes[0].get_legend_handles_labels()
+uniq = dict(zip(labels, handles))
+fig.legend(uniq.values(), uniq.keys(), loc="upper center", ncol=3, framealpha=0.95)
+fig.tight_layout(rect=[0, 0, 1, 0.92])
+
+kernel_fig = FIG_DIR / "synthetic_ppc_kernel_recovery_03-24-26.png"
+fig.savefig(kernel_fig, dpi=220, bbox_inches="tight")
+kernel_fig
+```
+
+## Non-Nested PPC
+
+These are the current simple-model posterior predictive checks. The bars show the posterior predictive p-values from the `non_nested_summary.parquet` outputs.
+
+```{python}
+#| label: non-nested-ppc-plot
+#| fig-cap: "Non-nested PPC summary for simple-generated and sigmoid-generated synthetic datasets."
+fig, ax = plt.subplots(figsize=(9.5, 4.8))
+grouped_bar_plot(ax, non_nested_summary, "ppp_value", "Non-nested PPC PPP values")
+ax.legend(framealpha=0.95)
+fig.tight_layout()
+
+non_nested_fig = FIG_DIR / "synthetic_ppc_non_nested_03-24-26.png"
+fig.savefig(non_nested_fig, dpi=220, bbox_inches="tight")
+non_nested_fig
+```
+
+```{python}
+#| label: non-nested-ppc-table
+non_nested_summary.sort_values(["stat_name", "dataset"]).reset_index(drop=True)
+```
+
+## Nested PPC
+
+These are the nested re-fit checks based on the current Mahalanobis-based statistics. Because this was only a quick operational run, the nested portion used only `2` refits per dataset.
+
+```{python}
+#| label: nested-ppc-plot
+#| fig-cap: "Nested PPC summary for simple-generated and sigmoid-generated synthetic datasets."
+fig, ax = plt.subplots(figsize=(9.5, 4.8))
+grouped_bar_plot(ax, nested_summary, "ppp_value", "Nested PPC PPP values")
+ax.legend(framealpha=0.95)
+fig.tight_layout()
+
+nested_fig = FIG_DIR / "synthetic_ppc_nested_03-24-26.png"
+fig.savefig(nested_fig, dpi=220, bbox_inches="tight")
+nested_fig
+```
+
+```{python}
+#| label: nested-ppc-table
+nested_summary.sort_values(["stat_name", "dataset"]).reset_index(drop=True)
+```
+
+## Takeaways
+
+- The simple-generated dataset is recovered cleanly by the simple model: the fitted `rho` is very close to the generating `beta`.
+- The sigmoid-generated dataset forces the simple model into a lower average-rate approximation, while the nonparametric fit tracks the curved kernel more closely.
+- With these tiny trial settings, the non-nested PPCs move a bit but do not cleanly separate the two generating mechanisms yet.
+- The nested PPC path is now operational end to end, but with only `2` nested refits the resulting p-values are only a workflow smoke test, not a calibrated scientific result.
+
+## Adopters-Only Survival Check
+
+This follow-up uses the synthetic nonparametric run, but converts the incidence-style event matrix into the adopters-only survival target we discussed:
+
+- keep only rows with an eventual adoption event
+- leave `M` unchanged
+- set `N[nu]` to the probability mass of adopting strictly after `nu`
+
+So for deterministic one-hot incidence rows, each adopter contributes a `1` to every pre-adoption risk bin and contributes no non-event mass after the event.
+
+```{python}
+#| label: adopters-only-survival-load
+#| warning: false
+#| output: false
+from src.models.inference import convert_incidence_to_adopters_only_survival
+
+SURVIVAL_CHECK_ROOT = (
+    REPO_ROOT
+    / "results"
+    / "nonparam_adopters_only_survival_check_20260325"
+    / "synthetic"
+    / "nonparam_adopters_only_survival_summary_20260325"
+)
+SURVIVAL_FIT_ROOT = SURVIVAL_CHECK_ROOT / "K~1"
+SURVIVAL_PROC_ROOT = REPO_ROOT / "data" / "processed" / "synthetic" / "nonparam_survival_check_20260325"
+
+survival_truth_df = pd.read_parquet(SURVIVAL_PROC_ROOT / "kernels.parquet")
+survival_truth_cols = [c for c in survival_truth_df.columns if c.startswith("nu_")]
+survival_truth = survival_truth_df[survival_truth_cols].mean(axis=0).to_numpy(dtype=float)
+survival_levels = np.arange(1, len(survival_truth) + 1)
+
+survival_incidence_M = pd.read_parquet(SURVIVAL_PROC_ROOT / "M.parquet").to_numpy(dtype=float)
+survival_M, survival_N, survival_adopted_mask = convert_incidence_to_adopters_only_survival(
+    survival_incidence_M
+)
+survival_support = survival_M.sum(axis=0) + survival_N.sum(axis=0)
+survival_empirical = np.divide(
+    survival_M.sum(axis=0),
+    survival_support,
+    out=np.full_like(survival_support, np.nan, dtype=float),
+    where=survival_support > 0,
+)
+
+SURVIVAL_MODELS = [
+    ("model_simple_contagion", "Simple", "#4C78A8"),
+    ("model_complex_contagion", "Complex", "#F58518"),
+    ("non_parametric_monotonic_empirical_bayes", "Nonparam", "#54A24B"),
+]
+
+survival_metrics_rows = []
+survival_fit_payloads = []
+for slug, label, color in SURVIVAL_MODELS:
+    kernel_df = pd.read_parquet(SURVIVAL_FIT_ROOT / f"stan_file~{slug}" / "kernel_mode_summary.parquet")
+    kernel_df = kernel_df.sort_values("nu")
+    fit = kernel_df["mean"].to_numpy(dtype=float)[: len(survival_truth)]
+    survival_fit_payloads.append((label, color, kernel_df))
+    survival_metrics_rows.append(
+        {
+            "model": label,
+            "supported_mae": float(
+                np.mean(np.abs(fit[survival_support > 0] - survival_truth[survival_support > 0]))
+            ),
+            "weighted_mae": float(np.average(np.abs(fit - survival_truth), weights=survival_support)),
+        }
+    )
+
+survival_metrics = pd.DataFrame(survival_metrics_rows).sort_values("supported_mae").reset_index(drop=True)
+```
+
+```{python}
+#| label: adopters-only-survival-plot
+#| fig-cap: "Synthetic adopters-only survival check: converted empirical hazard and fitted kernels for the nonparametric ground-truth run."
+fig, ax = plt.subplots(figsize=(10.5, 5.2))
+
+ax.plot(survival_levels, survival_truth, color="black", lw=2.5, label="Truth")
+ax.plot(
+    survival_levels[survival_support > 0],
+    survival_empirical[survival_support > 0],
+    "o-",
+    color="#2F4B7C",
+    ms=4,
+    lw=1.8,
+    label="Converted adopters-only empirical",
+)
+
+for label, color, kernel_df in survival_fit_payloads:
+    ax.plot(kernel_df["nu"], kernel_df["mean"], "-o", color=color, ms=3.5, lw=1.8, label=label)
+
+ax.set_xlabel("Exposure level")
+ax.set_ylabel("P(adopt | exposure)")
+ax.set_ylim(0, 1)
+ax.set_title("Adopters-Only Survival Recovery")
+ax.grid(alpha=0.2)
+ax.legend(framealpha=0.95, ncol=2)
+fig.tight_layout()
+
+survival_fig = FIG_DIR / "synthetic_adopters_only_survival_recovery_03-24-26.png"
+fig.savefig(survival_fig, dpi=220, bbox_inches="tight")
+survival_fig
+```
+
+```{python}
+#| label: adopters-only-survival-metrics
+survival_metrics
+```
+
+On this converted target, the complex model fits best in this quick run, followed by simple, then nonparametric. The important point is interpretational: once we condition on eventual adopters and convert the incidence events into pre-adoption risk bins, the empirical target is steeper than the original full-population simulator kernel, so this is a different estimand than the earlier full synthetic hazard check.

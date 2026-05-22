@@ -1,0 +1,1358 @@
+---
+title: "Twitter + OO Fit Comparison"
+date: "2026-03-08"
+format: html
+---
+
+```{python}
+#| label: setup
+#| warning: false
+#| output: false
+import sys
+sys.path.insert(0, "../..")
+
+from pathlib import Path
+import re
+
+import duckdb
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+```
+
+```{python}
+#| label: constants
+#| warning: false
+#| output: false
+REPO_ROOT = Path("../..")
+RESULTS_BASE = REPO_ROOT / "results"
+DATA_PROCESSED_BASE = REPO_ROOT / "data" / "processed"
+PIPELINE_TWITTER_FULL = DATA_PROCESSED_BASE / "twitter" / "full"
+PIPELINE_TWITTER_FULL_SURVIVAL = DATA_PROCESSED_BASE / "twitter_survival" / "full"
+
+# Keep figure outputs versioned so reruns do not overwrite prior comparison sets.
+FIG_SET = "03-08-26_weighted_vacc_refit"
+FIG_DIR = Path("figures") / FIG_SET
+FIG_DIR.mkdir(parents=True, exist_ok=True)
+FIG_SET_OG = "03-08-26_og_current"
+FIG_DIR_OG = Path("figures") / FIG_SET_OG
+ESTIMATOR = "mean"   # Posterior mean gives smoother curves for threshold-like models
+SHOW_MODEL_BANDS = False  # 95% ribbons are wide for these runs; hide by default
+SHOW_EMPIRICAL_BANDS = False  # Use point estimates for data bins
+
+TWITTER_SPECS = [
+    {
+        "label": "SC metric",
+        "sweep": "research_sweep_twitter_optimal_q_sc",
+        "source": "twitter",
+        "data_name": "default_data_prep",
+        "metric": "k",
+        "q": 0.192,
+        "row_title": "Twitter SC metric (k), q=0.192",
+    },
+    {
+        "label": "CC metric",
+        "sweep": "research_sweep_twitter_optimal_q_cc",
+        "source": "twitter",
+        "data_name": "default_data_prep",
+        "metric": "kappa",
+        "q": 0.18,
+        "row_title": "Twitter CC metric (kappa), q=0.18",
+    },
+]
+
+TWITTER_SURVIVAL_SPECS = [
+    {
+        "label": "SC metric (survival retry)",
+        "sweep": "research_sweep_twitter_optimal_q_sc_survival_retry",
+        "source": "twitter",
+        "data_name": "default_data_prep_survival",
+        "metric": "k",
+        "q": 0.192,
+        "row_title": "Twitter SC metric (k), q=0.192 | survival retry priors",
+        "base_dir": PIPELINE_TWITTER_FULL_SURVIVAL,
+    },
+    {
+        "label": "CC metric (survival retry)",
+        "sweep": "research_sweep_twitter_optimal_q_cc_survival_retry",
+        "source": "twitter",
+        "data_name": "default_data_prep_survival",
+        "metric": "kappa",
+        "q": 0.18,
+        "row_title": "Twitter CC metric (kappa), q=0.18 | survival retry priors",
+        "base_dir": PIPELINE_TWITTER_FULL_SURVIVAL,
+    },
+]
+
+TWITTER_SURVIVAL_ADOPTERS_SPECS = [
+    {
+        "label": "SC metric (survival adopters-only)",
+        "sweep": "research_sweep_twitter_optimal_q_sc_survival_adopters_only",
+        "source": "twitter",
+        "data_name": "default_data_prep_survival",
+        "metric": "k",
+        "q": 0.192,
+        "row_title": "Twitter SC metric (k), q=0.192 | survival adopters-only",
+        "base_dir": PIPELINE_TWITTER_FULL_SURVIVAL,
+    },
+    {
+        "label": "CC metric (survival adopters-only)",
+        "sweep": "research_sweep_twitter_optimal_q_cc_survival_adopters_only",
+        "source": "twitter",
+        "data_name": "default_data_prep_survival",
+        "metric": "kappa",
+        "q": 0.18,
+        "row_title": "Twitter CC metric (kappa), q=0.18 | survival adopters-only",
+        "base_dir": PIPELINE_TWITTER_FULL_SURVIVAL,
+    },
+]
+
+TWITTER_MODEL_SPECS = [
+    ("model_simple_contagion", "Simple contagion", "#1f77b4"),
+    ("model_complex_contagion", "Complex contagion", "#d62728"),
+    ("non_parametric_monotonic", "NP monotonic", "#2ca02c"),
+]
+
+OO_SPEC = {
+    "source": "oo",
+    "data_name": "sim_165_backbone_disparity_exposures",
+    "row_title": "OO Sim 165 (backbone disparity)",
+}
+
+OO_SWEEP_SPECS = [
+    {"label": "EB prior", "sweep": "research_sweep_oo_mixture_eb"},
+    {"label": "WEAK prior", "sweep": "research_sweep_oo_mixture_weak"},
+]
+
+OO_MODEL_SPECS = [
+    ("mixture_simple_contagion", "Simple contagion", "#1f77b4"),
+    ("mixture_complex_contagion", "Complex contagion", "#d62728"),
+    ("mixture_non_parametric", "Non-parametric", "#2ca02c"),
+]
+```
+
+```{python}
+#| label: helpers
+#| warning: false
+#| output: false
+def _find_pipeline_parquets(metric_key, q_val, base_dir=PIPELINE_TWITTER_FULL):
+    m_path = Path(base_dir) / f"M_{metric_key}_q{q_val}.parquet"
+    n_path = Path(base_dir) / f"N_{metric_key}_q{q_val}.parquet"
+    if m_path.exists() and n_path.exists():
+        return m_path, n_path
+    return None, None
+
+
+def _load_pipeline_mn(m_path, n_path, run_kmax):
+    con = duckdb.connect()
+    cols_info = con.execute(f"DESCRIBE SELECT * FROM read_parquet('{m_path}')").fetchall()
+    exposure_cols = [c[0] for c in cols_info if c[0] != "user_id"]
+    sum_stmt = ", ".join([f'SUM("{c}") AS "{c}"' for c in exposure_cols])
+
+    m_sums = con.execute(f"SELECT {sum_stmt} FROM read_parquet('{m_path}')").fetchone()
+    n_sums = con.execute(f"SELECT {sum_stmt} FROM read_parquet('{n_path}')").fetchone()
+    con.close()
+
+    M = np.zeros(run_kmax, dtype=float)
+    N = np.zeros(run_kmax, dtype=float)
+    for i, col_name in enumerate(exposure_cols):
+        k = int(col_name)
+        if 1 <= k <= run_kmax:
+            M[k - 1] = float(m_sums[i])
+            N[k - 1] = float(n_sums[i])
+    return M, N
+
+
+def load_twitter_data(q, metric, run_kmax=50, base_dir=PIPELINE_TWITTER_FULL, adopters_only=False):
+    metric_key = "k" if metric == "k" else "kappa"
+    m_path, n_path = _find_pipeline_parquets(metric_key, float(q), base_dir=base_dir)
+    if m_path is None:
+        return np.zeros(run_kmax), np.zeros(run_kmax)
+    if not adopters_only:
+        return _load_pipeline_mn(m_path, n_path, run_kmax)
+
+    b_path = Path(base_dir) / "B_vector.parquet"
+    if not b_path.exists():
+        return np.zeros(run_kmax), np.zeros(run_kmax)
+
+    m_df = pd.read_parquet(m_path)
+    n_df = pd.read_parquet(n_path)
+    b_df = pd.read_parquet(b_path)[["user_id", "adopted"]].copy()
+    b_df["user_id"] = b_df["user_id"].astype(str)
+    b_df = b_df[b_df["adopted"].astype(bool)][["user_id"]]
+
+    m_df["user_id"] = m_df["user_id"].astype(str)
+    n_df["user_id"] = n_df["user_id"].astype(str)
+    m_df = m_df.merge(b_df, on="user_id", how="inner")
+    n_df = n_df.merge(b_df, on="user_id", how="inner")
+
+    valid_cols = [c for c in m_df.columns if str(c).isdigit()]
+    valid_cols = sorted(valid_cols, key=lambda x: int(str(x)))
+    M = np.zeros(run_kmax, dtype=float)
+    N = np.zeros(run_kmax, dtype=float)
+    if not valid_cols:
+        return M, N
+
+    m_sums = m_df[valid_cols].sum(axis=0)
+    n_sums = n_df[valid_cols].sum(axis=0)
+
+    for k_val in valid_cols:
+        k = int(str(k_val))
+        if k == 0:
+            continue
+        if k > run_kmax:
+            break
+        idx = k - 1
+        M[idx] = float(m_sums[k_val])
+        N[idx] = float(n_sums[k_val])
+
+    return M, N
+
+
+def load_twitter_mn_matrices(q, metric, base_dir=PIPELINE_TWITTER_FULL, adopters_only=False):
+    metric_key = "k" if metric == "k" else "kappa"
+    m_path, n_path = _find_pipeline_parquets(metric_key, float(q), base_dir=base_dir)
+    if m_path is None or n_path is None:
+        return None, None, []
+
+    m_df = pd.read_parquet(m_path)
+    n_df = pd.read_parquet(n_path)
+
+    if adopters_only:
+        b_path = Path(base_dir) / "B_vector.parquet"
+        if not b_path.exists():
+            return None, None, []
+        b_df = pd.read_parquet(b_path)[["user_id", "adopted"]].copy()
+        b_df["user_id"] = b_df["user_id"].astype(str)
+        b_df = b_df[b_df["adopted"].astype(bool)][["user_id"]]
+        m_df["user_id"] = m_df["user_id"].astype(str)
+        n_df["user_id"] = n_df["user_id"].astype(str)
+        m_df = m_df.merge(b_df, on="user_id", how="inner")
+        n_df = n_df.merge(b_df, on="user_id", how="inner")
+
+    if "user_id" in m_df.columns and "user_id" in n_df.columns:
+        m_df = m_df.sort_values("user_id").reset_index(drop=True)
+        n_df = n_df.sort_values("user_id").reset_index(drop=True)
+
+    valid_cols = [c for c in m_df.columns if str(c).isdigit()]
+    valid_cols = sorted(valid_cols, key=lambda x: int(str(x)))
+
+    M_mat = m_df[valid_cols].to_numpy(dtype=float)
+    N_mat = n_df[valid_cols].to_numpy(dtype=float)
+    col_levels = [int(str(c)) for c in valid_cols]
+    return M_mat, N_mat, col_levels
+
+
+def _resolve_oo_mn_paths(data_name):
+    base = DATA_PROCESSED_BASE / "oo"
+    names = [str(data_name)]
+    if str(data_name).endswith("_exposures"):
+        names.append(str(data_name).replace("_exposures", ""))
+
+    for name in names:
+        d = base / name
+        m_dir = d / "M.parquet"
+        n_dir = d / "N.parquet"
+        if d.is_dir() and m_dir.exists() and n_dir.exists():
+            return m_dir, n_dir, name
+
+        m_flat = base / f"{name}_M.parquet"
+        n_flat = base / f"{name}_N.parquet"
+        if m_flat.exists() and n_flat.exists():
+            return m_flat, n_flat, name
+
+    return None, None, None
+
+
+def load_oo_data(data_name, run_kmax=50):
+    m_path, n_path, _ = _resolve_oo_mn_paths(data_name)
+    if m_path is None or n_path is None:
+        return np.zeros(run_kmax), np.zeros(run_kmax)
+
+    m_df = pd.read_parquet(m_path)
+    n_df = pd.read_parquet(n_path)
+
+    valid_cols = [c for c in m_df.columns if str(c).isdigit()]
+    valid_cols = sorted(valid_cols, key=lambda x: int(str(x)))
+
+    M_arr = np.zeros(run_kmax)
+    N_arr = np.zeros(run_kmax)
+
+    m_sums = m_df[valid_cols].sum(axis=0)
+    n_sums = n_df[valid_cols].sum(axis=0)
+
+    for k_val in valid_cols:
+        k = int(str(k_val))
+        if k == 0:
+            continue
+        if k > run_kmax:
+            break
+        idx = k - 1
+        M_arr[idx] = float(m_sums[k_val])
+        N_arr[idx] = float(n_sums[k_val])
+
+    return M_arr, N_arr
+
+
+def load_oo_mn_matrices(data_name, drop_zero_bin=True):
+    m_path, n_path, _ = _resolve_oo_mn_paths(data_name)
+    if m_path is None or n_path is None:
+        return None, None, []
+
+    m_df = pd.read_parquet(m_path)
+    n_df = pd.read_parquet(n_path)
+
+    valid_cols = [c for c in m_df.columns if str(c).isdigit()]
+    valid_cols = sorted(valid_cols, key=lambda x: int(str(x)))
+    if drop_zero_bin:
+        valid_cols = [c for c in valid_cols if int(str(c)) >= 1]
+
+    M_mat = m_df[valid_cols].to_numpy(dtype=float)
+    N_mat = n_df[valid_cols].to_numpy(dtype=float)
+    col_levels = [int(str(c)) for c in valid_cols]
+    return M_mat, N_mat, col_levels
+
+
+def run_path_for(sweep_name, source, data_name, K, model_slug):
+    return (
+        RESULTS_BASE
+        / sweep_name
+        / source
+        / data_name
+        / f"K~{K}"
+        / f"stan_file~{model_slug}"
+    )
+
+
+def load_kernel_summary(run_path):
+    run_dir = Path(run_path)
+    out_cols = ["component", "level", "mean", "median", "map_marginal", "map_joint", "lower", "upper"]
+
+    def _empty():
+        return pd.DataFrame(columns=out_cols)
+
+    km_path = run_dir / "kernel_mode_summary.parquet"
+    if km_path.exists():
+        df_km = pd.read_parquet(km_path)
+        if not df_km.empty and df_km["mean"].notna().any():
+            result = df_km.rename(columns={"nu": "level", "ci_low": "lower", "ci_high": "upper"})
+            for col in ["mean", "median", "map_marginal", "map_joint"]:
+                if col not in result.columns:
+                    result[col] = result.get("mean", np.nan)
+            return result[out_cols].sort_values(["component", "level"])
+
+    s_path = run_dir / "inference_summary.parquet"
+    if not s_path.exists():
+        return _empty()
+
+    df_sum = pd.read_parquet(s_path)
+    rows_mu = []
+    rows_logit_mu = []
+    rows_c = []
+
+    pat_mu_comp = re.compile(r"^mu\[(\d+),(\d+)\]$")
+    pat_mu_single = re.compile(r"^mu\[(\d+)\]$")
+    pat_c_triplet = re.compile(r"^c\[(\d+),(\d+),(\d+)\]$")
+    pat_c_pair = re.compile(r"^c\[(\d+),(\d+)\]$")
+    pat_c_single = re.compile(r"^c\[(\d+)\]$")
+    pat_logit_mu = re.compile(r"^logit_mu\[(\d+),(\d+)\]$")
+
+    for idx, row in df_sum.iterrows():
+        idx = str(idx)
+
+        m = pat_mu_comp.match(idx)
+        if m:
+            rows_mu.append(
+                {
+                    "component": int(m.group(1)),
+                    "level": int(m.group(2)),
+                    "mean": float(row["Mean"]),
+                    "median": float(row["50%"]),
+                    "lower": float(row["5%"]),
+                    "upper": float(row["95%"]),
+                }
+            )
+            continue
+
+        m = pat_mu_single.match(idx)
+        if m:
+            rows_mu.append(
+                {
+                    "component": 1,
+                    "level": int(m.group(1)),
+                    "mean": float(row["Mean"]),
+                    "median": float(row["50%"]),
+                    "lower": float(row["5%"]),
+                    "upper": float(row["95%"]),
+                }
+            )
+            continue
+
+        m = pat_c_triplet.match(idx)
+        if m:
+            rows_c.append(
+                {
+                    "component": int(m.group(2)),
+                    "level": int(m.group(3)),
+                    "mean": float(row["Mean"]),
+                    "median": float(row["50%"]),
+                    "lower": float(row["5%"]),
+                    "upper": float(row["95%"]),
+                }
+            )
+            continue
+
+        m = pat_c_pair.match(idx)
+        if m:
+            rows_c.append(
+                {
+                    "component": int(m.group(1)),
+                    "level": int(m.group(2)),
+                    "mean": float(row["Mean"]),
+                    "median": float(row["50%"]),
+                    "lower": float(row["5%"]),
+                    "upper": float(row["95%"]),
+                }
+            )
+            continue
+
+        m = pat_c_single.match(idx)
+        if m:
+            rows_c.append(
+                {
+                    "component": 1,
+                    "level": int(m.group(1)),
+                    "mean": float(row["Mean"]),
+                    "median": float(row["50%"]),
+                    "lower": float(row["5%"]),
+                    "upper": float(row["95%"]),
+                }
+            )
+            continue
+
+        m = pat_logit_mu.match(idx)
+        if m:
+            rows_logit_mu.append(
+                {
+                    "component": int(m.group(1)),
+                    "level": int(m.group(2)),
+                    "mean": float(logistic(row["Mean"])),
+                    "median": float(logistic(row["50%"])),
+                    "lower": float(logistic(row["5%"])),
+                    "upper": float(logistic(row["95%"])),
+                }
+            )
+
+    # Fallback preference: transformed kernels (mu) -> logit_mu -> empirical kernels (c).
+    # `mu` tracks the global component kernels and is more stable for visual comparison.
+    if rows_mu:
+        base_rows = rows_mu
+    elif rows_logit_mu:
+        base_rows = rows_logit_mu
+    elif rows_c:
+        base_rows = rows_c
+    else:
+        return _empty()
+
+    df = (
+        pd.DataFrame(base_rows)
+        .groupby(["component", "level"], as_index=False)[["mean", "median", "lower", "upper"]]
+        .mean()
+        .sort_values(["component", "level"])
+    )
+    for col in ["map_marginal", "map_joint"]:
+        df[col] = df["median"]
+    return df[out_cols]
+
+
+def load_pi_summary(run_path):
+    summary_path = Path(run_path) / "inference_summary.parquet"
+    if not summary_path.exists():
+        return None
+
+    df = pd.read_parquet(summary_path)
+    rows = []
+    for idx, row in df.iterrows():
+        m = re.match(r"^pi\[(\d+)\]$", str(idx))
+        if m:
+            rows.append(
+                {
+                    "component": int(m.group(1)),
+                    "mean": float(row["Mean"]),
+                    "median": float(row["50%"]),
+                    "lower": float(row["5%"]),
+                    "upper": float(row["95%"]),
+                }
+            )
+    if not rows:
+        return None
+    return pd.DataFrame(rows).sort_values("component")
+
+
+def aggregate_model_curve(kernel_df, pi_df, estimator_col="mean"):
+    if kernel_df is None or kernel_df.empty:
+        return None
+
+    use_col = select_estimator_col(kernel_df, estimator_col)
+    levels = np.sort(kernel_df["level"].unique())
+    comps = np.sort(kernel_df["component"].unique())
+
+    curve = pd.DataFrame({"level": levels})
+    curve["fit"] = 0.0
+    curve["lower"] = 0.0
+    curve["upper"] = 0.0
+
+    if pi_df is None or pi_df.empty:
+        weights = {int(c): 1.0 / len(comps) for c in comps}
+    else:
+        weight_col = "median" if estimator_col in {"median", "map_marginal", "map_joint"} and "median" in pi_df.columns else "mean"
+        weights = {int(r.component): float(getattr(r, weight_col)) for r in pi_df.itertuples()}
+        total_w = sum(weights.get(int(c), 0.0) for c in comps)
+        if total_w <= 0:
+            weights = {int(c): 1.0 / len(comps) for c in comps}
+        else:
+            weights = {int(c): weights.get(int(c), 0.0) / total_w for c in comps}
+
+    for c in comps:
+        w = weights.get(int(c), 0.0)
+        sub = kernel_df[kernel_df["component"] == c].sort_values("level")
+        comp = pd.DataFrame(
+            {
+                "level": sub["level"].to_numpy(dtype=int),
+                "fit": sub[use_col].to_numpy(dtype=float),
+                "lower": sub["lower"].to_numpy(dtype=float),
+                "upper": sub["upper"].to_numpy(dtype=float),
+            }
+        )
+        curve = curve.merge(comp, on="level", how="left", suffixes=("", f"_c{c}"))
+        curve["fit"] += w * curve[f"fit_c{c}"].fillna(0.0)
+        curve["lower"] += w * curve[f"lower_c{c}"].fillna(0.0)
+        curve["upper"] += w * curve[f"upper_c{c}"].fillna(0.0)
+        curve = curve.drop(columns=[f"fit_c{c}", f"lower_c{c}", f"upper_c{c}"])
+
+    return curve
+
+
+def select_estimator_col(df, preferred="map_joint"):
+    for col in [preferred, "map_marginal", "median", "mean"]:
+        if col in df.columns and df[col].notna().any():
+            return col
+    return "mean"
+
+
+def truncated_panel_ylim(obs_p, model_curves):
+    finite_obs = obs_p[np.isfinite(obs_p)]
+    y_max = float(finite_obs.max()) if finite_obs.size > 0 else 0.0
+    for payload in model_curves.values():
+        curve = payload.get("curve")
+        if curve is None or curve.empty:
+            continue
+        for col in ("upper", "fit", "lower"):
+            if col in curve.columns:
+                arr = curve[col].to_numpy(dtype=float)
+                if np.isfinite(arr).any():
+                    y_max = max(y_max, float(np.nanmax(arr)))
+    return 0.0, max(0.005, y_max) * 1.05
+
+
+def logistic(x):
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def binomial_ci_normal(m_obs, n_obs, z=1.96):
+    total = m_obs + n_obs
+    p_hat = np.divide(m_obs, total, out=np.zeros_like(total, dtype=float), where=total > 0)
+    se = np.sqrt(
+        np.divide(
+            p_hat * (1.0 - p_hat),
+            total,
+            out=np.zeros_like(total, dtype=float),
+            where=total > 0,
+        )
+    )
+    lower = np.clip(p_hat - z * se, 0.0, 1.0)
+    upper = np.clip(p_hat + z * se, 0.0, 1.0)
+    return lower, upper
+
+
+def empirical_curve_from_mn(M, N, mn_mode="incidence"):
+    total = M + N
+    with np.errstate(divide="ignore", invalid="ignore"):
+        base = np.where(total > 0, M / total, np.nan)
+
+    mode = str(mn_mode).lower()
+    if mode != "survival":
+        return base
+
+    # In survival framing, M/(M+N) is a per-level hazard.
+    # Convert to cumulative adoption probability for comparability to model mu(nu).
+    hazard = np.nan_to_num(base, nan=0.0, posinf=0.0, neginf=0.0)
+    hazard = np.clip(hazard, 0.0, 1.0)
+    return 1.0 - np.cumprod(1.0 - hazard)
+```
+
+## Run Availability
+
+```{python}
+#| label: run-table
+rows = []
+
+for spec in TWITTER_SPECS:
+    for K in [1, 2]:
+        for model_slug, model_label, _ in TWITTER_MODEL_SPECS:
+            p = run_path_for(spec["sweep"], spec["source"], spec["data_name"], K, model_slug)
+            rows.append(
+                {
+                    "Dataset": f"Twitter ({spec['label']})",
+                    "Sweep": spec["sweep"],
+                    "K": K,
+                    "Model": model_label,
+                    "exists": p.exists(),
+                    "run_path": str(p),
+                }
+            )
+
+for sweep in OO_SWEEP_SPECS:
+    for K in [1, 2]:
+        for model_slug, model_label, _ in OO_MODEL_SPECS:
+            p = run_path_for(sweep["sweep"], OO_SPEC["source"], OO_SPEC["data_name"], K, model_slug)
+            rows.append(
+                {
+                    "Dataset": f"OO ({sweep['label']})",
+                    "Sweep": sweep["sweep"],
+                    "K": K,
+                    "Model": model_label,
+                    "exists": p.exists(),
+                    "run_path": str(p),
+                }
+            )
+
+pd.DataFrame(rows)
+```
+
+## Twitter M/N Matrices
+
+```{python}
+#| label: twitter-mn-matrices
+#| fig-cap: "Twitter M and N matrices (raw counts and log-scaled counts) for SC and CC metrics."
+
+matrix_rows = []
+
+for spec in TWITTER_SPECS:
+    M_mat, N_mat, levels = load_twitter_mn_matrices(spec["q"], spec["metric"])
+    if M_mat is None or N_mat is None:
+        matrix_rows.append({"dataset": f"Twitter {spec['label']}", "figure": "missing M/N parquet files"})
+        continue
+
+    fig, axes = plt.subplots(2, 2, figsize=(13, 7.2), sharex=True, sharey=True)
+    panels = [
+        (M_mat, "M (raw counts)", "viridis"),
+        (N_mat, "N (raw counts)", "magma"),
+        (np.log1p(M_mat), "M (log1p counts)", "viridis"),
+        (np.log1p(N_mat), "N (log1p counts)", "magma"),
+    ]
+
+    for ax, (mat, title, cmap) in zip(axes.flat, panels):
+        im = ax.imshow(mat, aspect="auto", interpolation="nearest", cmap=cmap)
+        ax.set_title(title)
+        ax.set_xlabel("Exposure level")
+        ax.set_ylabel("User row index")
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.ax.tick_params(labelsize=8)
+
+    if levels:
+        if len(levels) <= 20:
+            tick_idx = np.arange(len(levels))
+        else:
+            tick_idx = np.linspace(0, len(levels) - 1, 10, dtype=int)
+        tick_labels = [levels[i] for i in tick_idx]
+        axes[1, 0].set_xticks(tick_idx)
+        axes[1, 0].set_xticklabels(tick_labels)
+        axes[1, 1].set_xticks(tick_idx)
+        axes[1, 1].set_xticklabels(tick_labels)
+
+    fig.suptitle(f"Twitter {spec['row_title']}", y=0.995)
+    fig.tight_layout()
+
+    out_path = FIG_DIR / f"twitter_mn_matrices_{spec['metric']}_03-08-26.png"
+    fig.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.show()
+    plt.close(fig)
+
+    matrix_rows.append({"dataset": f"Twitter {spec['label']}", "figure": str(out_path)})
+
+pd.DataFrame(matrix_rows)
+```
+
+## Twitter M/N Matrices (Survival, Adopters-Only)
+
+```{python}
+#| label: twitter-mn-matrices-survival-adopters
+#| fig-cap: "Twitter survival M and N matrices for adopters-only rows (SC and CC metrics)."
+
+adopter_matrix_rows = []
+
+for spec in TWITTER_SURVIVAL_SPECS:
+    M_mat, N_mat, levels = load_twitter_mn_matrices(
+        spec["q"],
+        spec["metric"],
+        base_dir=spec["base_dir"],
+        adopters_only=True,
+    )
+    if M_mat is None or N_mat is None:
+        adopter_matrix_rows.append({"dataset": f"Twitter {spec['label']}", "figure": "missing M/N or B_vector parquet files"})
+        continue
+
+    fig, axes = plt.subplots(2, 2, figsize=(13, 7.2), sharex=True, sharey=True)
+    panels = [
+        (M_mat, "M (raw counts)", "viridis"),
+        (N_mat, "N (raw counts)", "magma"),
+        (np.log1p(M_mat), "M (log1p counts)", "viridis"),
+        (np.log1p(N_mat), "N (log1p counts)", "magma"),
+    ]
+
+    for ax, (mat, title, cmap) in zip(axes.flat, panels):
+        im = ax.imshow(mat, aspect="auto", interpolation="nearest", cmap=cmap)
+        ax.set_title(title)
+        ax.set_xlabel("Exposure level")
+        ax.set_ylabel("Adopter row index")
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.ax.tick_params(labelsize=8)
+
+    if levels:
+        if len(levels) <= 20:
+            tick_idx = np.arange(len(levels))
+        else:
+            tick_idx = np.linspace(0, len(levels) - 1, 10, dtype=int)
+        tick_labels = [levels[i] for i in tick_idx]
+        axes[1, 0].set_xticks(tick_idx)
+        axes[1, 0].set_xticklabels(tick_labels)
+        axes[1, 1].set_xticks(tick_idx)
+        axes[1, 1].set_xticklabels(tick_labels)
+
+    fig.suptitle(f"{spec['row_title']} | adopters-only (n={M_mat.shape[0]})", y=0.995)
+    fig.tight_layout()
+
+    out_path = FIG_DIR / f"twitter_survival_adopters_mn_matrices_{spec['metric']}_03-08-26.png"
+    fig.savefig(out_path, dpi=220, bbox_inches="tight")
+    plt.show()
+    plt.close(fig)
+
+    adopter_matrix_rows.append({"dataset": f"Twitter {spec['label']} adopters-only", "figure": str(out_path), "n_rows": int(M_mat.shape[0])})
+
+pd.DataFrame(adopter_matrix_rows)
+```
+
+## Twitter Full-Only (Survival) vs Original Full
+
+```{python}
+#| label: twitter-fullonly-vs-original
+#| fig-cap: "Twitter empirical adoption curves and support counts: original full pipeline vs new full-only survival preprocessing."
+
+fig, axes = plt.subplots(2, 2, figsize=(14, 8), sharex=False)
+
+for row_idx, spec in enumerate(TWITTER_SPECS):
+    M_orig, N_orig = load_twitter_data(
+        spec["q"], spec["metric"], run_kmax=50, base_dir=PIPELINE_TWITTER_FULL
+    )
+    M_surv, N_surv = load_twitter_data(
+        spec["q"], spec["metric"], run_kmax=50, base_dir=PIPELINE_TWITTER_FULL_SURVIVAL
+    )
+
+    T_orig = M_orig + N_orig
+    T_surv = M_surv + N_surv
+    with np.errstate(divide="ignore", invalid="ignore"):
+        p_orig = np.where(T_orig > 0, M_orig / T_orig, np.nan)
+        p_surv = np.where(T_surv > 0, M_surv / T_surv, np.nan)
+
+    max_level = int(
+        max(
+            np.where(T_orig > 0)[0].max() + 1 if np.any(T_orig > 0) else 1,
+            np.where(T_surv > 0)[0].max() + 1 if np.any(T_surv > 0) else 1,
+        )
+    )
+    x = np.arange(1, max_level + 1)
+
+    ax_left = axes[row_idx, 0]
+    ax_left.plot(x, p_orig[:max_level], "-o", color="#4C78A8", ms=3, lw=1.8, label="Original full")
+    ax_left.plot(x, p_surv[:max_level], "-o", color="#E45756", ms=3, lw=1.8, label="Full-only survival")
+    ax_left.set_title(f"{spec['row_title']} | Empirical P(adopt|nu)")
+    ax_left.set_xlabel("Exposure level")
+    ax_left.set_ylabel("Adoption probability")
+    ax_left.grid(alpha=0.2)
+    ax_left.set_ylim(0, max(float(np.nanmax(p_orig[:max_level])), float(np.nanmax(p_surv[:max_level])), 0.005) * 1.2)
+
+    ax_right = axes[row_idx, 1]
+    ax_right.plot(x, T_orig[:max_level], "-o", color="#4C78A8", ms=3, lw=1.8, label="Original full")
+    ax_right.plot(x, T_surv[:max_level], "-o", color="#E45756", ms=3, lw=1.8, label="Full-only survival")
+    ax_right.set_title(f"{spec['row_title']} | Bin support (M+N)")
+    ax_right.set_xlabel("Exposure level")
+    ax_right.set_ylabel("Count")
+    ax_right.set_yscale("log")
+    ax_right.grid(alpha=0.2, which="both")
+
+handles, labels = axes[0, 0].get_legend_handles_labels()
+fig.legend(handles, labels, loc="upper center", ncol=2, framealpha=0.95, bbox_to_anchor=(0.5, 1.02))
+fig.tight_layout(rect=[0, 0, 1, 0.97])
+
+twitter_fullonly_cmp_fig = FIG_DIR / "twitter_fullonly_survival_vs_original_03-08-26.png"
+fig.savefig(twitter_fullonly_cmp_fig, dpi=220, bbox_inches="tight")
+twitter_fullonly_cmp_fig
+```
+
+## OO M/N Matrices
+
+```{python}
+#| label: oo-mn-matrices
+#| fig-cap: "OO Sim 165 M and N matrices (raw counts and log-scaled counts, excluding k=0 bin)."
+
+M_mat, N_mat, levels = load_oo_mn_matrices(OO_SPEC["data_name"], drop_zero_bin=True)
+
+if M_mat is None or N_mat is None:
+    print("Could not locate OO M/N matrices.")
+else:
+    fig, axes = plt.subplots(2, 2, figsize=(13, 7.2), sharex=True, sharey=True)
+    panels = [
+        (M_mat, "M (raw counts)", "viridis"),
+        (N_mat, "N (raw counts)", "magma"),
+        (np.log1p(M_mat), "M (log1p counts)", "viridis"),
+        (np.log1p(N_mat), "N (log1p counts)", "magma"),
+    ]
+
+    for ax, (mat, title, cmap) in zip(axes.flat, panels):
+        im = ax.imshow(mat, aspect="auto", interpolation="nearest", cmap=cmap)
+        ax.set_title(title)
+        ax.set_xlabel("Exposure level")
+        ax.set_ylabel("Row index")
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.ax.tick_params(labelsize=8)
+
+    if levels:
+        if len(levels) <= 20:
+            tick_idx = np.arange(len(levels))
+        else:
+            tick_idx = np.linspace(0, len(levels) - 1, 10, dtype=int)
+        tick_labels = [levels[i] for i in tick_idx]
+        axes[1, 0].set_xticks(tick_idx)
+        axes[1, 0].set_xticklabels(tick_labels)
+        axes[1, 1].set_xticks(tick_idx)
+        axes[1, 1].set_xticklabels(tick_labels)
+
+    fig.tight_layout()
+    oo_mn_fig = FIG_DIR / "oo_mn_matrices_03-08-26.png"
+    fig.savefig(oo_mn_fig, dpi=220, bbox_inches="tight")
+    plt.show()
+    plt.close(fig)
+    oo_mn_fig
+```
+
+## Twitter Fits
+
+Curves use posterior-mean kernels (`mean` fallback chain in helper).  
+Retry sweep is `K=1` only to avoid mixture-identifiability collapse seen previously.
+
+```{python}
+#| label: twitter-fit-comparison
+#| fig-cap: "Twitter model fit comparison vs empirical adoption rates (SC and CC metrics)."
+
+fig, axes = plt.subplots(2, 2, figsize=(14, 9), sharey=False)
+
+for row_idx, spec in enumerate(TWITTER_SPECS):
+    for col_idx, K in enumerate([1, 2]):
+        ax = axes[row_idx, col_idx]
+
+        model_curves = {}
+        kmax = 0
+
+        for model_slug, model_label, color in TWITTER_MODEL_SPECS:
+            run_path = run_path_for(spec["sweep"], spec["source"], spec["data_name"], K, model_slug)
+            kernel_df = load_kernel_summary(run_path)
+            if kernel_df is None or kernel_df.empty:
+                continue
+            pi_df = load_pi_summary(run_path)
+            curve = aggregate_model_curve(kernel_df, pi_df, estimator_col=ESTIMATOR)
+            if curve is None or curve.empty:
+                continue
+            model_curves[model_label] = {
+                "curve": curve,
+                "color": color,
+                "kernel_df": kernel_df,
+                "pi_df": pi_df,
+            }
+            kmax = max(kmax, int(curve["level"].max()))
+
+        if kmax == 0:
+            ax.text(0.5, 0.5, "No fitted runs found", transform=ax.transAxes, ha="center", va="center")
+            ax.set_axis_off()
+            continue
+
+        M, N = load_twitter_data(spec["q"], spec["metric"], run_kmax=kmax)
+        total = M + N
+        with np.errstate(divide="ignore", invalid="ignore"):
+            obs_p = np.where(total > 0, M / total, np.nan)
+
+        x = np.arange(1, kmax + 1)
+        ax.bar(x, np.nan_to_num(obs_p, nan=0.0), width=0.84, color="0.86", alpha=0.9, label="Empirical", zorder=1)
+
+        mask = total > 0
+        if SHOW_EMPIRICAL_BANDS and np.any(mask):
+            m_obs = M[mask]
+            n_obs = N[mask]
+            lower, upper = binomial_ci_normal(m_obs, n_obs)
+            y = obs_p[mask]
+            yerr = np.vstack([y - lower, upper - y])
+            ax.errorbar(x[mask], y, yerr=yerr, fmt="none", ecolor="0.45", elinewidth=0.8, capsize=2, zorder=2)
+
+        for model_label, payload in model_curves.items():
+            curve = payload["curve"]
+            color = payload["color"]
+
+            # Show component-specific kernels for K>1 (dashed),
+            # while keeping solid line as the mixture-averaged fit.
+            if K > 1:
+                kdf = payload["kernel_df"]
+                comps = sorted(kdf["component"].unique())
+                if len(comps) > 1:
+                    comp_col = select_estimator_col(kdf, ESTIMATOR)
+                    for comp in comps:
+                        sub = kdf[kdf["component"] == comp].sort_values("level")
+                        ax.plot(
+                            sub["level"],
+                            sub[comp_col],
+                            "--",
+                            color=color,
+                            lw=1.0,
+                            alpha=0.28,
+                            zorder=3,
+                            label=None,
+                        )
+
+            ax.plot(curve["level"], curve["fit"], "-o", color=color, lw=2.0, ms=3.2, label=model_label, zorder=5)
+            if SHOW_MODEL_BANDS:
+                ax.fill_between(curve["level"], curve["lower"], curve["upper"], color=color, alpha=0.10, zorder=4)
+
+        y0, y1 = truncated_panel_ylim(obs_p, model_curves)
+        ax.set_ylim(y0, y1)
+        ax.set_title(f"{spec['row_title']} | K={K}")
+        ax.set_xlabel("Exposure level")
+        ax.set_ylabel("P(adopt | exposure)")
+        ax.grid(alpha=0.2, zorder=0)
+
+handles, labels = axes[0, 0].get_legend_handles_labels()
+fig.legend(handles, labels, loc="upper center", ncol=4, framealpha=0.95, bbox_to_anchor=(0.5, 1.02))
+fig.tight_layout(rect=[0, 0, 1, 0.97])
+
+twitter_fig = FIG_DIR / "twitter_fit_comparison_03-08-26.png"
+fig.savefig(twitter_fig, dpi=220, bbox_inches="tight")
+twitter_fig
+```
+
+## Twitter Fits (Survival Sweeps)
+
+Curves use MAP kernels (`map_joint` fallback to `map_marginal/median/mean`).  
+For `K=2`, dashed lines show individual mixture components; solid lines show the mixture-averaged fit.
+
+```{python}
+#| label: twitter-fit-comparison-survival
+#| fig-cap: "Twitter survival-sweep model fit comparison vs empirical adoption rates (SC and CC metrics)."
+
+fig, axes = plt.subplots(2, 1, figsize=(10, 9), sharey=False)
+
+for row_idx, spec in enumerate(TWITTER_SURVIVAL_SPECS):
+    K = 1
+    ax = axes[row_idx]
+
+    model_curves = {}
+    kmax = 0
+
+    for model_slug, model_label, color in TWITTER_MODEL_SPECS:
+        run_path = run_path_for(spec["sweep"], spec["source"], spec["data_name"], K, model_slug)
+        kernel_df = load_kernel_summary(run_path)
+        if kernel_df is None or kernel_df.empty:
+            continue
+        pi_df = load_pi_summary(run_path)
+        curve = aggregate_model_curve(kernel_df, pi_df, estimator_col=ESTIMATOR)
+        if curve is None or curve.empty:
+            continue
+        model_curves[model_label] = {
+            "curve": curve,
+            "color": color,
+            "kernel_df": kernel_df,
+            "pi_df": pi_df,
+        }
+        kmax = max(kmax, int(curve["level"].max()))
+
+    if kmax == 0:
+        ax.text(0.5, 0.5, "No fitted runs found", transform=ax.transAxes, ha="center", va="center")
+        ax.set_axis_off()
+        continue
+
+    M, N = load_twitter_data(
+        spec["q"], spec["metric"], run_kmax=kmax, base_dir=spec["base_dir"]
+    )
+    total = M + N
+    obs_p = empirical_curve_from_mn(M, N, mn_mode="survival")
+
+    x = np.arange(1, kmax + 1)
+    ax.bar(x, np.nan_to_num(obs_p, nan=0.0), width=0.84, color="0.86", alpha=0.9, label="Empirical", zorder=1)
+
+    # Survival empirical bars are cumulative transforms of hazards; skip binomial bars here.
+
+    for model_label, payload in model_curves.items():
+        curve = payload["curve"]
+        color = payload["color"]
+        ax.plot(curve["level"], curve["fit"], "-o", color=color, lw=2.0, ms=3.2, label=model_label, zorder=5)
+        if SHOW_MODEL_BANDS:
+            ax.fill_between(curve["level"], curve["lower"], curve["upper"], color=color, alpha=0.10, zorder=4)
+
+    y0, y1 = truncated_panel_ylim(obs_p, model_curves)
+    ax.set_ylim(y0, y1)
+    ax.set_title(f"{spec['row_title']} | K={K}")
+    ax.set_xlabel("Exposure level")
+    ax.set_ylabel("Cumulative P(adopt by exposure)")
+    ax.grid(alpha=0.2, zorder=0)
+
+handles, labels = axes[0].get_legend_handles_labels()
+fig.legend(handles, labels, loc="upper center", ncol=4, framealpha=0.95, bbox_to_anchor=(0.5, 1.02))
+fig.tight_layout(rect=[0, 0, 1, 0.97])
+
+twitter_survival_fig = FIG_DIR / "twitter_fit_comparison_survival_03-08-26.png"
+fig.savefig(twitter_survival_fig, dpi=220, bbox_inches="tight")
+twitter_survival_fig
+```
+
+## Twitter Fits (Survival Adopters-Only Sweeps)
+
+Curves use MAP kernels (`map_joint` fallback to `map_marginal/median/mean`).  
+Empirical bars are computed from adopters-only rows in the survival full-only matrices.
+
+```{python}
+#| label: twitter-fit-comparison-survival-adopters
+#| fig-cap: "Twitter survival adopters-only model fit comparison vs adopters-only empirical adoption rates (SC and CC metrics)."
+
+fig, axes = plt.subplots(2, 1, figsize=(10, 9), sharey=False)
+
+for row_idx, spec in enumerate(TWITTER_SURVIVAL_ADOPTERS_SPECS):
+    K = 1
+    ax = axes[row_idx]
+
+    model_curves = {}
+    kmax = 0
+
+    for model_slug, model_label, color in TWITTER_MODEL_SPECS:
+        run_path = run_path_for(spec["sweep"], spec["source"], spec["data_name"], K, model_slug)
+        kernel_df = load_kernel_summary(run_path)
+        if kernel_df is None or kernel_df.empty:
+            continue
+        pi_df = load_pi_summary(run_path)
+        curve = aggregate_model_curve(kernel_df, pi_df, estimator_col=ESTIMATOR)
+        if curve is None or curve.empty:
+            continue
+        model_curves[model_label] = {
+            "curve": curve,
+            "color": color,
+            "kernel_df": kernel_df,
+            "pi_df": pi_df,
+        }
+        kmax = max(kmax, int(curve["level"].max()))
+
+    if kmax == 0:
+        ax.text(0.5, 0.5, "No fitted runs found", transform=ax.transAxes, ha="center", va="center")
+        ax.set_axis_off()
+        continue
+
+    M, N = load_twitter_data(
+        spec["q"],
+        spec["metric"],
+        run_kmax=kmax,
+        base_dir=spec["base_dir"],
+        adopters_only=True,
+    )
+    total = M + N
+    obs_p = empirical_curve_from_mn(M, N, mn_mode="survival")
+
+    x = np.arange(1, kmax + 1)
+    ax.bar(x, np.nan_to_num(obs_p, nan=0.0), width=0.84, color="0.86", alpha=0.9, label="Empirical", zorder=1)
+
+    # Survival empirical bars are cumulative transforms of hazards; skip binomial bars here.
+
+    for model_label, payload in model_curves.items():
+        curve = payload["curve"]
+        color = payload["color"]
+        ax.plot(curve["level"], curve["fit"], "-o", color=color, lw=2.0, ms=3.2, label=model_label, zorder=5)
+        if SHOW_MODEL_BANDS:
+            ax.fill_between(curve["level"], curve["lower"], curve["upper"], color=color, alpha=0.10, zorder=4)
+
+    y0, y1 = truncated_panel_ylim(obs_p, model_curves)
+    ax.set_ylim(y0, y1)
+    ax.set_title(f"{spec['row_title']} | K={K}")
+    ax.set_xlabel("Exposure level")
+    ax.set_ylabel("Cumulative P(adopt by exposure)")
+    ax.grid(alpha=0.2, zorder=0)
+
+handles, labels = axes[0].get_legend_handles_labels()
+fig.legend(handles, labels, loc="upper center", ncol=4, framealpha=0.95, bbox_to_anchor=(0.5, 1.02))
+fig.tight_layout(rect=[0, 0, 1, 0.97])
+
+twitter_survival_adopters_fig = FIG_DIR / "twitter_fit_comparison_survival_adopters_only_03-08-26.png"
+fig.savefig(twitter_survival_adopters_fig, dpi=220, bbox_inches="tight")
+twitter_survival_adopters_fig
+```
+
+## OO Fits (EB vs WEAK)
+
+Curves use MAP kernels (`map_joint` fallback to `map_marginal/median/mean`).  
+For `K=2`, dashed lines show individual mixture components; solid lines show the mixture-averaged fit.
+
+```{python}
+#| label: oo-fit-by-prior
+#| fig-cap: "OO Sim 165 fit curves by prior regime and K."
+
+fig, axes = plt.subplots(2, 2, figsize=(15, 9), sharey=False)
+
+for row_idx, sweep in enumerate(OO_SWEEP_SPECS):
+    for col_idx, K in enumerate([1, 2]):
+        ax = axes[row_idx, col_idx]
+        model_curves = {}
+        kmax = 0
+
+        for model_slug, model_label, color in OO_MODEL_SPECS:
+            run_path = run_path_for(sweep["sweep"], OO_SPEC["source"], OO_SPEC["data_name"], K, model_slug)
+            kernel_df = load_kernel_summary(run_path)
+            if kernel_df is None or kernel_df.empty:
+                continue
+            pi_df = load_pi_summary(run_path)
+            curve = aggregate_model_curve(kernel_df, pi_df, estimator_col=ESTIMATOR)
+            if curve is None or curve.empty:
+                continue
+            model_curves[model_label] = {
+                "curve": curve,
+                "color": color,
+                "kernel_df": kernel_df,
+                "pi_df": pi_df,
+            }
+            kmax = max(kmax, int(curve["level"].max()))
+
+        if kmax == 0:
+            ax.text(0.5, 0.5, "No fitted runs found", transform=ax.transAxes, ha="center", va="center")
+            ax.set_axis_off()
+            continue
+
+        M, N = load_oo_data(OO_SPEC["data_name"], run_kmax=kmax)
+        total = M + N
+        with np.errstate(divide="ignore", invalid="ignore"):
+            obs_p = np.where(total > 0, M / total, np.nan)
+
+        x = np.arange(1, kmax + 1)
+        ax.bar(x, np.nan_to_num(obs_p, nan=0.0), width=0.84, color="0.86", alpha=0.9, label="Empirical", zorder=1)
+
+        mask = total > 0
+        if SHOW_EMPIRICAL_BANDS and np.any(mask):
+            m_obs = M[mask]
+            n_obs = N[mask]
+            lower, upper = binomial_ci_normal(m_obs, n_obs)
+            y = obs_p[mask]
+            yerr = np.vstack([y - lower, upper - y])
+            ax.errorbar(x[mask], y, yerr=yerr, fmt="none", ecolor="0.45", elinewidth=0.8, capsize=2, zorder=2)
+
+        for model_label, payload in model_curves.items():
+            curve = payload["curve"]
+            color = payload["color"]
+
+            if K > 1:
+                kdf = payload["kernel_df"]
+                comps = sorted(kdf["component"].unique())
+                if len(comps) > 1:
+                    comp_col = select_estimator_col(kdf, ESTIMATOR)
+                    for comp in comps:
+                        sub = kdf[kdf["component"] == comp].sort_values("level")
+                        ax.plot(
+                            sub["level"],
+                            sub[comp_col],
+                            "--",
+                            color=color,
+                            lw=1.0,
+                            alpha=0.28,
+                            zorder=3,
+                            label=None,
+                        )
+
+            ax.plot(curve["level"], curve["fit"], "-o", color=color, lw=2.0, ms=3.2, label=model_label, zorder=5)
+            if SHOW_MODEL_BANDS:
+                ax.fill_between(curve["level"], curve["lower"], curve["upper"], color=color, alpha=0.10, zorder=4)
+
+        y0, y1 = truncated_panel_ylim(obs_p, model_curves)
+        ax.set_ylim(y0, y1)
+        ax.set_title(f"{sweep['label']} | K={K}")
+        ax.set_xlabel("Exposure level")
+        ax.set_ylabel("P(adopt | exposure)")
+        ax.grid(alpha=0.2, zorder=0)
+
+handles, labels = axes[0, 0].get_legend_handles_labels()
+fig.legend(handles, labels, loc="upper center", ncol=4, framealpha=0.95, bbox_to_anchor=(0.5, 1.02))
+fig.tight_layout(rect=[0, 0, 1, 0.97])
+
+oo_fig = FIG_DIR / "oo_fit_eb_vs_weak_03-08-26.png"
+fig.savefig(oo_fig, dpi=220, bbox_inches="tight")
+oo_fig
+```
+
+## OO Fit-Gap Metrics
+
+```{python}
+#| label: oo-fit-gap-metrics
+#| fig-cap: "OO scored sweep diagnostics across weighted MAE, tail MAE (k>=10), and peak underfit."
+
+SCORED_SWEEPS = [
+    {"sweep": "research_sweep_oo_prior_np_v3_dropzero", "label": "v3 dropzero"},
+    {"sweep": "research_sweep_oo_prior_np_v4_peakpush", "label": "v4 peakpush"},
+    {"sweep": "research_sweep_oo_prior_np_v5_k3_refine", "label": "v5 k3 refine"},
+]
+
+SWEEP_COLORS = {
+    "v3 dropzero": "#1f77b4",
+    "v4 peakpush": "#ff7f0e",
+    "v5 k3 refine": "#2ca02c",
+}
+
+score_frames = []
+for spec in SCORED_SWEEPS:
+    p = RESULTS_BASE / spec["sweep"] / "oo_fit_gap_summary.csv"
+    if not p.exists():
+        continue
+    df_s = pd.read_csv(p)
+    if df_s.empty:
+        continue
+    df_s["sweep"] = spec["sweep"]
+    df_s["sweep_label"] = spec["label"]
+    score_frames.append(df_s)
+
+if not score_frames:
+    print("No scored OO sweep summaries found.")
+else:
+    scores = pd.concat(score_frames, ignore_index=True)
+    scores["K"] = pd.to_numeric(scores["K"], errors="coerce")
+    metric_cols = ["weighted_mae", "tail_mae_k10plus", "peak_underfit"]
+    scores_plot = scores.dropna(subset=metric_cols).copy()
+
+    top12 = scores_plot.nsmallest(12, "weighted_mae").copy()
+    top12["rank"] = np.arange(1, len(top12) + 1)
+    top12[["rank", "sweep_label", "K", "weighted_mae", "tail_mae_k10plus", "peak_underfit", "instance_id"]]
+```
+
+```{python}
+#| label: oo-fit-gap-scatter
+#| fig-cap: "Pairwise trade-offs between weighted MAE, tail MAE, and peak underfit (lower is better)."
+
+if "scores_plot" not in globals() or scores_plot.empty:
+    print("No scored metrics available for plotting.")
+else:
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
+
+    pairs = [
+        ("weighted_mae", "tail_mae_k10plus"),
+        ("weighted_mae", "peak_underfit"),
+        ("tail_mae_k10plus", "peak_underfit"),
+    ]
+
+    for ax, (x_col, y_col) in zip(axes, pairs):
+        for sweep_label in sorted(scores_plot["sweep_label"].unique()):
+            sub = scores_plot[scores_plot["sweep_label"] == sweep_label]
+            ax.scatter(
+                sub[x_col],
+                sub[y_col],
+                s=38,
+                alpha=0.78,
+                color=SWEEP_COLORS.get(sweep_label, "0.5"),
+                label=sweep_label,
+            )
+        ax.set_xlabel(x_col)
+        ax.set_ylabel(y_col)
+        ax.grid(alpha=0.22)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    uniq = dict(zip(labels, handles))
+    fig.legend(uniq.values(), uniq.keys(), loc="upper center", ncol=3, framealpha=0.95)
+    fig.tight_layout(rect=[0, 0, 1, 0.92])
+
+    scatter_fig = FIG_DIR / "oo_fit_gap_metrics_scatter_03-08-26.png"
+    fig.savefig(scatter_fig, dpi=220, bbox_inches="tight")
+    scatter_fig
+```
+
+```{python}
+#| label: oo-fit-gap-top12-bars
+#| fig-cap: "Top-12 candidates by weighted MAE, with corresponding tail MAE and peak underfit."
+
+if "top12" not in globals() or top12.empty:
+    print("No ranked candidates available.")
+else:
+    top12 = top12.reset_index(drop=True)
+    x = np.arange(len(top12))
+    colors = [SWEEP_COLORS.get(s, "0.5") for s in top12["sweep_label"]]
+    labels = [f"{r.sweep_label} | K={int(r.K)}" for r in top12.itertuples()]
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
+    metrics = [
+        ("weighted_mae", "Weighted MAE"),
+        ("tail_mae_k10plus", "Tail MAE (k>=10)"),
+        ("peak_underfit", "Peak underfit"),
+    ]
+
+    for ax, (metric, title) in zip(axes, metrics):
+        ax.bar(x, top12[metric], color=colors, alpha=0.9)
+        ax.set_ylabel(title)
+        ax.grid(alpha=0.22, axis="y")
+
+    axes[-1].set_xticks(x)
+    axes[-1].set_xticklabels(labels, rotation=32, ha="right", fontsize=8)
+    axes[0].set_title("Top-12 by weighted MAE (lower is better across all panels)")
+
+    fig.tight_layout()
+    top12_fig = FIG_DIR / "oo_fit_gap_metrics_top12_03-08-26.png"
+    fig.savefig(top12_fig, dpi=220, bbox_inches="tight")
+top12_fig
+```
+
+## OG vs Refit Plot Sets
+
+```{python}
+#| label: compare-og-vs-refit
+#| fig-cap: "Saved figure-set comparison. Left column = OG snapshot, right column = weighted-refit rerun."
+#| warning: false
+
+from matplotlib.image import imread
+from IPython.display import display
+
+compare_specs = [
+    ("twitter_fit_comparison_03-08-26.png", "Twitter fits"),
+    ("oo_fit_eb_vs_weak_03-08-26.png", "OO fits"),
+    ("twitter_mn_matrices_k_03-08-26.png", "Twitter M/N (k)"),
+    ("twitter_mn_matrices_kappa_03-08-26.png", "Twitter M/N (kappa)"),
+    ("oo_mn_matrices_03-08-26.png", "OO M/N"),
+]
+
+for fname, title in compare_specs:
+    fig, axes = plt.subplots(2, 1, figsize=(8.8, 6.6), constrained_layout=True)
+    fig.suptitle(title, fontsize=12, y=1.02)
+    og_path = FIG_DIR_OG / fname
+    new_path = FIG_DIR / fname
+
+    for ax, p, col_title in (
+        [
+            (axes[0], og_path, "OG"),
+            (axes[1], new_path, "Weighted Refit"),
+        ]
+    ):
+        if p.exists():
+            ax.imshow(imread(p), aspect="auto")
+            ax.set_aspect("auto")
+            ax.set_title(col_title, fontsize=11)
+            ax.axis("off")
+        else:
+            ax.text(0.5, 0.5, f"Missing:\n{p.name}", ha="center", va="center", transform=ax.transAxes)
+            ax.set_title(col_title, fontsize=11)
+            ax.axis("off")
+    display(fig)
+    plt.close(fig)
+```

@@ -119,26 +119,103 @@ If you have the raw data files in `data/`, you can regenerate all processed matr
   just data-total
   ```
 
-### Running Model Inference
+### Running the Snakemake Workflow
 
-Model fitting is handled by `scripts/run_sweep.py`, which manages parameter sweeps over multiple datasets and models:
+The project workflow is driven by the root [Snakefile](Snakefile). In practice you will usually use one of two entrypoints:
+
+- `just sweep <config>`: the standard local wrapper for inference runs
+- `uv run snakemake <target> --configfile <config> --profile <profile>`: the raw Snakemake command when you want full control
+
+The `justfile` recipes are intentionally thin wrappers around the underlying Snakemake commands:
 
 ```bash
-# Run the Twitter inference sweep
+# Process the default raw-data targets declared in rule all
+just data
+
+# Equivalent raw Snakemake command
+uv run snakemake -c1
+
+# Run the inference target for a config with the local profile
 just sweep configs/research_sweep_twitter.yaml
 
-# Run the Operation Outbreak inference sweep
+# Equivalent raw Snakemake command
+uv run snakemake inference --configfile configs/research_sweep_twitter.yaml --profile workflow/profiles/local
+```
+
+The main Snakemake targets are:
+
+- `all`: prepares the default processed-data targets from raw data
+- `inference`: runs the configured preprocessing and inference outputs for a config file
+- `ppc`: runs posterior predictive checks when `analysis.ppc.enabled: true`
+
+The bundled profiles are:
+
+- `workflow/profiles/local`: local execution on the current machine
+- `workflow/profiles/slurm`: cluster execution through SLURM
+
+Use the local profile for development and smoke tests. Use the SLURM profile when you want Snakemake to submit rules as cluster jobs.
+
+### How the Config Files Work
+
+Workflow configs are YAML files under `configs/`. The important top-level fields are:
+
+- `name`: result namespace. Outputs are written under `results/<name>/...`
+- `source`: one of `twitter`, `oo`, or `synthetic`
+- `synthetic`, `twitter`, or `oo`: source-specific data-generation or data-selection settings
+- `model`: default model and sampling settings passed into inference
+- `sweep`: cartesian product of inference settings. Each row becomes one inference output directory
+- `sim_sweep`: synthetic-only cartesian product over dotted keys under `synthetic`. Each row becomes one generated synthetic dataset before inference
+- `analysis.ppc`: optional posterior predictive check settings
+
+For synthetic workflows, the separation is:
+
+- `synthetic`: how to generate one dataset
+- `sim_sweep`: optional expansion into many synthetic datasets
+- `sweep`: which model settings to fit to each generated dataset
+
+### Synthetic Example
+
+The file [configs/example_synthetic_workflow.yaml](configs/example_synthetic_workflow.yaml) is a minimal synthetic smoke-test config. It does three things:
+
+1. generates one small SBM-based synthetic dataset
+2. builds the synthetic summary directory that inference expects
+3. fits one simple-contagion Stan model to that dataset
+
+Inspect the DAG first:
+
+```bash
+uv run snakemake -n inference \
+  --configfile configs/example_synthetic_workflow.yaml \
+  --profile workflow/profiles/local
+```
+
+Run it locally through the `just` wrapper:
+
+```bash
+just sweep configs/example_synthetic_workflow.yaml
+```
+
+Run the equivalent raw Snakemake command directly:
+
+```bash
+uv run snakemake inference \
+  --configfile configs/example_synthetic_workflow.yaml \
+  --profile workflow/profiles/local
+```
+
+That example writes:
+
+- processed synthetic data to `data/processed/synthetic/readme_synthetic_smoke/`
+- the inference-ready summary to `data/summaries/synthetic/readme_synthetic_smoke.parquet/`
+- posterior outputs to `results/example_synthetic_workflow/synthetic/readme_synthetic_smoke/base/`
+
+Larger research runs use the same command shape with a different config, for example:
+
+```bash
+just sweep configs/research_sweep_twitter.yaml
 just sweep configs/research_sweep_oo.yaml
-
-# Run a synthetic-data inference sweep (simulated M/N persisted in data/processed/synthetic)
 just sweep configs/research_sweep_synthetic.yaml
-
-# Run a synthetic simulation-grid sweep + inference-grid sweep
-# (each sim_sweep setting creates a deterministic data/processed/synthetic/<data_name>/ dataset)
 just sweep configs/research_sim_sweep_synthetic.yaml
-
-# Run PPC targets (enable analysis.ppc.enabled in config first)
-uv run snakemake ppc --configfile configs/research_sim_sweep_synthetic.yaml --profile workflow/profiles/local
 ```
 
 Results (posterior samples and summaries) are saved to the `results/` directory.
