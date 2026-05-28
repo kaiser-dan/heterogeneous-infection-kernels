@@ -62,7 +62,7 @@ INSTANCE_PARAMS="{\"K\": ${K}, \"stan_file\": \"${MODEL}\"}"
 echo "Run: ${RUN_ID}"
 echo "Instance params: ${INSTANCE_PARAMS}"
 
-uv run python src/models/inference.py \
+uv run python -m src.models.inference \
     --config "${CONFIG}" \
     --exposure-summary "${DATA_DIR}" \
     --output-dir "${OUTPUT_DIR}" \

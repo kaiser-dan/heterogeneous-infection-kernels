@@ -45,7 +45,7 @@ run_inference() {
     echo "Output: ${out_dir}"
 
     mkdir -p "${out_dir}"
-    uv run python src/models/inference.py \
+    uv run python -m src.models.inference \
         --config "${CONFIG}" \
         --exposure-summary "${SUMMARY}" \
         --output-dir "${out_dir}" \
