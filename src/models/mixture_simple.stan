@@ -2,7 +2,7 @@
  * Mixture Simple Contagion Model
  *
  * Kernel: geometric (independent cascade)
- *   P(adopt | nu exposures) = 1 - (1 - rho)^nu
+ *   P(adopt | nu exposures) = 1 - (1 - beta)^nu
  *
  * Shared mixture scaffolding: K components, per-user heterogeneity via
  * non-centered logit-scale deviations, all priors passed as DATA.
@@ -25,10 +25,10 @@ data {
     array[V, kmax] real<lower=0> N;
 
     // HYPERPARAMETER - logit-Normal prior on per-contact infection prob
-    real LOGIT_RHO_LOCATION;
+    real LOGIT_BETA_LOCATION;
 
     // HYPERPARAMETER - logit-Normal prior on per-contact infection prob
-    real<lower=0> LOGIT_RHO_SCALE;
+    real<lower=0> LOGIT_BETA_SCALE;
 
     // HYPERPARAMETER - HalfNormal(0, SIGMA_SCALE) prior on sigma
     real<lower=0> SIGMA_SCALE;
@@ -39,7 +39,7 @@ data {
 
 parameters {
     // per-contact infection probability (logit scale)
-    ordered[K] logit_rho;
+    ordered[K] logit_beta;
     
     // per-user deviation scale (logit scale)
     real<lower=1e-6> sigma;
@@ -52,19 +52,19 @@ parameters {
 }
 
 transformed parameters {
-    vector<lower=0, upper=1>[K] rho = inv_logit(logit_rho);
+    vector<lower=0, upper=1>[K] beta = inv_logit(logit_beta);
 
-    // Kernel modes on logit scale: geometric kernel
+    // geometric kernel modes on logit scale
     array[K] vector[kmax] logit_mu;
     for (k in 1:K) {
         for (nu in 1:kmax) {
-            real p_nu = 1.0 - pow(1.0 - rho[k], nu);
-            logit_mu[k][nu] = logit(fmin(fmax(p_nu, 1e-12), 1 - 1e-12));
+            real p_nu = 1.0 - pow(1.0 - beta[k], nu);
+            logit_mu[k][nu] = logit( fmin(fmax(p_nu, 1e-12), 1 - 1e-12) );
         }
     }
 
-    // Per-user kernels on logit scale
-    array[V] matrix[kmax, K] alpha;
+    // per-user kernels on logit scale
+    array[V] matrix[kmax, K] alpha; // transposed for computation
     for (i in 1:V) {
         for (k in 1:K) {
             alpha[i][,k] = logit_mu[k] + sigma * z_alpha[i, k];
@@ -73,8 +73,8 @@ transformed parameters {
 }
 
 model {
-    // Priors
-    logit_rho ~ normal(LOGIT_RHO_LOCATION, LOGIT_RHO_SCALE);
+    // priors
+    logit_beta ~ normal(LOGIT_BETA_LOCATION, LOGIT_BETA_SCALE);
 
     sigma ~ normal(0, SIGMA_SCALE)T[0,];
 
@@ -92,6 +92,7 @@ model {
         vector[K] lps;
         for (k in 1:K) {
             lps[k] = log(pi[k]);
+            // Bernoulli logit likelihood weighted by expected counts M and N
             for (nu in 1:kmax) {
                 if (M[i, nu] > 0 || N[i, nu] > 0) {
                     lps[k] += M[i, nu] * log_inv_logit(alpha[i][nu, k])
@@ -104,23 +105,23 @@ model {
 }
 
 generated quantities {
-    // Kernel modes on probability scale
+    // kernel modes on probability scale
     array[K] vector[kmax] mu;
     for (k in 1:K) {
-        mu[k] = inv_logit(logit_mu[k]);
+        mu[k] = inv_logit( logit_mu[k] );
     }
 
-    // Per-user inferred kernels on probability scale
+    // per-user inferred kernels on probability scale
     array[V] matrix[K, kmax] c;
     for (i in 1:V) {
-        c[i] = inv_logit(alpha[i]');
+        c[i] = inv_logit( alpha[i]' );
     }
 
-    // Posterior mixture assignment
+    // posterior mixture assignment
     array[V, K] real<lower=0, upper=1> post_prob;
     array[V] int<lower=1, upper=K> z;
 
-    // Log-likelihood for WAIC/LOO
+    // per-node marginal log-likelihood (for WAIC/LOO/model comparison)
     vector[V] log_lik;
 
     for (i in 1:V) {
