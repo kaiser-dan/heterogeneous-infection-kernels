@@ -4,7 +4,7 @@
  * KEY CHANGE: logit_p prior now centered at empirical scale from data
  * instead of at logit(0.5) = 0
  *
- * This fixes the issue where prior at ρ=0.5 dominates likelihood at ρ=0.0001
+ * This fixes the issue where prior at rho = 0.5 dominates likelihood at rho = 0.0001
  */
 
 data {
