@@ -93,8 +93,8 @@ def fit_fold(
 
     print(f"CV fold {fold_idx}: train={M_train.shape[0]}, held={M_held.shape[0]}")
 
-    fit    = fit_stan(M_train, N_train, config_path, instance_params)
-    result = compute_held_out_loglik(M_held, N_held, fit)
+    stan_result = fit_stan(M_train, N_train, config_path, instance_params)
+    result      = compute_held_out_loglik(M_held, N_held, stan_result.fit)
 
     return FoldResult(
         fold_idx=fold_idx,
