@@ -23,20 +23,20 @@ data {
     // N[i,j] = number of infections failing to occur (expected) when node i has j exposures
     array[V, kmax] real<lower=0> N;
 
-    // HYPERPARAMETER - exponential distribution scale for kernel mode deviations
-    real<lower=1e-6> DEVIATION_SCALE;
-
-    // HYPERPARAMETER - Dirichlet concentration for increments
-    real<lower=0> DELTA_CONCENTRATION;
-
     // EMPIRICAL BAYES: prior location for logit_p (computed from data)
     real LOGIT_P_LOCATION;
 
     // EMPIRICAL BAYES: prior scale for logit_p
     real<lower=0> LOGIT_P_SCALE;
-}
 
-transformed data {
+    // HYPERPARAMETER - Dirichlet concentration for increments
+    real<lower=0> DELTA_CONCENTRATION;
+
+    // HYPERPARAMETER - HalfNormal(0, SIGMA_SCALE) prior on sigma
+    real<lower=0> SIGMA_SCALE;
+
+    // HYPERPARAMETER - Dirichlet(PI_CONCENTRATION) prior on mixture weights
+    real<lower=0> PI_CONCENTRATION;
 }
 
 parameters {
@@ -46,13 +46,13 @@ parameters {
     // increments for kernel modes
     array[K] simplex[kmax] Delta;
 
-    // std for kernel mode deviations
+    // per-user deviation scale (logit scale)
     real<lower=1e-6> sigma;
 
-    // for non-centered parameterizations of kernels(indexed by node AND component)
+    // non-centered per-user deviations
     array[V, K] vector[kmax] z_alpha;
 
-    // global mixture weights over components
+    // mixture weights
     simplex[K] pi;
 }
 
@@ -60,14 +60,14 @@ transformed parameters {
     // scaling factors for kernel modes
     vector[K] p = inv_logit(logit_p);
 
-    // kernel modes on logit scale
+    // nonparametric kernel modes on logit scale
     array[K] vector[kmax] logit_mu;
     for (k in 1:K){
         vector[kmax] arg = p[k] * cumulative_sum(Delta[k]);
         logit_mu[k] = logit( fmin(fmax(arg, 1e-12), 1 - 1e-12) );
     }
 
-    // kernels on logit scale
+    // per-user kernels on logit scale
     array[V] matrix[kmax, K] alpha; // transposed for computation
     for (i in 1:V){
         for (k in 1:K){
@@ -77,16 +77,14 @@ transformed parameters {
 }
 
 model {
-    // *** EMPIRICAL BAYES PRIOR ***
-    // Centers prior at empirical scale instead of at 0.5
+    // empirical Bayes priors
     logit_p ~ normal(LOGIT_P_LOCATION, LOGIT_P_SCALE);
 
     Delta ~ dirichlet(rep_vector(DELTA_CONCENTRATION, kmax));
 
-    sigma ~ normal(0, DEVIATION_SCALE)T[0,];
+    sigma ~ normal(0, SIGMA_SCALE)T[0,];
 
-    // global mixture weights
-    pi ~ dirichlet(rep_vector(1.0, K));
+    pi ~ dirichlet(rep_vector(PI_CONCENTRATION, K));
 
     // component-specific noise for each node
     for (i in 1:V){
@@ -119,7 +117,7 @@ generated quantities {
         mu[k] = inv_logit( logit_mu[k] );
     }
 
-    // inferred kernels on probability scale
+    // per-user inferred kernels on probability scale
     array[V] matrix[K, kmax] c;
     for (i in 1:V){
         c[i] = inv_logit( alpha[i]' );
@@ -138,13 +136,15 @@ generated quantities {
             lps[k] = log(pi[k]);
             for (nu in 1:kmax){
                 if (M[i, nu] > 0 || N[i, nu] > 0) {
-                    lps[k] += M[i, nu] * log(c[i][k, nu]) + N[i, nu] * log(1 - c[i][k, nu]);
+                    lps[k] += M[i, nu] * log_inv_logit(alpha[i][nu, k]) 
+                            + N[i, nu] * log1m_inv_logit(alpha[i][nu, k]);
                 }
             }
         }
 
         real log_denom = log_sum_exp(lps);
         log_lik[i] = log_denom;
+        
         for (k in 1:K){
             post_prob[i, k] = exp(lps[k] - log_denom);
         }
