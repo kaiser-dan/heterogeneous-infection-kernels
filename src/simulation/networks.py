@@ -82,3 +82,55 @@ def zkc():
     """
     G = nx.karate_club_graph()
     return np.asarray(nx.adjacency_matrix(G).todense(), dtype=int)
+
+
+def build_graph(graph_cfg: dict, seed: int) -> tuple[np.ndarray, int]:
+    """Build an adjacency matrix from a config-style graph dict.
+
+    Supported types: 'sbm' (stochastic block model), 'er' (Erdős–Rényi), 'zkc' (Zachary's karate club).
+
+    Example
+    -------
+        adj, kmax = build_graph({
+            "type": "sbm",
+            "params": {"n": 500, "avg_degree": 10, "epsilon": 0.05}
+        }, seed=42)
+
+    Parameters
+    ----------
+    graph_cfg : dict with keys 'type' and 'params'.
+    seed : int
+
+    Returns
+    -------
+    adj  : (n, n) integer adjacency matrix.
+    kmax : int, maximum degree.
+    """
+    graph_type = graph_cfg.get("type", "sbm")
+    params     = graph_cfg.get("params", {})
+
+    if graph_type == "sbm":
+        adj = np.asarray(sbm(
+            n=int(params["n"]),
+            k=float(params.get("avg_degree", params.get("k"))),
+            epsilon=float(params["epsilon"]),
+            delta=float(params.get("delta", 0.5)),
+            seed=seed,
+        ), dtype=int)
+
+    elif graph_type == "er":
+        adj = np.asarray(er(
+            n=int(params["n"]),
+            p=params.get("p", None),
+            k=params.get("avg_degree", None),
+            seed=seed,
+        ), dtype=int)
+
+    elif graph_type == "zkc":
+        adj = np.asarray(zkc(), dtype=int)
+
+    else:
+        raise ValueError(f"Unsupported graph type: '{graph_type}'. Expected sbm or er.")
+    
+    kmax = int(adj.sum(axis=1).max())
+    return adj, kmax

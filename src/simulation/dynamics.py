@@ -5,9 +5,9 @@ from numpy import ndarray
 
 from .._logger import logger
 
-__all__ = ["heterogeneous_contagion_process", "get_activations"]
+__all__ = ["heterogeneous_contagion_process", "get_activations", "build_initial_state"]
 
-# Shamelessly stolen from Nick at:
+# heterogeneous_contagion_process and get_activations shamelessly stolen from Nick at:
 # https://github.com/nwlandry/heterogeneous-complex-network-reconstruction/blob/main/lcs/contagion.py
 
 def heterogeneous_contagion_process(
@@ -123,3 +123,31 @@ def get_activations(states: ndarray, adjacency: ndarray, kmax: int):
     noninfection_events = np.array(noninfection_events, dtype=int)
 
     return infection_events, noninfection_events
+
+def build_initial_state(n: int, initial_infected: int | float, seed: int) -> np.ndarray:
+    """Build an initial infection state vector x0.
+
+    Parameters
+    ----------
+    n : int
+        Number of nodes.
+    initial_infected : int or float
+        Number of initially infected nodes (int), or fraction of n (float in (0,1]).
+    seed : int
+
+    Returns
+    -------
+    (n,) binary array with initial_infected randomly chosen nodes set to 1.
+    """
+    rng = np.random.default_rng(seed + 11)
+    
+    if isinstance(initial_infected, float) and initial_infected <= 1.0:
+        n_init = max(1, int(round(initial_infected * n)))
+    else:
+        n_init = int(initial_infected)
+        
+    n_init = max(1, min(n_init, n))
+    x0     = np.zeros(n, dtype=int)
+    x0[rng.choice(n, size=n_init, replace=False)] = 1
+    
+    return x0
