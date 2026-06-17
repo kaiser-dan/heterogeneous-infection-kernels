@@ -90,13 +90,13 @@ def _build_stan_data(stan_code, config_model, empirical_logits, K, M, N, kmax):
 
     # (stan_token, config_key, default, logit_resolved)
     TOKENS = [
-        ("LOGIT_RHO_LOCATION",  "logit_rho_location",   -10.0, True),
-        ("LOGIT_RHO_SCALE",     "logit_rho_scale",        2.0, False),
-        ("SIGMA_SCALE",         "sigma_scale",            1.0, False),
-        ("PI_CONCENTRATION",    "pi_concentration",       1.0, False),
-        ("LOGIT_P_LOCATION",    "logit_p_location",       0.0, True),
-        ("LOGIT_P_SCALE",       "logit_p_scale",          2.0, False),
-        ("DELTA_CONCENTRATION", "delta_concentration",    1.0, False),
+        ("LOGIT_BETA_LOCATION",  "logit_beta_location",   -10.0, True),
+        ("LOGIT_BETA_SCALE",     "logit_beta_scale",        2.0, False),
+        ("SIGMA_SCALE",         "sigma_scale",              1.0, False),
+        ("PI_CONCENTRATION",    "pi_concentration",         1.0, False),
+        ("LOGIT_P_LOCATION",    "logit_p_location",         0.0, True),
+        ("LOGIT_P_SCALE",       "logit_p_scale",            2.0, False),
+        ("DELTA_CONCENTRATION", "delta_concentration",      1.0, False),
     ]
     for token, cfg_key, default, logit_resolved in TOKENS:
         if token in stan_code:
