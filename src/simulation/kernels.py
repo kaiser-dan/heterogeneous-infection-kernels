@@ -148,7 +148,7 @@ def assign_kernels(
     n: int,
     assignment_cfg: dict,
     n_kernels: int,
-    seed: int,
+    seed=None,
 ) -> np.ndarray:
     """Assign one kernel index to each of n nodes.
 
@@ -176,7 +176,7 @@ def assign_kernels(
         labels = assign_kernels(
             n=500, graph_type="sbm",
             assignment_cfg={"mode": "block_flip", "omega": 0.1},
-            n_kernels=2, seed=42,
+            n_kernels=2, seed=13,
         )
 
     Parameters
@@ -187,14 +187,14 @@ def assign_kernels(
         Must contain 'mode' key plus mode-specific parameters.
     n_kernels : int
         Number of kernels in the bank.
-    seed : int
+    seed : int, optional
 
     Returns
     -------
     (n,) integer array of kernel indices in [0, n_kernels).
     """
     mode = assignment_cfg.get("mode", "iid")
-    rng  = np.random.default_rng(seed + 17)
+    rng  = np.random.default_rng(seed)
 
     if mode == "block_flip":
         if n_kernels != 2:

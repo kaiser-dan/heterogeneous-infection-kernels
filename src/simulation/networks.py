@@ -1,7 +1,7 @@
 import networkx as nx
 import numpy as np
 
-__all__ = ["sbm", "er", "zkc"]
+__all__ = ["sbm", "er", "zkc", "build_graph"]
 
 
 def sbm(n, k, epsilon, delta=0, seed=None):
@@ -84,7 +84,7 @@ def zkc():
     return np.asarray(nx.adjacency_matrix(G).todense(), dtype=int)
 
 
-def build_graph(graph_cfg: dict, seed: int) -> tuple[np.ndarray, int]:
+def build_graph(graph_cfg: dict, seed=None) -> tuple[np.ndarray, int]:
     """Build an adjacency matrix from a config-style graph dict.
 
     Supported types: 'sbm' (stochastic block model), 'er' (Erdős–Rényi), 'zkc' (Zachary's karate club).
@@ -99,7 +99,7 @@ def build_graph(graph_cfg: dict, seed: int) -> tuple[np.ndarray, int]:
     Parameters
     ----------
     graph_cfg : dict with keys 'type' and 'params'.
-    seed : int
+    seed : int, optional
 
     Returns
     -------

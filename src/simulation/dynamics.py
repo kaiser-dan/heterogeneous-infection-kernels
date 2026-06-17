@@ -124,7 +124,7 @@ def get_activations(states: ndarray, adjacency: ndarray, kmax: int):
 
     return infection_events, noninfection_events
 
-def build_initial_state(n: int, initial_infected: int | float, seed: int) -> np.ndarray:
+def build_initial_state(n: int, initial_infected: int | float, seed=None) -> np.ndarray:
     """Build an initial infection state vector x0.
 
     Parameters
@@ -133,13 +133,13 @@ def build_initial_state(n: int, initial_infected: int | float, seed: int) -> np.
         Number of nodes.
     initial_infected : int or float
         Number of initially infected nodes (int), or fraction of n (float in (0,1]).
-    seed : int
+    seed : int, optional
 
     Returns
     -------
     (n,) binary array with initial_infected randomly chosen nodes set to 1.
     """
-    rng = np.random.default_rng(seed + 11)
+    rng = np.random.default_rng(seed)
     
     if isinstance(initial_infected, float) and initial_infected <= 1.0:
         n_init = max(1, int(round(initial_infected * n)))
