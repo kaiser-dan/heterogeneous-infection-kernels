@@ -394,33 +394,26 @@ def extract_kernel_summary(
 
 def get_posterior_draws(
     result: StanFitResult,
-    thin: int = 1,
-    float32: bool = False,
-    keep_vars: list[str] | None = None,
-) -> pd.DataFrame:
-    """Return posterior draws as a DataFrame.
+    variable: str,
+) -> np.ndarray:
+    """Return posterior draws for a single Stan variable as a numpy array.
 
     Parameters
     ----------
-    thin      : keep every nth row (1 = keep all)
-    float32   : downcast float columns to float32
-    keep_vars : list of regex strings to select columns; None keeps all
+    result   : StanFitResult from fit_stan
+    variable : name of the Stan variable to extract (e.g. "mu", "rho", "pi")
+
+    Returns
+    -------
+    np.ndarray with shape determined by the variable:
+        scalar parameters : (S,)
+        vector parameters : (S, dim)
+        matrix parameters : (S, dim1, dim2)
     """
-    draws = result.fit.draws_pd()
-
-    if keep_vars is not None:
-        patterns  = [re.compile(p) for p in keep_vars]
-        keep_cols = [c for c in draws.columns if any(p.search(c) for p in patterns)]
-        if not keep_cols and "lp__" in draws.columns:
-            keep_cols = ["lp__"]
-        draws = draws.loc[:, keep_cols].copy()
-
-    if thin > 1:
-        draws = draws.iloc[::thin, :].reset_index(drop=True)
-
-    if float32:
-        for col in draws.columns:
-            if pd.api.types.is_float_dtype(draws[col]):
-                draws[col] = draws[col].astype(np.float32)
-
-    return draws
+    stan_vars = set(result.fit.metadata.stan_vars) if hasattr(result.fit, "metadata") else set()
+    if variable not in stan_vars:
+        raise ValueError(
+            f"Variable '{variable}' not found in fit. "
+            f"Available variables: {sorted(stan_vars)}"
+        )
+    return np.asarray(result.fit.stan_variable(variable), dtype=float)
