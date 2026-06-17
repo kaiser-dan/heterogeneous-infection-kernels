@@ -1,0 +1,16 @@
+model:
+  stan_file: src/models/mixture_simple.stan
+  K: 1
+
+  # model-specific hyperparameters
+  logit_beta_location: "empirical"
+  logit_beta_scale: 2.0
+  sigma_scale: 1.0
+  pi_concentration: 1.0
+
+  # sampling
+  sampling:
+    iter_warmup: 500
+    iter_sampling: 500
+    chains: 1
+    adapt_delta: 0.8
