@@ -106,9 +106,6 @@ def _build_stan_data(stan_code, config_model, empirical_logits, K, M, N, kmax):
                 if logit_resolved else float(value)
             )
 
-    if "DEVIATION_SCALE" in stan_code:
-        stan_data["DEVIATION_SCALE"] = [float(config_model.get("deviation_scale", 0.1))] * K
-
     return stan_data
 
 
