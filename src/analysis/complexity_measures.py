@@ -22,6 +22,16 @@ def effective_rank(covariance: np.ndarray, reg: float = 1e-6) -> float:
     return _erank_from_regularized(sigma)
 
 
+def _erank_from_regularized(sigma: np.ndarray) -> float:
+    """Effective rank of the precision from an already-regularized covariance."""
+    eigs = np.linalg.eigvalsh(sigma)
+    log_prec = -np.log(eigs)
+    log_prec -= log_prec.max()
+    p = np.exp(log_prec)
+    p /= p.sum()
+    return float(np.exp(-np.sum(p * np.log(p + 1e-300))))
+
+
 def mahalanobis_complexity_logit(
     mu_post: np.ndarray,
     ref: np.ndarray,
@@ -77,27 +87,3 @@ def mahalanobis_complexity_logit(
 
     erank = _erank_from_regularized(sigma)
     return distances, float(distances.mean()), erank
-
-def posterior_mean_logit(mu_draws: np.ndarray, eps: float = 1e-8) -> np.ndarray:
-    """Posterior mean on the logit scale from probability-scale draws.
- 
-    Parameters
-    ----------
-    mu_draws : (n_samples, kmax) array on the probability scale.
-    eps : float
-        Clip boundary before logit transform.
- 
-    Returns
-    -------
-    (kmax,) array on the logit scale.
-    """
-    return logit(np.clip(mu_draws, eps, 1.0 - eps)).mean(axis=0)
-
-def _erank_from_regularized(sigma: np.ndarray) -> float:
-    """Effective rank of the precision from an already-regularized covariance."""
-    eigs = np.linalg.eigvalsh(sigma)
-    log_prec = -np.log(eigs)
-    log_prec -= log_prec.max()
-    p = np.exp(log_prec)
-    p /= p.sum()
-    return float(np.exp(-np.sum(p * np.log(p + 1e-300))))
