@@ -9,26 +9,46 @@
  */
 
 data {
-    int<lower=2> V;                          // number of individuals
-    int<lower=1, upper=V> kmax;              // max exposure level
-    int<lower=1, upper=V> K;                 // number of mixture components
+    // number of individuals
+    int<lower=2> V;
 
-    array[V, kmax] real<lower=0> M;          // adoption counts per (user, exposure)
-    array[V, kmax] real<lower=0> N;          // non-adoption counts per (user, exposure)
+    // max number of neighbors
+    int<lower=1, upper=V> kmax;
 
-    // --- Prior hyperparameters (all configurable, nothing hardcoded) ---
-    real LOGIT_RHO_LOCATION;                 // logit-Normal prior on per-contact infection prob
+    // number of kernel modes (mixture components)
+    int<lower=1, upper=V> K;
+
+    // M[i,j] = number of infections (expected) when node i has j exposures
+    array[V, kmax] real<lower=0> M;
+
+    // N[i,j] = number of infections failing to occur (expected) when node i has j exposures
+    array[V, kmax] real<lower=0> N;
+
+    // HYPERPARAMETER - logit-Normal prior on per-contact infection prob
+    real LOGIT_RHO_LOCATION;
+
+    // HYPERPARAMETER - logit-Normal prior on per-contact infection prob
     real<lower=0> LOGIT_RHO_SCALE;
 
-    real<lower=0> SIGMA_SCALE;               // HalfNormal(0, SIGMA_SCALE) prior on sigma
-    real<lower=0> PI_CONCENTRATION;          // Dirichlet(PI_CONCENTRATION) prior on mixture weights
+    // HYPERPARAMETER - HalfNormal(0, SIGMA_SCALE) prior on sigma
+    real<lower=0> SIGMA_SCALE;
+
+    // HYPERPARAMETER - Dirichlet(PI_CONCENTRATION) prior on mixture weights
+    real<lower=0> PI_CONCENTRATION;
 }
 
 parameters {
-    ordered[K] logit_rho;                    // per-contact infection probability (logit scale)
-    real<lower=1e-6> sigma;                  // per-user deviation scale (logit scale)
-    array[V, K] vector[kmax] z_alpha;        // non-centered per-user deviations
-    simplex[K] pi;                           // mixture weights
+    // per-contact infection probability (logit scale)
+    ordered[K] logit_rho;
+    
+    // per-user deviation scale (logit scale)
+    real<lower=1e-6> sigma;
+    
+    // non-centered per-user deviations
+    array[V, K] vector[kmax] z_alpha;
+    
+    // mixture weights
+    simplex[K] pi;
 }
 
 transformed parameters {
@@ -55,10 +75,12 @@ transformed parameters {
 model {
     // Priors
     logit_rho ~ normal(LOGIT_RHO_LOCATION, LOGIT_RHO_SCALE);
+
     sigma ~ normal(0, SIGMA_SCALE)T[0,];
+
     pi ~ dirichlet(rep_vector(PI_CONCENTRATION, K));
 
-    // Per-user noise
+    // component-specific noise for each node
     for (i in 1:V) {
         for (k in 1:K) {
             z_alpha[i, k] ~ normal(0, 1);
@@ -88,7 +110,7 @@ generated quantities {
         mu[k] = inv_logit(logit_mu[k]);
     }
 
-    // Per-user inferred kernels
+    // Per-user inferred kernels on probability scale
     array[V] matrix[K, kmax] c;
     for (i in 1:V) {
         c[i] = inv_logit(alpha[i]');

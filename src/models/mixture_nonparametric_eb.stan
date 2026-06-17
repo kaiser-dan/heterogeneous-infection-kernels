@@ -14,20 +14,20 @@ data {
     // max number of neighbors
 	int<lower=1, upper=V> kmax;
 
-    // number of kernel modes
+    // number of kernel modes (mixture components)
     int<lower=1, upper=V> K;
 
-    // M[i,j] = number of infections (expected) when node i has j infected neighbors
+    // M[i,j] = number of infections (expected) when node i has j exposures
     array[V, kmax] real<lower=0> M;
 
-    // N[i,j] = number of infections failing to occur (expected) when node i has j infected neighbors
+    // N[i,j] = number of infections failing to occur (expected) when node i has j exposures
     array[V, kmax] real<lower=0> N;
 
     // HYPERPARAMETER - exponential distribution scale for kernel mode deviations
     real<lower=1e-6> DEVIATION_SCALE;
 
     // HYPERPARAMETER - Dirichlet concentration for increments
-    real<lower=0> CONCENTRATION;
+    real<lower=0> DELTA_CONCENTRATION;
 
     // EMPIRICAL BAYES: prior location for logit_p (computed from data)
     real LOGIT_P_LOCATION;
@@ -81,7 +81,7 @@ model {
     // Centers prior at empirical scale instead of at 0.5
     logit_p ~ normal(LOGIT_P_LOCATION, LOGIT_P_SCALE);
 
-    Delta ~ dirichlet(rep_vector(CONCENTRATION, kmax));
+    Delta ~ dirichlet(rep_vector(DELTA_CONCENTRATION, kmax));
 
     sigma ~ normal(0, DEVIATION_SCALE)T[0,];
 
@@ -95,6 +95,7 @@ model {
         }
     }
 
+    // Marginalized mixture likelihood
     for (i in 1:V){
         vector[K] lps;
         for (k in 1:K){
@@ -112,22 +113,20 @@ model {
 }
 
 generated quantities {
-    // kernel modes
+    // kernel modes on probability scale
     array[K] vector[kmax] mu;
     for (k in 1:K){
         mu[k] = inv_logit( logit_mu[k] );
     }
 
-    // inferred kernels
+    // inferred kernels on probability scale
     array[V] matrix[K, kmax] c;
     for (i in 1:V){
         c[i] = inv_logit( alpha[i]' );
     }
 
-    // posterior over mixture indicator
+    // posterior mixture assignment
     array[V, K] real<lower=0, upper=1> post_prob;
-
-    // mixture indicator
     array[V] int<lower=1, upper=K> z;
 
     // per-node marginal log-likelihood (for WAIC/LOO/model comparison)
