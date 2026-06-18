@@ -3,7 +3,7 @@ model:
   K: 1
 
   # model-specific hyperparameters
-  logit_beta_location: "empirical"
+  logit_beta_location: "empirical_floor"
   logit_beta_scale: 2.0
   sigma_scale: 1.0
   pi_concentration: 1.0
