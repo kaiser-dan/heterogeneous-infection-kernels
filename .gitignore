@@ -20,3 +20,6 @@ results/
 
 # VS Code settings
 .vscode
+
+# SLURM logs
+logs/
