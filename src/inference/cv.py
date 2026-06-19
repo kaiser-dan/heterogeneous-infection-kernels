@@ -104,13 +104,28 @@ def fit_fold(
     )
 
 
+def run_one_fold(
+    M: np.ndarray,
+    N: np.ndarray,
+    n_folds: int,
+    fold_idx: int,
+    config_path,
+    instance_params=None,
+) -> FoldResult:
+    """Fit + score a single CV fold (for parallelization)"""
+    M = np.asarray(M, dtype=float)
+    N = np.asarray(N, dtype=float)
+    
+    held_mask = _cv_fold_mask(M.shape[0], n_folds, fold_idx)
+    
+    return fit_fold(held_mask, fold_idx, M, N, config_path, instance_params)
+
 def run_cv(
     M: np.ndarray,
     N: np.ndarray,
     n_folds: int,
     config_path,
     instance_params=None,
-    n_jobs: int = 1,        # n_jobs > 1 uses ProcessPoolExecutor
 ) -> list[FoldResult]:
     """Run full k-fold CV. Returns one FoldResult per fold."""
     M = np.asarray(M, dtype=float)
