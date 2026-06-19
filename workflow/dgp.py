@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -69,6 +70,32 @@ def simulate_MN(dgp: dict):
     return M, N
 
 
+def _atomic_write_text(dest: Path, text: str):
+    """Atomically write text to dest, safe under concurrency."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix=dest.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, dest)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp) # clean up if replace didn't consume it
+
+
+def _atomic_savez(dest: Path, **arrays):
+    """Atomically write a (compressed) .npz to dest, safe under concurrency."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix=dest.name + ".", suffix=".npz.tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:       # file object -> numpy does NOT append .npz
+            np.savez_compressed(f, **arrays)
+        os.replace(tmp, dest)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def _write_sidecar(dgp: dict, key: str, cache_dir: Path):
     """Record what each hash means: data_<key>.json holding the full DGP dict.
 
@@ -83,9 +110,7 @@ def _write_sidecar(dgp: dict, key: str, cache_dir: Path):
             raise RuntimeError(
                 f"hash collision on {key}: sidecar DGP differs from this one")
         return
-    tmp = side.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, sort_keys=True, indent=2))
-    os.replace(tmp, side)
+    _atomic_write_text(side, json.dumps(payload, sort_keys=True, indent=2))
 
 
 def get_MN(dgp: dict, key: str, cache_dir: Path):
@@ -98,13 +123,21 @@ def get_MN(dgp: dict, key: str, cache_dir: Path):
 
     fp = cache_dir / f"data_{key}.npz"
     if fp.exists():
-        d = np.load(fp)
-        return d["M"], d["N"]
+        try:
+            d = np.load(fp)
+            M, N = d["M"], d["N"]
+            if M.size > 0 and N.size > 0: # guard against empty/corrupt cache
+                return M, N
+        except Exception:
+            pass # fall through and re-simulate
+        # cached file was empty or unreadable: drop it and regenerate
+        try:
+            os.unlink(fp)
+        except FileNotFoundError:
+            pass
 
     M, N = simulate_MN(dgp)
-    tmp = fp.with_suffix(".npz.tmp")
-    np.savez(tmp, M=M, N=N)
-    os.replace(tmp, fp)
+    _atomic_savez(fp, M=M, N=N)
     return M, N
 
 

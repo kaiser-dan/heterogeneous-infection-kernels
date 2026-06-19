@@ -15,6 +15,7 @@ Skips if the task's output already exists.
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -33,10 +34,16 @@ from src.inference.cv import run_one_fold
 
 
 def _atomic_savez(fp: Path, **arrays):
+    """Atomically write a (compressed) .npz, safe under concurrency."""
     fp.parent.mkdir(parents=True, exist_ok=True)
-    tmp = fp.with_suffix(fp.suffix + ".tmp")
-    np.savez_compressed(tmp, **arrays)
-    os.replace(tmp, fp)
+    fd, tmp = tempfile.mkstemp(dir=fp.parent, prefix=fp.name + ".", suffix=".npz.tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            np.savez_compressed(f, **arrays)
+        os.replace(tmp, fp)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def _attach_dgp(df: pd.DataFrame, row: dict) -> pd.DataFrame:
