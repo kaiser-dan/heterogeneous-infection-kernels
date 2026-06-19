@@ -24,7 +24,7 @@ EPSILONS = [round(0.1 * i, 4) for i in range(1, 10)]
 OMEGAS   = [round(0.05 * i, 4) for i in range(0, 11)]
 REPS     = range(10)
 
-FIXED      = dict(beta1=0.01, beta2=0.04, gamma=0.1, tmax=1000)   # non-graph params
+FIXED      = dict(beta1=0.01, beta2=0.04, gamma=0.1, tmax=1000, rho=0.125)   # non-graph params
 GRAPH_BASE = dict(n=256, avg_degree=18, delta=0.0)  # fixed sbm params
 
 # Model(s) to fit on each DGP (adding a model = one more entry here)
