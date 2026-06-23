@@ -77,8 +77,7 @@ def main():
                     rows.append({
                         "experiment": EXPERIMENT,
                         "kind":       "cv",
-                        "task_name":  f"{fam['label']}__{mname}__rep-{rep}"
-                                      f"__fold-{fold}_{key[:8]}",
+                        "task_name":  f"{fam['label']}_{mname}_rep-{rep}_fold-{fold}_{key[:8]}",
                         "dgp_label":  fam["label"],
                         "dgp_key":    key,
                         "dgp":        dgp,
