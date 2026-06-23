@@ -46,6 +46,19 @@ def _atomic_savez(fp: Path, **arrays):
             os.unlink(tmp)
 
 
+def _atomic_to_parquet(df: pd.DataFrame, fp: Path):
+    """Atomically write df to fp as parquet"""
+    fp.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=fp.parent, prefix=fp.name + ".", suffix=".parquet.tmp")
+    os.close(fd) # to_parquet wants a path; overwrites it
+    try:
+        df.to_parquet(tmp, index=False)
+        os.replace(tmp, fp)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def _attach_dgp(df: pd.DataFrame, row: dict) -> pd.DataFrame:
     """Tags every row of df with some experimental conditions."""
     df = df.copy()
@@ -110,8 +123,10 @@ def run_cv_task(M, N, row: dict, out_dir: Path):
         "model_config":  spec["config"],
         "task_name":     row["task_name"],
     }
-    pd.DataFrame([rec]).to_parquet(
-        out_dir / f"{row['task_name']}_fold.parquet", index=False)
+    _atomic_to_parquet(
+        pd.DataFrame([rec]),
+        out_dir / f"{row['task_name']}_fold.parquet",
+    )
 
 
 def load_task(manifest: str, task_id: int) -> dict:
