@@ -4,39 +4,48 @@ import numpy as np
 __all__ = ["sbm", "er", "zkc", "build_graph"]
 
 
-def sbm(n, k, epsilon, delta=0, seed=None):
+def sbm(n, k, epsilon, B=2, delta=0, seed=None):
     """
-    Generates a two-block Stochastic Block Model (SBM) graph.
+    Generates a B-block Stochastic Block Model (SBM) graph.
 
     Parameters
     ----------
     n : int
-        Number of nodes. Split evenly between two blocks.
+        Number of nodes. Split evenly among B blocks.
     k : float
-        Average degree of each node.
+        Target average degree.
     epsilon : float
         Controls the ratio of inter- to intra-community edge probability.
         Higher values mean stronger community structure.
+    B : int
+        Number of blocks.
     delta : float, optional
-        Asymmetry between the two blocks' intra-community probabilities.
-        delta=0 (default) gives blocks with equal average degree.
-        Positive delta increases p11 (block 1 denser) and decreases p22.
+        Asymmetry between block intra-community probabilities. Only
+        supported for B=2; ignored when B > 2.
     seed : int, optional
-        Seed for the random number generator.
 
     Returns
     -------
     numpy.ndarray
-        Adjacency matrix of the generated SBM graph.
+        (n, n) integer adjacency matrix.
     """
-    p = k / (n - 1)
-    p12 = (1 - epsilon) * p
-    p21 = p12
-    p11 = (1 + delta) * (1 + epsilon) * p
-    p22 = (1 - delta) * (1 + epsilon) * p
+    p     = k / (n - 1)
+    p_out = (1.0 - epsilon) * p
+    p_in  = (1.0 + n * (B - 1) * epsilon / (n - B)) * p
 
-    probs = [[p11, p12], [p21, p22]]
-    G = nx.stochastic_block_model([n // 2, n // 2], probs, seed=seed)
+    if B == 2 and delta != 0:
+        p11 = (1 + delta) * p_in
+        p22 = (1 - delta) * p_in
+        probs = [[p11, p_out], [p_out, p22]]
+    else:
+        probs = [
+            [p_in if i == j else p_out for j in range(B)]
+            for i in range(B)
+        ]
+
+    block_sizes = [n // B] * B
+    block_sizes[-1] += n - sum(block_sizes) # remainder goes to last block
+    G = nx.stochastic_block_model(block_sizes, probs, seed=seed)
     return nx.adjacency_matrix(G).todense()
 
 
@@ -114,7 +123,8 @@ def build_graph(graph_cfg: dict, seed=None) -> tuple[np.ndarray, int]:
             n=int(params["n"]),
             k=float(params.get("avg_degree", params.get("k"))),
             epsilon=float(params["epsilon"]),
-            delta=float(params.get("delta", 0.5)),
+            B=int(params.get("B", 2)),
+            delta=float(params.get("delta", 0.0)),
             seed=seed,
         ), dtype=int)
 
@@ -130,7 +140,7 @@ def build_graph(graph_cfg: dict, seed=None) -> tuple[np.ndarray, int]:
         adj = np.asarray(zkc(), dtype=int)
 
     else:
-        raise ValueError(f"Unsupported graph type: '{graph_type}'. Expected sbm or er.")
+        raise ValueError(f"Unsupported graph type: '{graph_type}'.")
     
     kmax = int(adj.sum(axis=1).max())
     return adj, kmax

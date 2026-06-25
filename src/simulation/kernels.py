@@ -5,7 +5,7 @@ import numpy as np
 __all__ = ["simple_kernel", "hill_kernel", "nonparametric_kernel", "build_kernel_bank", "assign_kernels"]
 
 def simple_kernel(beta: float, kmax: int) -> np.ndarray:
-    """Simple (independent cascade) kernel: P(ν) = 1 - (1 - β)^ν.
+    """Simple (independent cascade) kernel: c(ν) = 1 - (1 - β)^ν.
 
     Parameters
     ----------
@@ -48,7 +48,7 @@ def sigmoid_kernel(rho_l: float, rho_h: float, w: float, k0: float, kmax: int) -
 def hill_kernel(p: float, h: float, tau: float, kmax: int) -> np.ndarray:
     """Hill-function (complex contagion) kernel.
 
-    P(ν) = p · νʰ / (τʰ + νʰ)
+    c(ν) = p · νʰ / (τʰ + νʰ)
 
     Sigmoid-shaped, saturating at p. Controls:
       p   — saturation ceiling
@@ -72,6 +72,33 @@ def hill_kernel(p: float, h: float, tau: float, kmax: int) -> np.ndarray:
     """
     nu = np.arange(1, kmax + 1, dtype=float)
     return float(p) * (nu ** float(h)) / (float(tau) ** float(h) + nu ** float(h))
+
+
+def power_kernel(lam: float, alpha: float, kmax: int) -> np.ndarray:
+    """Sublinear/superlinear (complex contagion) kernel.
+
+    c(ν) = 1 - exp(-lam * ν ^ alpha)
+
+    Sublinear when alpha < 1, superlinear when alpha > 1.
+
+    Parameters
+    ----------
+    lam : float
+        Baseline cumulative hazard from a single infected neighbor.
+        Single-exposure infection probability is c(1) = 1 - exp(-lam). 
+    alpha : float
+        Exposure-scaling exponent. alpha < 1 gives sublinear contagion, 
+        alpha = 1 gives the standard simple-contagion kernel,
+        and alpha > 1 gives superlinear contagion.
+    kmax : int
+        Maximum number of infected neighbours.
+
+    Returns
+    -------
+    (kmax,) array on the probability scale, ν = 1..kmax.
+    """
+    nu = np.arange(1, kmax + 1, dtype=float)
+    return 1.0 - np.exp(-lam * nu**alpha)
 
 
 def nonparametric_kernel(values: list[float], kmax: int) -> np.ndarray:
@@ -99,7 +126,7 @@ def nonparametric_kernel(values: list[float], kmax: int) -> np.ndarray:
 def build_kernel_bank(kernels_cfg: list[dict], kmax: int) -> list[np.ndarray]:
     """Construct a list of kernel arrays from a config-style list of dicts.
 
-    Each dict must have a 'type' key ('simple', 'sigmoid', 'hill', or 'nonparametric')
+    Each dict must have a 'type' key ('simple', 'hill', 'power', or 'nonparametric')
     and the corresponding parameters. 
     
     Example
@@ -134,6 +161,13 @@ def build_kernel_bank(kernels_cfg: list[dict], kmax: int) -> list[np.ndarray]:
                 kmax=kmax,
             ))
             
+        elif ktype == "power":
+            bank.append(power_kernel(
+                lam=float(cfg["lam"]),
+                alpha=float(cfg["alpha"]),
+                kmax=kmax
+            ))
+            
         elif ktype == "nonparametric":
             bank.append(nonparametric_kernel(values=cfg["values"], kmax=kmax))
             
@@ -154,39 +188,32 @@ def assign_kernels(
 
     Modes
     -----
-    block_flip : Split nodes into two communities, then randomly flip assignments
-                 with probability omega. Requires exactly 2 kernels.
-                 Parameters:
-                 omega       : float, flip probability (default 0.0)
-                 communities : (n,) int array with exactly 2 unique values indicating
-                               community membership. Values are remapped to 0/1 internally.
+    block_flip : Community-aligned assignment with flip probability omega.
+                 Pr(kernel k | block b) = 1-(B-1)*omega if k == b, else omega.
+                 omega = 0 is perfect alignment; omega = 1/B is uniform random.
+                 omega       : float in [0, 1/n_kernels], default 0.0
+                 communities : (n,) int array; remapped to 0..n_kernels-1.
+                               If omitted, defaults to contiguous block assignment.
 
-    iid        : Each node independently draws a kernel index from a categorical
-                 distribution.
-                 Parameters:
-                 probs : (n_kernels,) float array of kernel probabilities;
-                         if omitted, defaults to uniform.
+    iid        : Each node draws independently from a categorical distribution.
+                 probs : (n_kernels,) weights; default uniform.
 
-    explicit   : Provide a labels array directly.
-                 Parameters:
+    explicit   : Pass labels directly.
                  labels : (n,) int array of kernel indices in [0, n_kernels).
 
     Example
     -------
         labels = assign_kernels(
-            n=500, graph_type="sbm",
-            assignment_cfg={"mode": "block_flip", "omega": 0.1},
-            n_kernels=2, seed=13,
+            n=500,
+            assignment_cfg={"mode": "block_flip", "omega": 0.9, "communities": communities},
+            n_kernels=3, seed=42,
         )
 
     Parameters
     ----------
     n : int
-        Number of nodes.
-    assignment_cfg : dict
-        Must contain 'mode' key plus mode-specific parameters.
+    assignment_cfg : dict with 'mode' key plus mode-specific parameters.
     n_kernels : int
-        Number of kernels in the bank.
     seed : int, optional
 
     Returns
@@ -197,25 +224,39 @@ def assign_kernels(
     rng  = np.random.default_rng(seed)
 
     if mode == "block_flip":
-        if n_kernels != 2:
-            raise ValueError("block_flip requires exactly 2 kernels.")
-        
         communities = assignment_cfg.get("communities")
+        omega = float(assignment_cfg.get("omega", 0.0))
+
         if communities is not None:
             labels = np.asarray(communities, dtype=int).reshape(-1)
             if labels.size != n:
                 raise ValueError("communities must have one entry per node.")
             unique = np.unique(labels)
-            if unique.size != 2:
-                raise ValueError("communities must contain exactly 2 unique values.")
-            labels = (labels == unique[1]).astype(int)
+            if unique.size != n_kernels:
+                raise ValueError(
+                    f"communities has {unique.size} unique values but n_kernels={n_kernels}."
+                )
+            community_idx = np.searchsorted(unique, labels)
         else:
-            labels = np.zeros(n, dtype=int)
-            labels[n // 2:] = 1
-        omega = float(assignment_cfg.get("omega", 0.0))
-        labels = labels.copy()
-        labels[rng.random(n) < omega] ^= 1
-        return labels
+            block_sizes = [n // n_kernels] * n_kernels
+            block_sizes[-1] += n - sum(block_sizes)
+            community_idx = np.repeat(np.arange(n_kernels), block_sizes)
+
+        if not (0.0 <= omega <= 1.0 / n_kernels):
+            raise ValueError(
+                f"omega must be in [0, 1/n_kernels] = [0, {1.0/n_kernels:.4f}], got {omega}."
+            )
+
+        p_other = omega
+        p_same  = 1.0 - (n_kernels - 1) * omega
+        kernel_labels = np.empty(n, dtype=int)
+        for i in range(n):
+            b = community_idx[i]
+            probs = np.full(n_kernels, p_other)
+            probs[b] = p_same
+            kernel_labels[i] = rng.choice(n_kernels, p=probs)
+        
+        return kernel_labels
 
     if mode == "iid":
         probs = assignment_cfg.get("probs")

@@ -23,3 +23,6 @@ results/
 
 # SLURM logs
 logs/
+
+# Stan binaries
+src/models/*.exe
