@@ -7,6 +7,7 @@ from .kernels import (
     simple_kernel,
     hill_kernel,
     nonparametric_kernel,
+    power_kernel,
     build_kernel_bank, 
     assign_kernels
 )
