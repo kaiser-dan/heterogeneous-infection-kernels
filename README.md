@@ -68,7 +68,7 @@ Aggregation writes combined parquet tables into `results/<experiment>/`.
 
 | `type` | Required params | Notes |
 |---|---|---|
-| `sbm` | `n`, `avg_degree`, `epsilon` | Two-block SBM. `epsilon` ∈ (0,1): higher = stronger community structure. `delta` (default 0): asymmetry between block densities. |
+| `sbm` | `n`, `avg_degree`, `epsilon`, `B` | B-block SBM. `epsilon` ∈ (0,1): higher = stronger community structure. `B` (default 2): number of blocks. `delta` (default 0): asymmetry between block densities, ignored if `B > 2`. |
 | `er` | `n`, one of `avg_degree` or `p` | Erdős–Rényi. |
 | `zkc` | _(none)_ | Zachary's karate club (fixed graph, 34 nodes). |
 
@@ -88,7 +88,7 @@ Only used when `len(kernels) > 1`; ignored for single-kernel DGPs.
 
 | `mode` | Required params | Notes |
 |---|---|---|
-| `block_flip` | `omega`, `communities` (optional) | Assigns kernels by SBM block (denoted by `communities` vec), then flips each node with probability `omega`. Requires exactly 2 kernels. |
+| `block_flip` | `omega`, `communities` (optional) | Assigns kernels by SBM block (denoted by `communities` vec), then flips each node with probability `omega`. `omega = 0` for perfect alignment; `omega = 1 / len(kernels)` for uniform random. |
 | `iid` | `probs` (optional) | Each node draws a kernel index independently; uniform if `probs` omitted. |
 | `explicit` | `labels` | Pass an (n,) integer array of kernel indices directly. |
 
