@@ -29,9 +29,9 @@ def sbm(n, k, epsilon, B=2, delta=0, seed=None):
     numpy.ndarray
         (n, n) integer adjacency matrix.
     """
-    p = k / (n - 1)
+    p     = k / (n - 1)
     p_out = (1.0 - epsilon) * p
-    p_in = (1.0 + n * (B - 1) * epsilon / (n - B)) * p
+    p_in  = (1.0 + n * (B - 1) * epsilon / (n - B)) * p
 
     if B == 2 and delta != 0:
         p11 = (1 + delta) * p_in
@@ -93,6 +93,7 @@ def zkc():
 def edgelist(filename):
     """
     Loads graph's adjacency matrix from edgelist file.
+    Assumes edgelist file is undirected and unweighted.
 
     Parameters
     ----------
@@ -112,8 +113,6 @@ def build_graph(graph_cfg: dict, seed=None) -> tuple[np.ndarray, int]:
     """Build an adjacency matrix from a config-style graph dict.
 
     Supported types: 'sbm' (stochastic block model), 'er' (Erdős–Rényi), 'zkc' (Zachary's karate club), or 'edgelist' (loaded from edgelist).
-
-    Assumes edgelist file is undirected and unweighted.
 
     Example
     -------
@@ -168,7 +167,6 @@ def build_graph(graph_cfg: dict, seed=None) -> tuple[np.ndarray, int]:
             raise ValueError(
                 "If reading in edgelist, must pass 'filename' parameter to edgelist file!"
             )
-
         adj = np.asarray(edgelist(filename), dtype=int)
 
     else:
