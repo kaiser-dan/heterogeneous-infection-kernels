@@ -8,10 +8,15 @@ Run:  python build_manifest_inference.py   (prints the array range)
 """
 
 import json
+import sys
 import itertools
 from pathlib import Path
 
 import numpy as np
+
+WORKFLOW = Path(__file__).resolve().parent.parent  # workflow/<subdir>/build_*.py -> workflow/
+if str(WORKFLOW) not in sys.path:
+    sys.path.append(str(WORKFLOW))
 
 from dgp import dgp_key
 
@@ -20,9 +25,9 @@ OUT = Path("manifests") / f"{EXPERIMENT}.jsonl"
 
 # Parameters to sweep (edit these lists)
 # --------------------------------------
-EPSILONS = [round(0.1 * i, 4) for i in range(1, 10)]
-OMEGAS   = [round(0.05 * i, 4) for i in range(0, 11)]
-REPS     = range(10)
+EPSILONS = [round(0.05 * i, 4) for i in range(1, 20)]
+OMEGAS   = [round(0.025 * i, 4) for i in range(0, 21)]
+REPS     = range(5)
 
 FIXED      = dict(beta1=0.01, beta2=0.04, gamma=0.1, tmax=1000, rho=0.125)   # non-graph params
 GRAPH_BASE = dict(n=256, avg_degree=18, delta=0.0)  # fixed sbm params
