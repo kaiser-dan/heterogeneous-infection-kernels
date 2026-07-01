@@ -1,7 +1,7 @@
 """
 Collect parameter-sweep results, compute kernel complexity per DGP.
 
-Run: uv run python workflow/analyze_inference_complexity.py results/<experiment>
+Run: uv run python workflow/epsilon_omega_sweep/analyze_complexity_epsilon_omega_sweep.py results/inference_epsilon_omega_sweep
 
 For each DGP (shared dgp_key between the np and simple fits) this:
   1. loads the np kernel posterior draws (mu_np_draws, probability scale),
@@ -23,13 +23,14 @@ import numpy as np
 import pandas as pd
 from scipy.special import logit
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from src.analysis import (
     compute_complexity_scores,
     posterior_mean_logit,
+    simple_reference_logit
 )
 from src.simulation import (
     simple_kernel
@@ -78,8 +79,7 @@ def build_reference(simple_path: Path, kmax: int) -> np.ndarray | None:
         return None
     beta_mean = float(beta.reshape(-1).mean())
     
-    c = simple_kernel(beta_mean, kmax)
-    return logit(np.clip(c, EPS, 1.0 - EPS))
+    return simple_reference_logit(beta_mean, kmax)
 
 
 def main():
@@ -129,7 +129,7 @@ def main():
         # build (simple) reference
         ref = build_reference(files["simple"], kmax=mu_np.shape[1])
         if ref is None:
-            skipped.append((key8, f"could not build ref ({REF_SOURCE})"))
+            skipped.append((key8, "could not build ref (simple fit missing draws_beta)"))
             continue
 
         try:
