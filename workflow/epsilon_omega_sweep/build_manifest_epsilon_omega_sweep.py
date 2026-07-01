@@ -27,7 +27,7 @@ OUT = Path("manifests") / f"{EXPERIMENT}.jsonl"
 # --------------------------------------
 EPSILONS = [round(0.05 * i, 4) for i in range(1, 20)]
 OMEGAS   = [round(0.025 * i, 4) for i in range(0, 21)]
-REPS     = range(5)
+REPS     = range(10)
 
 FIXED      = dict(beta1=0.01, beta2=0.04, gamma=0.1, tmax=1000, rho=0.125)   # non-graph params
 GRAPH_BASE = dict(n=256, avg_degree=18, delta=0.0)  # fixed sbm params
@@ -38,7 +38,7 @@ MODELS = {
     "np": {
         "config": "configs/models/nonparametric_eb.yaml",
         "instance_params": {
-            "stan_file": "src/models/mixture_nonparametric_eb_vec.stan",
+            "stan_file": "src/models/mixture_nonparametric_eb.stan",
             "K": 1,
             "sampling": {"iter_sampling": 300, "iter_warmup": 900,
                          "chains": 1, "adapt_delta": 0.95},

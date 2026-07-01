@@ -27,7 +27,7 @@ OUT = Path("manifests") / f"{EXPERIMENT}.jsonl"
 # --------------------------------------
 BETA2S   = [round(0.01 + 0.0025*i, 4) for i in range(0, 17)]
 DELTAS   = [round(0.025*i, 4) for i in range(-36, 37)]
-REPS     = range(5)
+REPS     = range(10)
 
 FIXED      = dict(beta1=0.01, omega=0.1, gamma=0.1, tmax=1000, rho=0.125)   # non-graph params
 GRAPH_BASE = dict(n=256, avg_degree=18, epsilon=0.9)  # fixed sbm params
@@ -38,7 +38,7 @@ MODELS = {
     "np": {
         "config": "configs/models/nonparametric_eb.yaml",
         "instance_params": {
-            "stan_file": "src/models/mixture_nonparametric_eb_vec.stan",
+            "stan_file": "src/models/mixture_nonparametric_eb.stan",
             "K": 1,
             "sampling": {"iter_sampling": 300, "iter_warmup": 900,
                          "chains": 1, "adapt_delta": 0.95},
