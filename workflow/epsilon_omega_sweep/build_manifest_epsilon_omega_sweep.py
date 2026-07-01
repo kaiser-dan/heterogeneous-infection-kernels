@@ -38,8 +38,9 @@ MODELS = {
     "np": {
         "config": "configs/models/nonparametric_eb.yaml",
         "instance_params": {
+            "stan_file": "src/models/mixture_nonparametric_eb_vec.stan",
             "K": 1,
-            "sampling": {"iter_sampling": 500, "iter_warmup": 1500,
+            "sampling": {"iter_sampling": 300, "iter_warmup": 900,
                          "chains": 1, "adapt_delta": 0.95},
         },
         "save_vars": ["mu"],
@@ -48,7 +49,7 @@ MODELS = {
         "config": "configs/models/simple.yaml",
         "instance_params": {
             "K": 1,
-            "sampling": {"iter_sampling": 500, "iter_warmup": 1500,
+            "sampling": {"iter_sampling": 300, "iter_warmup": 900,
                          "chains": 1, "adapt_delta": 0.8},
         },
         "save_vars": ["beta", "mu"],
