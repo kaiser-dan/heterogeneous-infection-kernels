@@ -13,16 +13,27 @@ class FoldResult:
     cv_score: float
     n_held_out: int
     mean_log_pred: float
+    node_idx: np.ndarray      # original indices of the held-out nodes (len n_held_out)
+    log_pred: np.ndarray      # per-node held-out lppd, aligned elementwise with node_idx
+
 
 def compute_held_out_loglik(M_held: np.ndarray, N_held: np.ndarray, fit) -> dict:
     """Log posterior predictive density for held-out nodes.
+
+    Returns the *per-node* log predictive density vector (`log_pred`) in addition
+    to its sum.
 
     Uses population-level mu[k] and mixture weights pi, no per-node latents
     required. Correct marginal predictive for a new node from the population.
     """
     eps = 1e-9
     if M_held.shape[0] == 0:
-        return {"cv_score": 0.0, "n_held_out": 0, "mean_log_pred": np.nan}
+        return {
+            "log_pred":      np.empty(0, dtype=float),
+            "cv_score":      0.0,
+            "n_held_out":    0,
+            "mean_log_pred": np.nan,
+        }
 
     mu = np.asarray(fit.stan_variable("mu"), dtype=float)   # (S, K, kmax) or (S, kmax)
     pi = np.asarray(fit.stan_variable("pi"), dtype=float)   # (S, K) or (S,)
@@ -54,6 +65,7 @@ def compute_held_out_loglik(M_held: np.ndarray, N_held: np.ndarray, fit) -> dict
 
     cv_score = float(log_pred.sum())
     return {
+        "log_pred":      log_pred,
         "cv_score":      cv_score,
         "n_held_out":    M_held.shape[0],
         "mean_log_pred": cv_score / M_held.shape[0],
@@ -91,6 +103,8 @@ def fit_fold(
     M_train, N_train = M[~held_mask], N[~held_mask]
     M_held,  N_held  = M[held_mask],  N[held_mask]
 
+    node_idx = np.flatnonzero(held_mask)
+
     print(f"CV fold {fold_idx}: train={M_train.shape[0]}, held={M_held.shape[0]}")
 
     stan_result = fit_stan(M_train, N_train, config_path, instance_params)
@@ -101,6 +115,8 @@ def fit_fold(
         cv_score=result["cv_score"],
         n_held_out=result["n_held_out"],
         mean_log_pred=result["mean_log_pred"],
+        node_idx=node_idx,
+        log_pred=result["log_pred"],
     )
 
 
@@ -115,10 +131,11 @@ def run_one_fold(
     """Fit + score a single CV fold (for parallelization)"""
     M = np.asarray(M, dtype=float)
     N = np.asarray(N, dtype=float)
-    
+
     held_mask = _cv_fold_mask(M.shape[0], n_folds, fold_idx)
-    
+
     return fit_fold(held_mask, fold_idx, M, N, config_path, instance_params)
+
 
 def run_cv(
     M: np.ndarray,
