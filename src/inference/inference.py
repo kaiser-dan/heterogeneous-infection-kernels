@@ -192,6 +192,8 @@ def fit_stan(M, N, config_path, instance_params=None) -> StanFitResult:
     }
     if "max_treedepth" in sampling_cfg:
         sample_kwargs["max_treedepth"] = int(sampling_cfg["max_treedepth"])
+    if "seed" in sampling_cfg:
+        sample_kwargs["seed"] = int(sampling_cfg["seed"])
 
     fit = model.sample(**sample_kwargs)
     return StanFitResult(
