@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
-__all__ = ["simple_kernel", "hill_kernel", "nonparametric_kernel", "build_kernel_bank", "assign_kernels"]
+__all__ = ["simple_kernel", "hill_kernel", "nonparametric_kernel", "load_kernel", "build_kernel_bank", "assign_kernels"]
 
 def simple_kernel(beta: float, kmax: int) -> np.ndarray:
     """Simple (independent cascade) kernel: c(ν) = 1 - (1 - β)^ν.
@@ -20,6 +22,7 @@ def simple_kernel(beta: float, kmax: int) -> np.ndarray:
     """
     nu = np.arange(1, kmax + 1, dtype=float)
     return 1.0 - (1.0 - float(beta)) ** nu
+
 
 def sigmoid_kernel(rho_l: float, rho_h: float, w: float, k0: float, kmax: int) -> np.ndarray:
     """Sigmoidal (complex contagion) kernel.
@@ -44,6 +47,7 @@ def sigmoid_kernel(rho_l: float, rho_h: float, w: float, k0: float, kmax: int) -
     """
     nu = np.arange(1, kmax + 1, dtype=float)
     return rho_l + (rho_h - rho_l) / (1.0 + np.exp(-w * (nu - k0)))
+
 
 def hill_kernel(p: float, h: float, tau: float, kmax: int) -> np.ndarray:
     """Hill-function (complex contagion) kernel.
@@ -123,6 +127,25 @@ def nonparametric_kernel(values: list[float], kmax: int) -> np.ndarray:
     return arr[:kmax]
 
 
+def load_kernel(path: str | Path, kmax: int) -> np.ndarray:
+    """Load a nonparametric kernel's values from a text file, then build it.
+
+    Parameters
+    ----------
+    path : str or Path
+        Text file of whitespace/newline-separated floats, one per exposure
+        level, length >= kmax.
+    kmax : int
+        Maximum number of infected neighbours. Truncates values to this length.
+
+    Returns
+    -------
+    (kmax,) array on the probability scale.
+    """
+    values = np.loadtxt(path, dtype=float)
+    return nonparametric_kernel(values, kmax=kmax)
+
+
 def build_kernel_bank(kernels_cfg: list[dict], kmax: int) -> list[np.ndarray]:
     """Construct a list of kernel arrays from a config-style list of dicts.
 
@@ -177,6 +200,7 @@ def build_kernel_bank(kernels_cfg: list[dict], kmax: int) -> list[np.ndarray]:
             )
             
     return bank
+
 
 def assign_kernels(
     n: int,
