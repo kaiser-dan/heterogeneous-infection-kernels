@@ -23,3 +23,9 @@ logs/
 
 # Stan binaries
 src/models/*.exe
+
+# Snakemake metadata/cache
+.snakemake/
+
+# Scratch dir for `just check-params`
+.tmp_check_params/

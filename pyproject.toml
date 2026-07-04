@@ -15,6 +15,7 @@ dependencies = [
     "pyarrow>=24.0.0",
     "pyyaml>=6.0.3",
     "scipy>=1.17.1",
+    "snakemake>=9.23.1",
 ]
 
 [dependency-groups]

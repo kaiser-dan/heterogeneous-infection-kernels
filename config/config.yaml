@@ -1,0 +1,3 @@
+# Snakemake pipeline configuration.
+
+results_root: results

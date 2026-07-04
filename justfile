@@ -16,51 +16,66 @@ install:
 installmin:
     uv sync --no-dev
 
-# Run all unit tests
-[group('setup')]
-test:
-    uv run pytest
-
 # Compile all Stan models in src/inference/
 [group('setup')]
 compile:
     uv run bin/compile_models.py
 
+# ----- Params -----
+
+# Regenerate every experiment's committed Paramspace frame (config/params/*.tsv)
+[group('params')]
+params:
+    uv run python config/gen_all_params.py config/params
+
+# Fail if committed frames are stale relative to their generators
+[group('params')]
+check-params:
+    rm -rf .tmp_check_params
+    uv run python config/gen_all_params.py .tmp_check_params
+    diff -rq config/params .tmp_check_params \
+        && echo "config/params is up to date" \
+        || (echo "STALE: config/params does not match the generators -- run 'just params' and commit the diff" && rm -rf .tmp_check_params && exit 1)
+    rm -rf .tmp_check_params
+
 # ----- Research -----
+# All research targets run the Snakemake pipeline (workflow/Snakefile,
+# config/params). 
 
-# Generate all synthetic datasets via Snakemake
+# Show the DAG without running anything
 [group('research')]
-data:
-    uv run snakemake -c1
+dryrun *extra="":
+    uv run snakemake --snakefile workflow/Snakefile -n {{extra}}
 
-# Clear and regenerate all synthetic datasets
-[confirm]
+# Run the full pipeline (all sweeps + cv + ppc)
 [group('research')]
-data-total:
-    rm -rf data/synthetic
-    uv run snakemake -c1
+all cores="1":
+    uv run snakemake --snakefile workflow/Snakefile --cores {{cores}}
 
-# Run inference sweep defined in a YAML config
+# Run one numeric sweep through to its measure_complexity output
 [group('research')]
-sweep config profile="workflow/profiles/local" *extra="":
-    uv run snakemake inference --configfile {{config}} --profile {{profile}} {{extra}}
+sweep name cores="1":
+    uv run snakemake --snakefile workflow/Snakefile --cores {{cores}} \
+        results/complexity/{{name}}/complexity_per_dgp.parquet \
+        results/complexity/{{name}}/complexity_by_setting.parquet
 
-# Aggregate CV results for a sweep config
+# Run the CV experiment through to aggregation
 [group('research')]
-cv config profile="workflow/profiles/local" *extra="":
-    uv run snakemake cv_aggregate --configfile {{config}} --profile {{profile}} {{extra}}
+cv cores="1":
+    uv run snakemake --snakefile workflow/Snakefile --cores {{cores}} \
+        results/cv/cv_basic/_cv_curve.parquet \
+        results/cv/cv_basic/_cv_selection.parquet
 
-# Compute complexity scores for a sweep config
+# Run the PPC experiment through to its summary
 [group('research')]
-complexity config profile="workflow/profiles/local" *extra="":
-    uv run snakemake complexity --configfile {{config}} --profile {{profile}} {{extra}}
+ppc cores="1":
+    uv run snakemake --snakefile workflow/Snakefile --cores {{cores}} \
+        results/ppc/ppc_result.json
 
-# Run full pipeline: inference + CV + complexity
+# Render the DAG to SVG (requires graphviz's `dot`)
 [group('research')]
-pipeline config profile="workflow/profiles/local" *extra="":
-    just sweep {{config}} {{profile}} {{extra}}
-    just cv {{config}} {{profile}} {{extra}}
-    just complexity {{config}} {{profile}} {{extra}}
+dag:
+    uv run snakemake --snakefile workflow/Snakefile --dag | dot -Tsvg > workflow_dag.svg
 
 # ----- Sync -----
 
