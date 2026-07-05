@@ -8,10 +8,21 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gen_params_utils import json_col, write_frame, axis_values
+from gen_params_utils import json_col, write_frame, axis_values, resolve_model, model_tag
 
 EXP = "beta_delta_sweep"
 WILDCARD_COLUMNS = ["model", "rep", "beta2", "delta"] # swept params listed last
+
+# Nonparametric-EB variant for this experiment (sampled | marginalized)
+MODEL_VARIANT = "sampled"
+if MODEL_VARIANT == "simple":
+    raise ValueError(
+        "MODEL_VARIANT == 'simple' is not valid for sweep experiments: "
+        "measure_complexity needs one nonparametric fit (sampled/marginalized) "
+        "paired with the simple reference."
+    )
+ACTIVE_MODEL = resolve_model(MODEL_VARIANT)
+ACTIVE_TAG = model_tag(MODEL_VARIANT)
 
 # ---- fixed, global (identical every row) -----------------------------------
 GRAPH_N = 256
@@ -30,10 +41,9 @@ DELTA_AXIS = {"start": -0.9, "step": 0.025, "count": 73}
 
 # ---- per-model spec ---------------------------------------------------------
 MODELS = {
-    "np": {
-        "model_config": "config/models/nonparametric_eb.yaml",
+    ACTIVE_TAG: {
+        "model_config": ACTIVE_MODEL["config_path"],
         "instance_params": {
-            "stan_file": "src/models/mixture_nonparametric_eb.stan",
             "K": 1,
             "sampling": {"iter_sampling": 300, "iter_warmup": 900, "chains": 1, "adapt_delta": 0.95},
         },

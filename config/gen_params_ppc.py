@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gen_params_utils import json_col, write_frame
+from gen_params_utils import json_col, write_frame, resolve_model
 
 EXP = "ppc"
 WILDCARD_COLUMNS = ["r"]
@@ -26,7 +26,13 @@ ASSIGNMENT_MODE = "block_flip"
 ASSIGNMENT_OMEGA = 0.05
 ASSIGNMENT_COMMUNITIES_FILE = "data/congress_communities.txt"
 
-NP_CONFIG = "config/models/nonparametric_eb.yaml"
+# Nonparametric-EB variant for this experiment (sampled | marginalized)
+MODEL_VARIANT = "marginalized"
+if MODEL_VARIANT == "simple":
+    raise ValueError("MODEL_VARIANT == 'simple' is not valid for the PPC experiment.")
+ACTIVE_MODEL = resolve_model(MODEL_VARIANT)
+
+NP_CONFIG = ACTIVE_MODEL["config_path"]
 SIMPLE_CONFIG = "config/models/simple.yaml"
 SAMPLING = {"iter_sampling": 500, "iter_warmup": 1500}
 

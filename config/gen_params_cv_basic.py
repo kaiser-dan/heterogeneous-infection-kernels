@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gen_params_utils import json_col, write_frame
+from gen_params_utils import json_col, write_frame, resolve_model
 
 EXP = "cv_basic"
 WILDCARD_COLUMNS = ["dgp_label", "K", "rep", "fold"]
@@ -25,8 +25,10 @@ GRAPH_AVG_DEGREE = 18
 GRAPH_EPSILON = 0.9
 GRAPH_DELTA = 0.0
 
-MODEL_CONFIG = "config/models/nonparametric_eb.yaml"
-STAN_FILE = "src/models/mixture_nonparametric_eb.stan"
+# Nonparametric-EB variant for this experiment (sampled | marginalized | simple)
+MODEL_VARIANT = "marginalized"
+ACTIVE_MODEL = resolve_model(MODEL_VARIANT)
+MODEL_CONFIG = ACTIVE_MODEL["config_path"]
 SAMPLING = {"iter_sampling": 300, "iter_warmup": 900, "chains": 1, "adapt_delta": 0.95}
 
 K_VALUES = [1, 2, 3, 4]
@@ -68,7 +70,6 @@ def build_frame() -> pd.DataFrame:
     df["graph_delta"] = GRAPH_DELTA
 
     df["model_config"] = MODEL_CONFIG
-    df["stan_file"] = STAN_FILE
     df["sampling_json"] = json_col(SAMPLING)
 
     df["kernels_json"] = df["dgp_label"].map(lambda lb: json_col(DGP_FAMILIES[lb]["kernels"]))

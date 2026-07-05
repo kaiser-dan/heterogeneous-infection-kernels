@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pandas as pd
+
+_ROOT = Path(__file__).resolve().parent.parent
+_SCRIPTS = _ROOT / "workflow" / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+
+from model_select import resolve_model, model_tag
 
 
 def json_col(obj) -> str:
