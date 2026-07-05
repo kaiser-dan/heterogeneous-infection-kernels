@@ -1,5 +1,6 @@
 model:
-  stan_file: src/models/mixture_nonparametric_eb.stan
+  stan_file: src/models/mixture_nonparametric_eb_sampled.stan
+  variant: sampled
   K: 1
 
   # model-specific hyperparameters
@@ -11,7 +12,7 @@ model:
 
   # sampling
   sampling:
-    iter_warmup: 500
-    iter_sampling: 500
+    iter_warmup: 900
+    iter_sampling: 300
     chains: 1
     adapt_delta: 0.95
