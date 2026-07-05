@@ -17,8 +17,8 @@ wildcard_constraints:
     fold = r"\d+",
 
 
-CV_FOLD_TEMPLATE = f"{RESULTS}/cv/{CV_EXPERIMENT}/{CV.paramspace.wildcard_pattern}.parquet"
-CV_FOLD_FILES = [f"{RESULTS}/cv/{CV_EXPERIMENT}/{p}.parquet" for p in CV.paramspace.instance_patterns]
+CV_FOLD_TEMPLATE = f"{RESULTS}/cv/{CV_EXPERIMENT}/{CV.paramspace.wildcard_pattern}_fold.parquet"
+CV_FOLD_FILES = [f"{RESULTS}/cv/{CV_EXPERIMENT}/{p}_fold.parquet" for p in CV.paramspace.instance_patterns]
 
 
 rule run_cv_task:
