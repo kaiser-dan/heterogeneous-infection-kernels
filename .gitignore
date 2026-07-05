@@ -22,7 +22,11 @@ results/
 logs/
 
 # Stan binaries
-src/models/*.exe
+src/models/*
+!src/models/*.stan
+*.hpp
+*.o
+*.d
 
 # Snakemake metadata/cache
 .snakemake/
