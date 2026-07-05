@@ -144,8 +144,15 @@ as overrides (no need to edit the YAML for per-run changes), and fits the named 
 
 | Config | Stan model | Key hyperparameters |
 |---|---|---|
-| `config/models/nonparametric_eb.yaml` | `mixture_nonparametric_eb.stan` | `K`, `logit_p_location`, `logit_p_scale`, `delta_concentration`, `sigma_scale`, `pi_concentration` |
+| `config/models/nonparametric_eb_sampled.yaml` | `mixture_nonparametric_eb_sampled.stan` | `K`, `logit_p_location`, `logit_p_scale`, `delta_concentration`, `sigma_scale`, `pi_concentration` |
+| `config/models/nonparametric_eb_marginalized.yaml` | `mixture_nonparametric_eb_marginalized.stan` | same, plus `G` (Gauss-Hermite quadrature order) |
 | `config/models/simple.yaml` | `mixture_simple.stan` | `K`, `logit_beta_location`, `logit_beta_scale`, `sigma_scale`, `pi_concentration` |
+
+Which nonparametric-EB variant an experiment uses is chosen per-experiment, not
+globally: each `config/gen_params_<exp>.py` generator sets its own `MODEL_VARIANT`
+(`sampled` \| `marginalized`) and resolves it via
+`workflow/scripts/model_select.py`. Output paths are tagged with the resolved
+variant (and `G` for `marginalized`).
 
 `logit_*_location` accepts `"empirical"` / `"empirical_floor"` / `"empirical_ceiling"` in
 addition to a fixed number. These resolve to data-derived logit-scale priors computed inside

@@ -10,6 +10,8 @@ import pandas as pd
 import yaml
 from cmdstanpy import CmdStanMCMC
 
+from .quadrature import gauss_hermite
+
 
 @dataclass
 class StanFitResult:
@@ -105,6 +107,14 @@ def _build_stan_data(stan_code, config_model, empirical_logits, K, M, N, kmax):
                 _resolve_logit_param(value, empirical_logits, default)
                 if logit_resolved else float(value)
             )
+
+    # inputs only for marginalized model, gated on the explicit `variant` key
+    if config_model.get("variant") == "marginalized":
+        G = int(config_model.get("G", 9))
+        gh_node, gh_weight = gauss_hermite(G)
+        stan_data["G"] = G
+        stan_data["gh_node"] = gh_node
+        stan_data["gh_weight"] = gh_weight
 
     return stan_data
 

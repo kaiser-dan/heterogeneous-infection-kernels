@@ -6,6 +6,7 @@ every other column is identical across all rows, including for `ppc_observed`.
 """
 
 from params_io import load_experiment
+from model_select import model_tag_from_config_path
 
 PARAMS_DIR = ROOT / "config" / "params"
 
@@ -13,13 +14,16 @@ PPC = load_experiment("ppc", PARAMS_DIR, filename_params="*")
 PPC_FIXED = PPC.frame.iloc[0].to_dict()
 NREP = int(PPC_FIXED["nrep"])
 
+# np_config is fixed (non-wildcard) for this experiment
+PPC_MODEL_TAG = model_tag_from_config_path(PPC_FIXED["np_config"], root=ROOT)
+
 wildcard_constraints:
     r = r"\d+",
 
 
 rule ppc_observed:
     output:
-        f"{RESULTS}/ppc/observed.npz"
+        f"{RESULTS}/ppc/{PPC_MODEL_TAG}/observed.npz"
     params:
         fixed=PPC_FIXED,
     script:
@@ -27,9 +31,9 @@ rule ppc_observed:
 
 rule ppc_null:
     input:
-        f"{RESULTS}/ppc/observed.npz"
+        f"{RESULTS}/ppc/{PPC_MODEL_TAG}/observed.npz"
     output:
-        f"{RESULTS}/ppc/nulls/{PPC.paramspace.wildcard_pattern}.npz"
+        f"{RESULTS}/ppc/{PPC_MODEL_TAG}/nulls/{PPC.paramspace.wildcard_pattern}.npz"
     params:
         fixed=PPC_FIXED,
     script:
@@ -37,11 +41,11 @@ rule ppc_null:
 
 rule ppc_summary:
     input:
-        observed=f"{RESULTS}/ppc/observed.npz",
-        nulls=[f"{RESULTS}/ppc/nulls/{p}.npz" for p in PPC.paramspace.instance_patterns],
+        observed=f"{RESULTS}/ppc/{PPC_MODEL_TAG}/observed.npz",
+        nulls=[f"{RESULTS}/ppc/{PPC_MODEL_TAG}/nulls/{p}.npz" for p in PPC.paramspace.instance_patterns],
     output:
-        result_json=f"{RESULTS}/ppc/ppc_result.json",
-        null_dist=f"{RESULTS}/ppc/ppc_null_distribution.npz",
+        result_json=f"{RESULTS}/ppc/{PPC_MODEL_TAG}/ppc_result.json",
+        null_dist=f"{RESULTS}/ppc/{PPC_MODEL_TAG}/ppc_null_distribution.npz",
     params:
         fixed=PPC_FIXED,
     script:

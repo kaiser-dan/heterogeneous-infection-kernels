@@ -20,12 +20,12 @@ include: "rules/sweep2d.smk"
 include: "rules/cv.smk"
 include: "rules/ppc.smk"
 
-# SWEEP_NAMES comes from rules/sweep2d, CV_EXPERIMENT from rules/cv.smk
+# SWEEP_NAMES comes from rules/sweep2d, CV_EXPERIMENT/CV_MODEL_TAG from rules/cv.smk, PPC_MODEL_TAG from rules/ppc.smk
 
 rule all:
     input:
         expand(f"{RESULTS}/complexity/{{sweep}}/complexity_per_dgp.parquet", sweep=SWEEP_NAMES),
         expand(f"{RESULTS}/complexity/{{sweep}}/complexity_by_setting.parquet", sweep=SWEEP_NAMES),
-        f"{RESULTS}/cv/{CV_EXPERIMENT}/_cv_curve.parquet",
-        f"{RESULTS}/cv/{CV_EXPERIMENT}/_cv_selection.parquet",
-        f"{RESULTS}/ppc/ppc_result.json",
+        f"{RESULTS}/cv/{CV_EXPERIMENT}/{CV_MODEL_TAG}/_cv_curve.parquet",
+        f"{RESULTS}/cv/{CV_EXPERIMENT}/{CV_MODEL_TAG}/_cv_selection.parquet",
+        f"{RESULTS}/ppc/{PPC_MODEL_TAG}/ppc_result.json",

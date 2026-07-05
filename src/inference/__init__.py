@@ -6,6 +6,7 @@ from .inference import (
     extract_kernel_summary,
     get_posterior_draws,
 )
+from .quadrature import gauss_hermite
 from .cv import (
     FoldResult,
     make_folds,
