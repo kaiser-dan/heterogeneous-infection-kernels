@@ -47,11 +47,13 @@ def main():
 
     rows, skipped = [], []
     for (x1, x2, rep), files in groups.items():
-        if "np" not in files or "simple" not in files:
-            skipped.append(((x1, x2, rep), f"need np and simple, have {sorted(files)}"))
+        non_simple = [k for k in files if k != "simple"]
+        if "simple" not in files or len(non_simple) != 1:
+            skipped.append(((x1, x2, rep), f"need exactly one non-simple model + simple, have {sorted(files)}"))
             continue
+        np_key = non_simple[0]
 
-        mu_np = load_draws(files["np"], "draws_mu")
+        mu_np = load_draws(files[np_key], "draws_mu")
         if mu_np is None:
             skipped.append(((x1, x2, rep), "np fit missing draws_mu"))
             continue
