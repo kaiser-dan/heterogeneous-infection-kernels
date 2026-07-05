@@ -33,19 +33,19 @@ K_VALUES = [1, 2, 3, 4]
 
 # ---- per-dgp_label spec ----------------------------------------------------
 DGP_FAMILIES = {
-    "two_simple_omega0.1": {
+    "twoSimpleOmega0.1": {
         "kernels": [{"type": "simple", "beta": 0.01}, {"type": "simple", "beta": 0.04}],
         "assignment": {"mode": "block_flip", "omega": 0.1},
     },
-    "one_complex": {
+    "oneComplex": {
         "kernels": [{"type": "nonparametric", "values_file": "data/np_complex_kernel.txt"}],
         "assignment": {},
     },
-    "two_complex_omega0.1": {
+    "twoComplexOmega0.1": {
         "kernels": [{"type": "power", "lam": 0.005, "alpha": 1.8}, {"type": "power", "lam": 0.15, "alpha": 0.4}],
         "assignment": {"mode": "block_flip", "omega": 0.1},
     },
-    "one_simple": {
+    "oneSimple": {
         "kernels": [{"type": "simple", "beta": 0.035}],
         "assignment": {},
     },
