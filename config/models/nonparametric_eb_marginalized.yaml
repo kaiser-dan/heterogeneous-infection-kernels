@@ -1,0 +1,21 @@
+model:
+  stan_file: src/models/mixture_nonparametric_eb_marginalized.stan
+  variant: marginalized
+  K: 1
+
+  # model-specific hyperparameters (same priors as the sampled variant)
+  logit_p_location: "empirical"
+  logit_p_scale: 2.0
+  delta_concentration: 1.0
+  sigma_scale: 1.0
+  pi_concentration: 1.0
+
+  # Gauss-Hermite quadrature order; see src/inference/quadrature.py.
+  G: 7
+
+  # sampling
+  sampling:
+    iter_warmup: 900
+    iter_sampling: 300
+    chains: 1
+    adapt_delta: 0.95
