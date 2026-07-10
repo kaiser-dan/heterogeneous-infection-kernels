@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 from scipy.special import logit
+from scipy.linalg import solve_triangular
 
 def effective_rank(covariance: np.ndarray, reg: float = 1e-6) -> float:
     """Effective rank of the *precision* of a covariance matrix.
@@ -82,7 +83,7 @@ def mahalanobis_complexity_logit(
 
     L = np.linalg.cholesky(sigma)
     diff = X - ref[None, :]
-    z = np.linalg.solve(L, diff.T)
+    z = solve_triangular(L, diff.T, lower=True)
     distances = np.sum(z ** 2, axis=0)
 
     erank = _erank_from_regularized(sigma)
