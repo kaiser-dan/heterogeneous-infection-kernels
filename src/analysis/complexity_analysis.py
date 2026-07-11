@@ -39,7 +39,7 @@ def compute_complexity_score(
         if mu_np_draws.shape[1] != 1:
             raise ValueError(
                 f"mu_np_draws has {mu_np_draws.shape[1]} components; "
-                "compute_complexity_scores expects a single component. "
+                "compute_complexity_score expects a single component. "
                 "Slice with mu_np_draws[:, k, :] before calling."
             )
         mu_np_draws = mu_np_draws[:, 0, :]
