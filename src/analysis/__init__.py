@@ -1,11 +1,11 @@
-from .complexity_measures import (
+from .utils import (
+    complexity_score_components,
     effective_rank,
-    mahalanobis_complexity_logit,
+    effective_ledoit_wolf_shrinkage,
+    simple_reference_logit,
 )
 from .complexity_analysis import (
-    posterior_mean_logit,
-    compute_complexity_scores,
-    simple_reference_logit,
+    compute_complexity_score,
     ppc_complexity,
     ppc_pvalue,
 )

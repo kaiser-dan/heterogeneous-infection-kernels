@@ -8,46 +8,31 @@ import numpy as np
 import pandas as pd
 from scipy.special import logit
 
-from .complexity_measures import (
-    mahalanobis_complexity_logit,
+from .utils import (
+    complexity_score_components,
+    simple_reference_logit,
 )
 
 
-def posterior_mean_logit(mu_draws: np.ndarray, eps: float = 1e-8) -> np.ndarray:
-    """Posterior mean on the logit scale from probability-scale draws.
- 
-    Parameters
-    ----------
-    mu_draws : (n_samples, kmax) array on the probability scale.
-    eps : float
-        Clip boundary before logit transform.
- 
-    Returns
-    -------
-    (kmax,) array on the logit scale.
-    """
-    return logit(np.clip(mu_draws, eps, 1.0 - eps)).mean(axis=0)
-
-
-def compute_complexity_scores(
+def compute_complexity_score(
     mu_np_draws: np.ndarray,
     ref: np.ndarray,
-    reg: float = 1e-6,
+    reg: float = 1e-2,
 ) -> dict:
-    """Compute Mahalanobis complexity score for a single-component kernel posterior.
+    """Compute complexity score for a single component kernel mode's posterior.
 
     Parameters
     ----------
     mu_np_draws : (n_draws, kmax) or (n_draws, 1, kmax) array on the *probability* scale
         Posterior draws from a single mixture component.
     ref : (kmax,) array on the *logit* scale
-        E.g., reference kernel from posterior_mean_logit.
+        Reference kernel.
     reg : float
-        Ridge regularization passed to mahalanobis_complexity_logit.
+        Ridge regularization passed to complexity_score.
 
     Returns
     -------
-    dict with keys: mean_distance, erank, complexity, n_draws, kmax
+    dict with keys: mean_distance, trace_p_sigma, complexity, n_draws, kmax
     """
     mu_np_draws = np.asarray(mu_np_draws, dtype=float)
     if mu_np_draws.ndim == 3:
@@ -69,46 +54,15 @@ def compute_complexity_scores(
     if ref.shape[0] != kmax:
         raise ValueError(f"ref length {ref.shape[0]} does not match kmax={kmax}")
 
-    distances, mean_dist, erank = mahalanobis_complexity_logit(mu_np_draws, ref, reg=reg)
+    _, mean_dist, trace_p_sigma = complexity_score_components(mu_np_draws, ref, reg=reg)
 
     return {
         "mean_distance": float(mean_dist),
-        "erank":         float(erank),
-        "complexity":    float(mean_dist / erank),
+        "trace_p_sigma": float(trace_p_sigma),
+        "complexity":    float((mean_dist - trace_p_sigma) / trace_p_sigma),
         "n_draws":       int(n_draws),
         "kmax":          int(kmax),
     }
-
-
-def simple_reference_logit(beta: float, kmax: int, eps: float = 1e-8) -> np.ndarray:
-    """Logit-scale simple contagion reference kernel.
-
-    mu_sc(nu) = 1 - (1 - beta)^nu, nu = 1..kmax, returned on the logit scale.
-    This is the best-fitting simple kernel reference once beta = beta_hat.
-    """
-    nu = np.arange(1, int(kmax) + 1, dtype=float)
-    curve = 1.0 - (1.0 - float(beta)) ** nu
-    return logit(np.clip(curve, eps, 1.0 - eps))
-
-
-def ppc_pvalue(d_obs: float, d_null, plus_one: bool = False) -> dict:
-    """Posterior-predictive p-value: fraction of null complexities >= observed.
-
-        plus_one=False : p = #{D_null >= D_obs} / R
-        plus_one=True  : p = (1 + #{D_null >= D_obs}) / (R+1)  (avoids p=0; the
-                         standard Monte-Carlo estimator, recommended for finite R)
-
-    NaN replicates (failed fits) are dropped; n_null reports the effective R.
-    """
-    d_null = np.asarray(d_null, dtype=float).ravel()
-    d_null = d_null[np.isfinite(d_null)]
-    R = int(d_null.size)
-    if R == 0:
-        return {"p_value": float("nan"), "n_null": 0, "n_ge": 0, "d_obs": float(d_obs)}
-    
-    n_ge = int(np.count_nonzero(d_null >= d_obs))
-    p = (1 + n_ge) / (R + 1) if plus_one else n_ge / R
-    return {"p_value": float(p), "n_null": R, "n_ge": n_ge, "d_obs": float(d_obs)}
 
 
 def ppc_complexity(
@@ -140,7 +94,7 @@ def ppc_complexity(
     kmax = obs.shape[1]
     ref = simple_reference_logit(beta, kmax, eps=eps)
 
-    d_obs = compute_complexity_scores(obs, ref, reg=reg)["complexity"]
+    d_obs = compute_complexity_score(obs, ref, reg=reg)["complexity"]
 
     d_null = []
     for nd in null_mu_draws:
@@ -148,10 +102,30 @@ def ppc_complexity(
         if nd.ndim == 3:
             nd = nd[:, 0, :]
         try:
-            d_null.append(compute_complexity_scores(nd, ref, reg=reg)["complexity"])
+            d_null.append(compute_complexity_score(nd, ref, reg=reg)["complexity"])
         except Exception:
             d_null.append(np.nan)
 
     out = ppc_pvalue(d_obs, d_null, plus_one=plus_one)
     out["d_null"] = np.asarray(d_null, dtype=float)
     return out
+
+
+def ppc_pvalue(d_obs: float, d_null, plus_one: bool = False) -> dict:
+    """Posterior-predictive p-value: fraction of null complexities >= observed.
+
+        plus_one=False : p = #{D_null >= D_obs} / R
+        plus_one=True  : p = (1 + #{D_null >= D_obs}) / (R+1)  (avoids p=0; the
+                         standard Monte-Carlo estimator, recommended for finite R)
+
+    NaN replicates (failed fits) are dropped; n_null reports the effective R.
+    """
+    d_null = np.asarray(d_null, dtype=float).ravel()
+    d_null = d_null[np.isfinite(d_null)]
+    R = int(d_null.size)
+    if R == 0:
+        return {"p_value": float("nan"), "n_null": 0, "n_ge": 0, "d_obs": float(d_obs)}
+    
+    n_ge = int(np.count_nonzero(d_null >= d_obs))
+    p = (1 + n_ge) / (R + 1) if plus_one else n_ge / R
+    return {"p_value": float(p), "n_null": R, "n_ge": n_ge, "d_obs": float(d_obs)}
