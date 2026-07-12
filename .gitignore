@@ -1,32 +1,35 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
 
-# Data
-data/
-!data/.gitkeep
+# Virtual environments
+.venv
+
+# Notes
+notes/
+
 # Results
 results/
-_site/
-.quarto/
-.snakemake/
-__pycache__/
-*.pyc
 
-# Local Debug Scripts
-debug_*.py
-inspect_parquet.py
+# VS Code settings
+.vscode
 
-# Editors
-.vscode/
-.DS_Store
+# SLURM logs
+logs/
 
-# Environments
-.venv/
-.gemini/
-
-# Stan Build Artifacts
+# Stan binaries
 src/models/*
 !src/models/*.stan
-!src/models/*.py
-!src/models/.gitkeep
 *.hpp
 *.o
 *.d
+
+# Snakemake metadata/cache
+.snakemake/
+
+# Scratch dir for `just check-params`
+.tmp_check_params/

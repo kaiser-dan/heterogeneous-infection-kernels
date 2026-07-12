@@ -1,0 +1,31 @@
+"""Top-level Snakemake entry point. Orchestration layer only."""
+
+import sys
+from pathlib import Path
+
+configfile: "config/config.yaml"
+
+RESULTS = config.get("results_root", "results")
+
+WORKFLOW = Path(workflow.basedir)
+ROOT = WORKFLOW.parent
+SCRIPTS = WORKFLOW / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+# DGP helpers shared by every rule file below
+from dgp_shapes import build_sweep_sbm_dgp, build_cv_dgp, cv_kernel_files
+
+include: "rules/sweep2d.smk"
+include: "rules/cv.smk"
+include: "rules/ppc.smk"
+
+# SWEEP_NAMES comes from rules/sweep2d, CV_EXPERIMENT from rules/cv.smk
+
+rule all:
+    input:
+        expand(f"{RESULTS}/complexity/{{sweep}}/complexity_per_dgp.parquet", sweep=SWEEP_NAMES),
+        expand(f"{RESULTS}/complexity/{{sweep}}/complexity_by_setting.parquet", sweep=SWEEP_NAMES),
+        f"{RESULTS}/cv/{CV_EXPERIMENT}/_cv_curve.parquet",
+        f"{RESULTS}/cv/{CV_EXPERIMENT}/_cv_selection.parquet",
+        f"{RESULTS}/ppc/ppc_result.json",

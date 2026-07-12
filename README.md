@@ -1,319 +1,219 @@
-# Heterogeneous infection kernels
+# het-ker
 
-Research project for HETKER.
+Simulation and inference for **heterogeneous contagion kernels**.
 
-The repository contains the original scientific analyses developed by the Authors (see below) for the paper
+Two ways to use this repo:
 
-- **(In preparation)** LastName, FirstName. Year. [Paper title](arxiv.org).
+- **As a library** (`src/`) — simulate a DGP and fit a model in a notebook or script, no
+  Snakemake required.
+- **As a pipeline** (`workflow/`, driven by `config/`) — run the full set of experiments
+  (parameter sweeps, cross-validation, posterior-predictive check) via Snakemake, with results
+  cached and resumed automatically.
 
-If you use this repository in any fashion in your own work, please cite our work according to the `CITATION.cff`.
+## Repository layout
 
-# Contents
+| Path | Role |
+|---|---|
+| `src/simulation/` | Build a graph, a bank of kernels, assign kernels to nodes, run the contagion process, extract activation counts |
+| `src/inference/` | Fit the Stan mixture model (`fit_stan`) and run cross-validation folds (`run_cv`) |
+| `src/analysis/` | Complexity scoring (Mahalanobis distance in logit space) and posterior-predictive p-values |
+| `src/models/` | Stan model source (`.stan`) and compiled binaries |
+| `config/config.yaml` | Snakemake config file (currently just `results_root`) |
+| `config/gen_params_*.py` | One generator per experiment; each defines that experiment's full parameter grid |
+| `config/gen_all_params.py` | Runs every generator, writing `config/params/*.tsv` |
+| `config/params/*.tsv` | Committed, generated parameter frames — the actual experiment definitions Snakemake reads |
+| `config/models/*.yaml` | Default Stan model hyperparameters (`nonparametric_eb.yaml`, `simple.yaml`) |
+| `workflow/Snakefile` | Top-level orchestration: includes the rule files, defines `rule all` |
+| `workflow/rules/*.smk` | Rule definitions for the three experiment families (sweeps, CV, PPC) |
+| `workflow/scripts/` | The `script:` bodies each rule runs, plus shared helpers (`params_io.py`, `dgp_shapes.py`) |
+| `workflow/dgp.py` | `simulate_MN`: the single function mapping a DGP dict to activation counts `(M, N)` |
+| `bin/compile_models.py` | Compiles every Stan model in `src/models/` |
+| `data/` | Static inputs: an example edgelist graph, community labels, a nonparametric kernel |
+| `results/` | Pipeline outputs |
 
-- [Project Template](#project-template)
-- [Contents](#contents)
-- [Getting Started](#getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Installing](#installing)
-  - [Quick Start](#quick-start)
-- [Usage](#usage)
-  - [Reproducing experiments](#reproducing-experiments)
-  - [Applying to new data](#applying-to-new-data)
-- [Documentation](#documentation)
-- [Tests](#tests)
-- [Other Information](#other-information)
-  - [Built With](#built-with)
-  - [Versioning](#versioning)
-  - [Authors](#authors)
-  - [License](#license)
-  - [Acknowledgments](#acknowledgments)
-
-# Getting Started
-
-The code base for this project is written in Python with package management handled with [`uv`](https://docs.astral.sh/uv/).
-
-These instructions will give you a copy of the project up and running on
-your local machine for development, testing, and analysis purposes.
-
-## Prerequisites
-
-A compatible Python install is needed to begin - the package management is handled by [`uv`](https://docs.astral.sh/uv/) as described below.
-
-See the [`uv` installation instructions](https://docs.astral.sh/uv/getting-started/installation/) and make sure you have a working installation on your system before proceeding.
-
-Optionally, if you prefer command runners in the GNUMake style, we've included a simple [`justfile`](https://github.com/casey/just).
-
-## Installing
-
-To (locally) reproduce this project, do the following:
-
-1. Clone this repository. Notice that raw data are typically not included in the git-history and may need to be downloaded independently - see [Reproducing Experiments](#reproducing-experiments) for more information.
-2. Create a virtual environment with the necessary packages. Using `uv`, this can be done with the single command run from the root directory:
+## Installation
 
 ```bash
-just install
-# or
-uv sync --all-extras --all-groups
+uv sync --all-extras --all-groups   # full install (dev extras included)
+uv sync --no-dev                    # minimal install
 ```
 
-3. (Optional) If you want to reproduce the experiments using our original [`snakemake`](https://snakemake.readthedocs.io/en/stable/) workflow, install additional dependencies with the command:
+Stan models are compiled on demand by `cmdstanpy`, but to precompile all of them:
 
 ```bash
-just install
+just compile          # == uv run bin/compile_models.py
 ```
 
-This will install all necessary packages and place them into a virtual environment, by default located at `./.venv/`.
-To use the install package, either prefix all commands with `uv run` (preferred) - e.g., `uv run python --version` - or first activate the environment with `source .venv/bin/activate` (if on Unix-based system, `source .venv/Scripts/activate` if on Windows).
+CmdStan itself must already be installed (`uv run python -c "import cmdstanpy; cmdstanpy.install_cmdstan()"`
+once, if you've never used CmdStanPy before).
 
-## Quick Start
+## Using `src/` directly
 
-After installation, the fastest way to confirm the workflow is set up correctly is to run the synthetic smoke-test config included in this branch.
+Nothing in `src/` depends on Snakemake; `src/` is a plain importable package, so from the repo root 
+(or with the repo root on `sys.path`, e.g. run `uv run jupyter` from there) you can import it straight into 
+a notebook:
 
-Inspect the DAG first:
+```python
+from src.simulation import (
+    build_graph, build_kernel_bank, assign_kernels,
+    build_initial_state, heterogeneous_contagion_process, get_activations,
+)
+from src.inference import fit_stan, get_posterior_draws
+from src.analysis import compute_complexity_scores, simple_reference_logit
+
+# 1. Build a graph and a bank of per-node kernels
+adj, kmax = build_graph({"type": "sbm", "params": {"n": 256, "avg_degree": 18, "epsilon": 0.9}}, seed=0)
+bank = build_kernel_bank(
+    [{"type": "simple", "beta": 0.01}, {"type": "simple", "beta": 0.05}], kmax=kmax,
+)
+labels = assign_kernels(adj.shape[0], {"mode": "block_flip", "omega": 0.1}, n_kernels=2, seed=0)
+c = np.stack([bank[labels[i]] for i in range(adj.shape[0])])
+
+# 2. Run the contagion process and collect activation counts
+x0 = build_initial_state(adj.shape[0], initial_infected=0.125, seed=0)
+x = heterogeneous_contagion_process(adj, gamma=0.1, c=c, x0=x0, tmax=1000, random_seed=0)
+M, N = get_activations(x.T, adj, kmax)
+
+# 3. Fit the nonparametric mixture model and score its complexity
+result = fit_stan(M, N, "config/models/nonparametric_eb.yaml", {"K": 1})
+mu_draws = get_posterior_draws(result, "mu")[:, 0, :]          # (S, kmax), K=1
+ref = simple_reference_logit(beta=0.01, kmax=kmax)             # simple-contagion reference
+scores = compute_complexity_scores(mu_draws, ref)              # {complexity, mean_distance, erank, ...}
+```
+
+`workflow/dgp.py::simulate_MN` wraps steps 1–2 above into one call given a DGP dict (see next
+section). Every Snakemake script uses it, and it's just as usable standalone:
+
+```python
+from workflow.dgp import simulate_MN
+
+M, N = simulate_MN({
+    "graph": {"type": "sbm", "params": {"n": 256, "avg_degree": 18, "epsilon": 0.9, "delta": 0.0}},
+    "gamma": 0.1, "rho": 0.125, "tmax": 1000, "rep": 0,
+    "kernels": [{"type": "simple", "beta": 0.01}, {"type": "simple", "beta": 0.05}],
+    "assignment": {"mode": "block_flip", "omega": 0.1},
+})
+```
+
+Every randomness source inside `simulate_MN` (graph draw, kernel-label assignment, initial
+state, contagion trajectory) is seeded from `dgp["rep"]` for reproducibility.
+
+For cross-validation on data you already have, `src.inference.cv.run_cv(M, N, n_folds, config_path)`
+runs all folds and returns one `FoldResult` (fold-level and per-node held-out log-predictive
+density) per fold; `run_one_fold` runs a single fold, which is what the pipeline parallelizes over.
+
+### DGP schema reference
+
+A DGP dict has four top-level keys: `graph`, `kernels`, `assignment` (only meaningful when
+`len(kernels) > 1`), and the scalars `gamma`, `rho`, `tmax`, `rep`.
+
+**`graph`** — `{"type": ..., "params": {...}}`:
+
+| `type` | Required params | Notes |
+|---|---|---|
+| `sbm` | `n`, `avg_degree`, `epsilon`, `B` | B-block SBM. `epsilon` ∈ (0,1): higher = stronger community structure. `B` (default 2). `delta` (default 0): asymmetry between block densities, only supported for `B=2`. |
+| `er` | `n`, one of `avg_degree` or `p` | Erdős–Rényi. |
+| `zkc` | _(none)_ | Zachary's karate club (fixed graph, 34 nodes). |
+| `edgelist` | `filename` | Loads an undirected, unweighted edgelist from disk. |
+
+**`kernels`** — a list of `{"type": ..., ...}` dicts, one per kernel mode. A one-element list
+means homogeneous contagion (`assignment` is then ignored):
+
+| `type` | Required params | Notes |
+|---|---|---|
+| `simple` | `beta` | Independent cascade: c(ν) = 1 − (1−β)^ν |
+| `hill` | `p`, `h`, `tau` | Sigmoidal saturation: c(ν) = pνʰ / (τʰ + νʰ) |
+| `power` | `lam`, `alpha` | c(ν) = 1 − exp(−λν^α); sublinear for α<1, superlinear for α>1 |
+| `nonparametric` | `values` (or `values_file` in `workflow/dgp.py`) | Explicit list of probabilities, one per exposure level |
+
+**`assignment`** — `{"mode": ..., ...}`, ignored unless `len(kernels) > 1`:
+
+| `mode` | Required params | Notes |
+|---|---|---|
+| `block_flip` | `omega`, `communities` (optional) | Assigns kernels by graph block (or `communities` vector), then flips each node to another kernel with probability `omega` (uniform over the others). `omega = 0` is perfect alignment; `omega = 1/n_kernels` is uniform random. |
+| `iid` | `probs` (optional) | Each node draws a kernel index independently; uniform if `probs` omitted. |
+| `explicit` | `labels` | An `(n,)` integer array of kernel indices, passed directly. |
+
+**Scalars**: `gamma` (recovery rate), `rho` (initial infected fraction or count), `tmax`
+(simulation steps), `rep` (seed — deterministic given (dgp params, rep)).
+
+### Model configs
+
+`fit_stan(M, N, config_path, instance_params)` reads a YAML config, applies `instance_params`
+as overrides (no need to edit the YAML for per-run changes), and fits the named Stan model:
+
+| Config | Stan model | Key hyperparameters |
+|---|---|---|
+| `config/models/nonparametric_eb.yaml` | `mixture_nonparametric_eb.stan` | `K`, `logit_p_location`, `logit_p_scale`, `delta_concentration`, `sigma_scale`, `pi_concentration` |
+| `config/models/simple.yaml` | `mixture_simple.stan` | `K`, `logit_beta_location`, `logit_beta_scale`, `sigma_scale`, `pi_concentration` |
+
+`logit_*_location` accepts `"empirical"` / `"empirical_floor"` / `"empirical_ceiling"` in
+addition to a fixed number. These resolve to data-derived logit-scale priors computed inside
+`fit_stan` from the raw `(M, N)` exposure-level rates.
+
+## Running the pipeline
+
+The pipeline is three independent experiment families, each with its own rule file:
+
+| Experiment | Rules (`workflow/rules/`) | What it produces |
+|---|---|---|
+| `beta_delta_sweep`, `epsilon_omega_sweep` | `sweep2d.smk`: `fit_model` → `measure_complexity` | Per-DGP and per-setting complexity scores across a 2D grid |
+| `cv_basic` | `cv.smk`: `run_cv_task` → `aggregate_cv` | Cross-validated log-predictive density and 1-SE-rule model selection across candidate `K` |
+| `ppc` | `ppc.smk`: `ppc_observed` → `ppc_null` (×N) → `ppc_summary` | A posterior-predictive p-value for excess complexity, against a simple-contagion null |
+
+### How an experiment's parameters flow to a job
+
+Each experiment's full parameter grid is defined once, in a `config/gen_params_<name>.py`
+generator and committed as `config/params/<name>.tsv` (plus a `<name>.wildcard_columns.json`
+naming that frame's swept columns). Regenerate them with:
 
 ```bash
-uv run snakemake -n inference \
-  --configfile configs/example_synthetic_workflow.yaml \
-  --profile workflow/profiles/local
+just params          # uv run python config/gen_all_params.py config/params
+just check-params    # fails if the committed frames are stale relative to the generators
 ```
 
-Then run the example end-to-end:
+`workflow/scripts/params_io.py::load_experiment` loads a frame into a `snakemake.utils.Paramspace`
+plus an `ExperimentFrame` that resolves a job's wildcards back to its one full row (fixed + swept
+columns merged). `workflow/scripts/dgp_shapes.py` then turns that row into a DGP dict
+(`build_sweep_sbm_dgp`, `build_cv_dgp`) for `simulate_MN`.
 
-```bash
-just sweep configs/example_synthetic_workflow.yaml
+Rule output paths are literally the `Paramspace` instance patterns, so e.g. one `beta_delta_sweep`
+fit lands at `results/fits/beta_delta_sweep/model~np_rep~0_beta2~0.03_delta~-0.575.npz`, and one
+CV fold at `results/cv/cv_basic/dgp_label~one_simple_K~1_rep~3_fold~2.parquet`.
+
+### Adding or extending an experiment
+
+1. Write (or extend) `config/gen_params_<name>.py`: it needs `EXP` (the name), `WILDCARD_COLUMNS`
+   (the swept columns), and a `build_frame()` returning the full grid as a DataFrame — fixed
+   columns identical on every row, swept columns varying, any nested structure (kernel lists,
+   sampling configs) JSON-encoded via `gen_params_utils.json_col` into a `*_json` column.
+2. Register the generator in `config/gen_all_params.py`'s `GENERATORS` list, then run `just params`.
+3. If the row needs a new shape of DGP dict, add a builder to `workflow/scripts/dgp_shapes.py`.
+4. Add or extend a `workflow/rules/*.smk` file: call `params_io.load_experiment(...)` to get an
+   `ExperimentFrame`, then write rules whose `params:` pull from `EF.row(wc)` and whose
+   `script:` does the actual simulate/fit/score work.
+5. `include:` the new rule file from `workflow/Snakefile` and add its final output(s) to `rule all`.
+
+### Output layout
+
+```
+results/
+  fits/<sweep>/
+    model~<model>_rep~<rep>_<axis1>~<v1>_<axis2>~<v2>.npz   # posterior draws (save_vars)
+  complexity/<sweep>/
+    complexity_per_dgp.parquet       # one row per (axis1, axis2, rep)
+    complexity_by_setting.parquet    # averaged over reps per (axis1, axis2)
+  cv/cv_basic/
+    dgp_label~<label>_K~<k>_rep~<rep>_fold~<fold>.parquet   # one row per held-out node
+    _cv_curve.parquet       # mean/SE lppd per (dgp_label, rep, K), pooled across folds
+    _cv_selection.parquet   # 1-SE-rule selected K per (dgp_label, rep)
+  ppc/
+    observed.npz, nulls/r~<r>.npz, ppc_result.json, ppc_null_distribution.npz
 ```
 
-# Usage
-
-## Reproducing experiments
-
-### Data Sources
-
-We work with two primary data sources: 
-
-- **Raw Data Downloads**: Place raw data in `data/raw/`. 
-
-  - The data processing for the Twitter data was adapted from code provided by Bjarke Monstead for the original paper. DOI: 10.1371/journal.pone.0184148. **Note**: We filter for "active users" who have performed at least one retweet in our logs to ensure a valid contagion signal.
-  - The data processing code for Operation Outbreak was adapted from code by Nate Blanchard.
-
-- **Operation Outbreak**: Contact histories and infection logs from simulated outbreaks. Data is subset by simulation ID. The ten largest simulations are kept (e.g., sim 168 with 1200 participants).
-  - The raw histories file is processed to extract contact networks and infection events.
-  - Data produces: 
-   - `sim_{id}_exposures.parquet`: Exposure counts for individuals.
-   - `sim_{id}_edges.parquet`: Network topology.
-   - `sim_{id}_M.parquet` / `sim_{id}_N.parquet`: Discretized incidence and survival matrices for Stan.
-
-- **Twitter**: Retweet cascades and follower networks.
-    - Partitioned by **intervention** (hashtag).
-    - Matrices produced:
-      - `A_matrix.parquet`: Exposure counts. $A^k_{i,j}$ = exposures of user $i$ to intervention $k$ via bot $j$.
-      - `B_vector.parquet`: Adoption labels. $B^k_i = 1$ if user $i$ adopted.
-      - `M_<k/kappa>.parquet`: Incidence matrix. $M^k_{i,m} = 1$ if adoption occurred at exposure level $m$.
-      - `N_<k/kappa>.parquet`: Survival matrix. $N^k_{i,m} = 1$ if user survived exposure level $m$.
-
-### Generating Processed Data
-
-If you have the raw data files in `data/`, you can regenerate all processed matrices using the following commands:
-
-- **Update data**: Only regenerates missing or modified files.
-  ```bash
-  just data
-  ```
-
-- **Full regeneration**: Deletes all processed data and rebuilds everything from scratch.
-  ```bash
-  just data-total
-  ```
-
-### Running the Snakemake Workflow
-
-The project workflow is driven by the root [Snakefile](Snakefile). In practice you will usually use one of two entrypoints:
-
-- `just sweep <config>`: the standard local wrapper for inference runs
-- `uv run snakemake <target> --configfile <config> --profile <profile>`: the raw Snakemake command when you want full control
-
-The `justfile` recipes are intentionally thin wrappers around the underlying Snakemake commands:
-
-```bash
-# Process the default raw-data targets declared in rule all
-just data
-
-# Equivalent raw Snakemake command
-uv run snakemake -c1
-
-# Run the inference target for a config with the local profile
-just sweep configs/research_sweep_twitter.yaml
-
-# Equivalent raw Snakemake command
-uv run snakemake inference --configfile configs/research_sweep_twitter.yaml --profile workflow/profiles/local
-```
-
-The main Snakemake targets in this branch are:
-
-- `all`: prepares the default processed-data targets from raw data
-- `inference`: runs the configured preprocessing and inference outputs for a config file
-
-The bundled profiles are:
-
-- `workflow/profiles/local`: local execution on the current machine
-- `workflow/profiles/slurm`: cluster execution through SLURM
-
-Use the local profile for development and smoke tests. Use the SLURM profile when you want Snakemake to submit rules as cluster jobs.
-
-The profile files live at:
-
-- [workflow/profiles/local/config.yaml](workflow/profiles/local/config.yaml)
-- [workflow/profiles/slurm/config.yaml](workflow/profiles/slurm/config.yaml)
-
-The current defaults are:
-
-- `local`: `executor: local`, `jobs: 4`, default `runtime: 1h`, default `mem_mb: 4000`
-- `slurm`: `executor: slurm`, `jobs: 20`, default account `pi-cdanfort`, default partition `week`, default `runtime: 4h`, default `mem_mb: 8000`
-- `slurm` also overrides `run_inference` to `runtime: 24h` and `mem_mb: 16000`
-
-Examples:
-
-```bash
-# Local execution on the current machine
-just sweep configs/example_synthetic_workflow.yaml
-uv run snakemake inference \
-  --configfile configs/example_synthetic_workflow.yaml \
-  --profile workflow/profiles/local
-
-# SLURM submission using the cluster profile
-just sweep configs/example_synthetic_workflow.yaml workflow/profiles/slurm
-uv run snakemake inference \
-  --configfile configs/example_synthetic_workflow.yaml \
-  --profile workflow/profiles/slurm
-```
-
-If you need different defaults for your cluster, edit the profile YAML directly rather than changing the workflow rules.
-
-### How the Config Files Work
-
-Workflow configs are YAML files under `configs/`. The important top-level fields are:
-
-- `name`: result namespace. Outputs are written under `results/<name>/...`
-- `source`: one of `twitter`, `oo`, or `synthetic`
-- `synthetic`, `twitter`, or `oo`: source-specific data-generation or data-selection settings
-- `model`: default model and sampling settings passed into inference
-- `sweep`: cartesian product of inference settings. Each row becomes one inference output directory
-- `sim_sweep`: synthetic-only cartesian product over dotted keys under `synthetic`. Each row becomes one generated synthetic dataset before inference
-
-For synthetic workflows, the separation is:
-
-- `synthetic`: how to generate one dataset
-- `sim_sweep`: optional expansion into many synthetic datasets
-- `sweep`: which model settings to fit to each generated dataset
-
-### Synthetic Example
-
-The file [configs/example_synthetic_workflow.yaml](configs/example_synthetic_workflow.yaml) is a minimal synthetic smoke-test config. It does three things:
-
-1. generates one small SBM-based synthetic dataset
-2. builds the synthetic summary directory that inference expects
-3. fits one simple-contagion Stan model to that dataset
-
-Inspect the DAG first:
-
-```bash
-uv run snakemake -n inference \
-  --configfile configs/example_synthetic_workflow.yaml \
-  --profile workflow/profiles/local
-```
-
-Run it locally through the `just` wrapper:
-
-```bash
-just sweep configs/example_synthetic_workflow.yaml
-```
-
-Run the equivalent raw Snakemake command directly:
-
-```bash
-uv run snakemake inference \
-  --configfile configs/example_synthetic_workflow.yaml \
-  --profile workflow/profiles/local
-```
-
-That example writes:
-
-- processed synthetic data to `data/processed/synthetic/readme_synthetic_smoke/`
-- the inference-ready summary to `data/summaries/synthetic/readme_synthetic_smoke.parquet/`
-- posterior outputs to `results/example_synthetic_workflow/synthetic/readme_synthetic_smoke/base/`
-
-Larger research runs use the same command shape with a different config, for example:
-
-```bash
-just sweep configs/research_sweep_twitter.yaml
-just sweep configs/research_sweep_oo.yaml
-just sweep configs/research_sim_sweep_synthetic.yaml
-```
-
-Results (posterior samples and summaries) are saved to the `results/` directory.
-
-Raw data are not included in the repository; place them under `data/` if you have access.
-
-## Applying to new data
-
-1. Prepare your data in a compatible format (see `src/data_processing/`).
-2. Define a model sweep in a YAML configuration file.
-3. Run the sweep using `just sweep your_config.yaml`.
-
-# Documentation
-
-This repository does not maintain extensive independent documentation for its source code. Functions have docstrings where needed, and the workflow/config examples in this README are the main user-facing guide.
-
-# Tests
-
-All unit tests are written with [pytest](docs.pytest.org).
-
-Tests can be run directly with the commands:
-
-```bash
-just test
-# or
-uv run pytest
-```
-
-# Other Information
-
-## Built With
-
-### Repository and Version Control
-
-- [ChooseALicense](https://choosealicense.com/) - Used to choose the license.
-- [Commitizen]() - Used to maintain Conventional Commit standard.
-
-### Source code
-
-- [BeautifulSoup]() - Used for retrieving arXiv tags.
-
-### Research analysis
-
-- [Snakemake]() - Used for organizing and running research pipeline.
-- [Quarto]() - Used for writing analyses documents.
-
-## Versioning
-
-We use [Semantic Versioning](http://semver.org/) for versioning. For the versions available, see the [tags on this repository](https://github.com/kaiser-dan/heterogeneous-infection-kernels/tags) and our [published releases](https://github.com/kaiser-dan/heterogeneous-infection-kernels/releases).
-
-> This repository is primarily intended to promote reproducibility and extensibility of a specific set of scientific analyses.
-> There will likely be very few released versions, and the current release *should always be preferred if you want to apply the methodology to your own data*!
-
-## Authors
-
-All correspondence should be directed to [CORRESPONDING AUTHOR](mailto:email@iu.edu).
-
-- AUTHOR
-- AUTHOR
-- AUTHOR
-
-## License
-
-This project is licensed under the [MIT License](LICENSE.md) Creative Commons License - see the [LICENSE](LICENSE.md) file for details.
-
-## Acknowledgments
-
-- **Billie Thompson** - *Provided original README* - [PurpleBooth](https://github.com/PurpleBooth)
-- **George Datseris** - *Published workshop on scientific code; inspired organization for reproducibility* - [GoodScientificCodeWorkshop](https://github.com/JuliaDynamics/GoodScientificCodeWorkshop)
+## Gotchas
+
+- **The DGP schema is shared** between the `gen_params_*.py` generators, `dgp_shapes.py`, and
+  `workflow/dgp.py::simulate_MN`. If you rename or add a DGP field, update all three.
+- `rep` is the random seed throughout: the same `rep` yields the same graph, kernel labels, and
+  contagion trajectory regardless of which model or fold triggers the simulation.
