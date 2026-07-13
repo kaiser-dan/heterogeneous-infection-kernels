@@ -1,7 +1,0 @@
-executor: local
-jobs: 4
-printshellcmds: true
-
-default-resources:
-  runtime: "1h"
-  mem_mb: 4000
