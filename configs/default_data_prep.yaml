@@ -1,9 +1,0 @@
-name: "base_data_prep"
-source: "twitter"
-backboning_method: "threshold"
-backboning_params:
-  threshold: 0.0
-recency:
-  enabled: false
-  window_hours: 24
-kmax: 20
