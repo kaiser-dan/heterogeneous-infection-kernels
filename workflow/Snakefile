@@ -14,13 +14,19 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 # DGP helpers shared by every rule file below
-from dgp_shapes import build_sweep_sbm_dgp, build_cv_dgp, cv_kernel_files
+from dgp_shapes import (
+    build_sweep_sbm_dgp, 
+    build_sweep_edgelist_dgp,
+    build_cv_dgp, 
+    cv_kernel_files
+)
 
-include: "rules/sweep2d.smk"
+include: "rules/sweep.smk"
 include: "rules/cv.smk"
 include: "rules/ppc.smk"
 
-# SWEEP_NAMES comes from rules/sweep2d, CV_EXPERIMENT from rules/cv.smk
+# SWEEP_NAMES comes from rules/sweep
+# CV_EXPERIMENT comes from rules/cv.smk
 
 rule all:
     input:

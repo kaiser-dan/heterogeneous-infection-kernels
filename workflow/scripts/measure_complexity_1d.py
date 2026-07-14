@@ -1,9 +1,9 @@
 """Snakemake script: collect a sweep's fits, compute kernel complexity per DGP
-(rule measure_complexity). 
+(rule measure_complexity_1d). 
 
-Writes (with real swept names (x1, x2) restored):
-    complexity_per_dgp.parquet     one row per (x1, x2, rep)
-    complexity_by_setting.parquet  averaged over reps per (x1, x2)
+Writes (with real swept names x restored):
+    complexity_per_dgp.parquet     one row per (x, rep)
+    complexity_by_setting.parquet  averaged over reps per (x)
 """
 
 import sys
@@ -62,13 +62,12 @@ def prepare_cell(files):
 
 
 def main():
-    combos = snakemake.params.combos # list of {file, model, x1, x2, rep}
-    axis1_name = snakemake.params.axis1_name
-    axis2_name = snakemake.params.axis2_name
+    combos = snakemake.params.combos # list of {file, model, x, rep}
+    axis_name = snakemake.params.axis_name
 
     groups: dict[tuple, dict] = {}
     for c in combos:
-        key = (c["x1"], c["x2"], c["rep"])
+        key = (c["x"], c["rep"])
         groups.setdefault(key, {})[c["model"]] = c["file"] # collect np and simple fits
 
     # pass 1 to compute effective LW shrinkage per cell
@@ -119,10 +118,10 @@ def main():
             skipped.append((key, f"complexity failed: {e}"))
             continue
 
-        x1, x2, rep = key
+        x, rep = key
         shrinkage, reg_eff = lw_by_key[key]
         rows.append({
-            axis1_name: x1, axis2_name: x2, "rep": rep,
+            axis_name: x, "rep": rep,
             "reg": global_reg,
             "lw_shrinkage": shrinkage, "lw_reg_eff": reg_eff,
             **scores,
@@ -141,7 +140,7 @@ def main():
         print(f"  (first few skips: {skipped[:3]})")
 
     by_setting = (
-        per_dgp.groupby([axis1_name, axis2_name], as_index=False)
+        per_dgp.groupby([axis_name], as_index=False)
         .agg(
             complexity_mean=("complexity", "mean"),
             complexity_std=("complexity", "std"),

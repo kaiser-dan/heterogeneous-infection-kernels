@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
+import numpy as np
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 def build_sweep_sbm_dgp(row: dict) -> dict:
     """Full dgp dict for a 2-block sbm SBM, given one resolved row 
@@ -26,6 +29,27 @@ def build_sweep_sbm_dgp(row: dict) -> dict:
             {"type": "simple", "beta": row["beta2"]},
         ],
         "assignment": {"mode": "block_flip", "omega": row["omega"]},
+    }
+    
+
+def build_sweep_edgelist_dgp(row: dict) -> dict:
+    """Full dgp dict for Congress network, given one resolved row
+    (fixed columns + wildcard values already merged by params_io.ExperimentFrame.row).
+    """
+    
+    communities = np.loadtxt(row["communities_fpath"], dtype=int)
+    
+    return {
+        "gamma": row["gamma"],
+        "rho": row["rho"],
+        "tmax": row["tmax"],
+        "rep": int(row["rep"]),
+        "graph": {"type": "edgelist", "params": {"filename": row["graph_fpath"]}},
+        "kernels": [
+            {"type": "simple", "beta": row["beta1"]},
+            {"type": "simple", "beta": row["beta2"]}
+        ],
+        "assignment": {"mode": "block_flip", "omega": row["omega"], "communities": communities},
     }
 
 
