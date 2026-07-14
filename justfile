@@ -100,9 +100,9 @@ cv cores="1":
 
 # Run the PPC experiment through to its summary
 [group('research')]
-ppc cores="1":
+ppc omega cores="1":
     uv run snakemake --snakefile workflow/Snakefile --cores {{cores}} \
-        results/ppc/ppc_result.json
+        results/ppc/omega~{{omega}}/ppc_result.json
 
 # Render the DAG to SVG (requires graphviz's `dot`)
 [group('research')]

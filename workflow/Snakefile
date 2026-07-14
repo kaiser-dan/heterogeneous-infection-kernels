@@ -25,8 +25,9 @@ include: "rules/sweep.smk"
 include: "rules/cv.smk"
 include: "rules/ppc.smk"
 
-# SWEEP_NAMES comes from rules/sweep
+# SWEEP_NAMES comes from rules/sweep.smk
 # CV_EXPERIMENT comes from rules/cv.smk
+# PPC_OMEGAS comes from rules/ppc.smk
 
 rule all:
     input:
@@ -34,4 +35,4 @@ rule all:
         expand(f"{RESULTS}/complexity/{{sweep}}/complexity_by_setting.parquet", sweep=SWEEP_NAMES),
         f"{RESULTS}/cv/{CV_EXPERIMENT}/_cv_curve.parquet",
         f"{RESULTS}/cv/{CV_EXPERIMENT}/_cv_selection.parquet",
-        f"{RESULTS}/ppc/ppc_result.json",
+        expand(f"{RESULTS}/ppc/omega~{{omega}}/ppc_result.json", omega=PPC_OMEGAS),

@@ -1,4 +1,4 @@
-"""Snakemake script: build the observed PPC fit (rule ppc_observed)."""
+"""Snakemake script: build the observed PPC fit (rule ppc_observed, wildcard omega)."""
 
 import json
 import sys
@@ -29,7 +29,7 @@ n = adj.shape[0]
 x0 = build_initial_state(n, fixed["rho"], seed=int(fixed["seed_init"]))
 
 communities = np.loadtxt(ROOT / fixed["assignment_communities_file"])
-assignment_cfg = {"mode": fixed["assignment_mode"], "omega": fixed["assignment_omega"],
+assignment_cfg = {"mode": fixed["assignment_mode"], "omega": fixed["omega"],
                    "communities": communities}
 
 bank = build_kernel_bank(kernels, kmax)
@@ -42,7 +42,8 @@ np_res = fit_stan(M, N, ROOT / fixed["np_config"], {"K": 1, "sampling": sampling
 mus = get_posterior_draws(np_res, "mu")[:, 0, :]
 
 sm_res = fit_stan(M, N, ROOT / fixed["simple_config"], {"K": 1, "sampling": sampling})
-beta_hat = float(np.asarray(get_posterior_draws(sm_res, "beta")).reshape(-1).mean())
+betas = np.asarray(get_posterior_draws(sm_res, "beta")).reshape(-1)
+beta_hat = float(betas.mean())
 
-np.savez_compressed(snakemake.output[0], mus=mus, beta_hat=np.array(beta_hat))
-print(f"[obs] fit done (beta_hat={beta_hat:.6f})")
+np.savez_compressed(snakemake.output[0], mus=mus, beta_hat=np.array(beta_hat), betas=betas)
+print(f"[obs omega={fixed['omega']}] fit done (beta_hat={beta_hat:.6f})")

@@ -10,17 +10,18 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from src.analysis import ppc_complexity
+from src.analysis import ppc_complexity, effective_ledoit_wolf_shrinkage
 
 fixed = dict(snakemake.params.fixed)
-reg = float(fixed["reg"])
 
 obs = np.load(snakemake.input.observed)
 mus, beta_hat = obs["mus"], float(obs["beta_hat"])
+lw = effective_ledoit_wolf_shrinkage(mus)
 
 mu_rep_draws = [np.load(f)["mu_null"] for f in snakemake.input.nulls]
+beta_rep_draws = [np.load(f)["beta_null"] for f in snakemake.input.nulls]
 
-res = ppc_complexity(mus, mu_rep_draws, beta=beta_hat, reg=reg, plus_one=True)
+res = ppc_complexity(mus, mu_rep_draws, beta_hat, beta_rep_draws, reg=lw["reg_eff"], plus_one=True)
 
 summary = {
     "p_value":  res["p_value"],
@@ -29,7 +30,7 @@ summary = {
     "n_ge":     res["n_ge"],
     "R_requested": int(fixed["nrep"]),
     "beta_hat": beta_hat,
-    "reg":      reg,
+    "reg":      lw["reg_eff"],
 }
 Path(snakemake.output.result_json).write_text(json.dumps(summary, indent=2))
 np.savez_compressed(snakemake.output.null_dist, d_null=res["d_null"], d_obs=np.array(res["d_obs"]))

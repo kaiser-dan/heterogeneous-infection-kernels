@@ -68,8 +68,9 @@ def compute_complexity_score(
 def ppc_complexity(
     obs_mu_draws: np.ndarray,
     null_mu_draws,
-    beta: float,
-    reg: float = 1e-6,
+    obs_beta: float,
+    null_betas,
+    reg: float = 1e-2,
     eps: float = 1e-8,
     plus_one: bool = False,
 ) -> dict:
@@ -84,7 +85,8 @@ def ppc_complexity(
     ----------
     obs_mu_draws  : (S, kmax) or (S, 1, kmax) np posterior draws, observed data.
     null_mu_draws : iterable of (S_r, kmax) arrays, one per null replicate.
-    beta          : beta_hat -- generates the nulls and defines the reference.
+    obs_beta      : posterior mean of simple fit to observed data.
+    null_betas    : iterable (length S_r) of beta posterior draws that generated null data.
 
     Returns dict: p_value, n_null, n_ge, d_obs, d_null (array of replicate scores).
     """
@@ -92,17 +94,18 @@ def ppc_complexity(
     if obs.ndim == 3:
         obs = obs[:, 0, :]
     kmax = obs.shape[1]
-    ref = simple_reference_logit(beta, kmax, eps=eps)
+    ref = simple_reference_logit(obs_beta, kmax, eps=eps)
 
     d_obs = compute_complexity_score(obs, ref, reg=reg)["complexity"]
 
     d_null = []
-    for nd in null_mu_draws:
+    for r, nd in enumerate(null_mu_draws):
         nd = np.asarray(nd, dtype=float)
         if nd.ndim == 3:
             nd = nd[:, 0, :]
         try:
-            d_null.append(compute_complexity_score(nd, ref, reg=reg)["complexity"])
+            null_ref = simple_reference_logit(null_betas[r], kmax, eps=eps)
+            d_null.append(compute_complexity_score(nd, null_ref, reg=reg)["complexity"])
         except Exception:
             d_null.append(np.nan)
 
