@@ -75,7 +75,7 @@ def _erank_from_regularized(sigma: np.ndarray) -> float:
     return float(np.exp(-np.sum(p * np.log(p + 1e-300))))
 
 
-def effective_rank(covariance: np.ndarray, reg: float = 1e-6) -> float:
+def effective_rank(covariance: np.ndarray, reg: float = 1e-2) -> float:
     """Effective rank of the *precision* of a covariance matrix.
 
     Parameters
