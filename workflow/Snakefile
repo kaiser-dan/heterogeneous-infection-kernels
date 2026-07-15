@@ -29,6 +29,8 @@ include: "rules/ppc.smk"
 # CV_EXPERIMENT comes from rules/cv.smk
 # PPC_OMEGAS comes from rules/ppc.smk
 
+ruleorder: measure_complexity_1d > measure_complexity_2d
+
 rule all:
     input:
         expand(f"{RESULTS}/complexity/{{sweep}}/complexity_per_dgp.parquet", sweep=SWEEP_NAMES),
