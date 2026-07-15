@@ -15,12 +15,12 @@ def set_fonts(extra_params={}):
     params = {
         "font.family": "sans-serif",
         # "mathtext.fontset": "cm",
-        "legend.fontsize": 9,
-        "axes.labelsize": 10,
-        "axes.titlesize": 10,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 9,
-        "figure.titlesize": 10
+        "legend.fontsize": 8,
+        "axes.labelsize": 8,
+        "axes.titlesize": 8,
+        "xtick.labelsize": 8,
+        "ytick.labelsize": 8,
+        "figure.titlesize": 8
     }
     for key, value in extra_params.items():
         params[key] = value
