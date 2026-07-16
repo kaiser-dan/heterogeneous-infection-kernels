@@ -1,11 +1,12 @@
-import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-RESULTS = Path(__file__).parent.parent / "results"
+ROOT = Path(__file__).parent.parent
+SUMMARY = ROOT / "results" / "cv_summary.parquet"
+SAVE = ROOT / "figures" / "cv_confusion_dual.pdf"
 
 
 def confusion_heatmap(ax, summary, rule, title):
@@ -46,29 +47,18 @@ def confusion_heatmap(ax, summary, rule, title):
     return im
 
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--summary", type=Path, default=RESULTS / "cv_summary.parquet")
-    p.add_argument("--save", type=Path)
-    args = p.parse_args()
+summary = pd.read_parquet(SUMMARY)
 
-    summary = pd.read_parquet(args.summary)
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.5))
+fig.subplots_adjust(right=0.87)
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5.5))
-    fig.subplots_adjust(right=0.87)
+im = confusion_heatmap(ax1, summary, "1se", "1-SE rule\n(smallest K within 1 SE of best)")
+confusion_heatmap(ax2, summary, "max", "Max rule\n(argmax CV lppd)")
 
-    im = confusion_heatmap(ax1, summary, "1se", "1-SE rule\n(smallest K within 1 SE of best)")
-    confusion_heatmap(ax2, summary, "max", "Max rule\n(argmax CV lppd)")
+cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.68])
+fig.colorbar(im, cax=cbar_ax, label="Fraction of trials")
+fig.suptitle("CV model-selection confusion matrix (5-fold, 10 trials/K)", fontsize=11, y=1.01)
 
-    cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.68])
-    fig.colorbar(im, cax=cbar_ax, label="Fraction of trials")
-    fig.suptitle("CV model-selection confusion matrix (5-fold, 10 trials/K)", fontsize=11, y=1.01)
-
-    if args.save:
-        fig.savefig(args.save, bbox_inches="tight")
-        print(f"saved {args.save}")
-    plt.show()
-
-
-if __name__ == "__main__":
-    main()
+SAVE.parent.mkdir(exist_ok=True)
+fig.savefig(SAVE, bbox_inches="tight")
+plt.show()
