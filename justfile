@@ -1,58 +1,26 @@
 ROOT := `pwd`
 
-# ----------------------
 # List commands
 default:
     @just --list --unsorted
 
 # ----- Setup & Install -----
+
+# Install all dependencies including dev extras
 [group('setup')]
 install:
     uv sync --all-extras --all-groups
 
-# Run all unit tests
+# Minimal install (no dev dependencies)
 [group('setup')]
-test:
-    uv run pytest
+installmin:
+    uv sync --no-dev
 
-# Compile all Stan models
+# Compile all Stan models in src/inference/
 [group('setup')]
 compile:
     uv run bin/compile_models.py
 
-# ----- Research -----
-# Generate all processed data via Snakemake
-[group('research')]
-data:
-    uv run snakemake -c1
-
-# Totally clear and regenerate all processed data
-[group('research')]
-data-total:
-    rm -rf data/processed
-    uv run snakemake -c1
-
-# Render all Quarto documents
-[group('research')]
-renderall:
-    find ./ -type f -name "*.qmd" | xargs -I{} quarto render {}
-
-# Run a research sweep defined in a YAML config
-[group('research')]
-sweep config profile="workflow/profiles/local":
-    uv run snakemake inference --configfile {{config}} --profile {{profile}}
-
-
-# ----- Sync -----
-# Sync results from HPC to local
-[group('sync')]
-sync:
-    rsync -avP vacc:/gpfs1/home/w/t/wthomps3/CSDS/side_projects/heterogeneous-infection-kernels/results/ results/
-
-
-# ----- Cleanup -----
-# Remove temporary and test files
-=======
 # ----- Params -----
 
 # Regenerate every experiment's committed Paramspace frame (config/params/*.tsv)
@@ -100,9 +68,9 @@ cv cores="1":
 
 # Run the PPC experiment through to its summary
 [group('research')]
-ppc omega cores="1":
+ppc cores="1":
     uv run snakemake --snakefile workflow/Snakefile --cores {{cores}} \
-        results/ppc/omega~{{omega}}/ppc_result.json
+        results/ppc/ppc_result.json
 
 # Render the DAG to SVG (requires graphviz's `dot`)
 [group('research')]
