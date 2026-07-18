@@ -73,7 +73,7 @@ def build_frame() -> pd.DataFrame:
     df["seed_init"] = derive_seed(ROLE_OBS_INIT)
 
     # seeds for null data, independent x0 and dynamics per (omega, r)    
-    oi = df["omega"].map({om: i for i, om in enumerate(OMEGAS)})
+    oi = df["omega"].map({om: i for i, om in enumerate(omegas)})
     df["seed_null"] = [derive_seed(ROLE_NULL_DYN, o, r) for o, r in zip(oi, df["r"])]
     df["seed_null_init"] = [derive_seed(ROLE_NULL_INIT, o, r) for o, r in zip(oi, df["r"])]
     
