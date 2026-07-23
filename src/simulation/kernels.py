@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-__all__ = ["simple_kernel", "hill_kernel", "nonparametric_kernel", "load_kernel", "build_kernel_bank", "assign_kernels"]
+__all__ = ["simple_kernel", "sigmoid_kernel", "power_kernel", "nonparametric_kernel", "load_kernel", "build_kernel_bank", "assign_kernels"]
 
 def simple_kernel(beta: float, kmax: int) -> np.ndarray:
     """Simple (independent cascade) kernel: c(ν) = 1 - (1 - β)^ν.
@@ -47,35 +47,6 @@ def sigmoid_kernel(rho_l: float, rho_h: float, w: float, k0: float, kmax: int) -
     """
     nu = np.arange(1, kmax + 1, dtype=float)
     return rho_l + (rho_h - rho_l) / (1.0 + np.exp(-w * (nu - k0)))
-
-
-def hill_kernel(p: float, h: float, tau: float, kmax: int) -> np.ndarray:
-    """Hill-function (complex contagion) kernel.
-
-    c(ν) = p · νʰ / (τʰ + νʰ)
-
-    Sigmoid-shaped, saturating at p. Controls:
-      p   — saturation ceiling
-      h   — Hill coefficient (steepness; h > 1 for sigmoidal shape)
-      tau — half-saturation point (exposure level where P = p/2)
-
-    Parameters
-    ----------
-    p : float
-        Saturation ceiling in (0, 1].
-    h : float
-        Hill coefficient (steepness), h > 0.
-    tau : float
-        Half-saturation exposure level, tau > 0.
-    kmax : int
-        Maximum number of infected neighbours.
-
-    Returns
-    -------
-    (kmax,) array on the probability scale, ν = 1..kmax.
-    """
-    nu = np.arange(1, kmax + 1, dtype=float)
-    return float(p) * (nu ** float(h)) / (float(tau) ** float(h) + nu ** float(h))
 
 
 def power_kernel(lam: float, alpha: float, kmax: int) -> np.ndarray:
@@ -175,13 +146,14 @@ def build_kernel_bank(kernels_cfg: list[dict], kmax: int) -> list[np.ndarray]:
         
         if ktype == "simple":
             bank.append(simple_kernel(beta=float(cfg["beta"]), kmax=kmax))
-            
-        elif ktype == "hill":
-            bank.append(hill_kernel(
-                p=float(cfg["p"]),
-                h=float(cfg["h"]),
-                tau=float(cfg["tau"]),
-                kmax=kmax,
+
+        if ktype == "sigmoid":
+            bank.append(sigmoid_kernel(
+                rho_l=float(cfg["rho_l"]),
+                rho_h=float(cfg["rho_h"]),
+                w=float(cfg["w"]),
+                k0=int(cfg["k0"]),
+                kmax=kmax
             ))
             
         elif ktype == "power":
