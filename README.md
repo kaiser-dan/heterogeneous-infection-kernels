@@ -1,8 +1,58 @@
-# het-ker
+<h1 align="center">
+Emergent contagion complexity <br/>  
+<i>Disentagling mechanistic complexity from correlated heterogeneity</i>
+</h1>
 
-Simulation and inference for **heterogeneous contagion kernels**.
+<p align="center">
+<i>Quantification of contagion complexity and inference of unobserved infection kernels</i>
+</p>
 
-Two ways to use this repo:
+<p align="center">
+<a href="https://github.com/kaiser-dan/heterogeneous-infection-kernels/blob/main/LICENSE" target="_blank">
+<img alt="License: MIT" src="https://img.shields.io/github/license/kaiser-dan/heterogeneous-infection-kernels">
+</a>
+
+<a href="https://www.python.org/" target="_blank">
+<img alt="Made with Python" src="https://img.shields.io/badge/made%20with-python-1f425f.svg">
+</a>
+
+<!--<a href="[https://github.com/psf/black](https://github.com/astral-sh/ruff)" target="_blank">
+<img alt="Code style: ruff" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json")>
+</a> -->
+
+<a href="https://arxiv.org/abs/ARXIVID" target="_blank">
+<img alt="arXiv: ARXIVID" src="https://img.shields.io/badge/arXiv-ARXIVID-red.svg">
+</a>
+
+</p>
+
+Research project exploring emergent contagion complexity.
+
+The repository contains the original scientific analyses developed by the Authors (see below) for the paper
+
+- **(In preparation)** Tang, K. _et al_. 2026. [Emergent contagion complexity: Disentagling mechanistic complexity from correlated heterogeneity](https://arxiv.org/abs/ARXIVID).
+
+If you use this repository in any fashion in your own work, please cite our work according to the `CITATION.cff`.
+
+# Contents
+
+- [Contents](#contents)
+- [Getting Started](#getting-started)
+  - [Repository layout](#repository-layout)
+  - [Installing](#installing)
+- [Usage](#usage)
+  - [Using `src/` directly](#using-src-directly)
+  - [Running the pipeline](#running-the-pipeline)
+  - [Gotchas](#gotchas)
+- [Other Information](#other-information)
+  - [Built With](#built-with)
+  - [Authors](#authors)
+  - [License](#license)
+  - [Acknowledgments](#acknowledgments)
+
+# Getting started
+
+There are two ways to use this repo:
 
 - **As a library** (`src/`) — simulate a DGP and fit a model in a notebook or script, no
   Snakemake required.
@@ -217,3 +267,35 @@ results/
   `workflow/dgp.py::simulate_MN`. If you rename or add a DGP field, update all three.
 - `rep` is the random seed throughout: the same `rep` yields the same graph, kernel labels, and
   contagion trajectory regardless of which model or fold triggers the simulation.
+
+
+# Other Information
+
+## Built With
+
+- [ChooseALicense](https://choosealicense.com/) - Used to choose the license.
+- [Snakemake](https://snakemake.readthedocs.io/en/stable/) - Used for organizing and running research pipeline.
+- [Stan](https://mc-stan.org/) - Used for writing inference models.
+- [cmdstanpy](https://mc-stan.org/cmdstanpy/) - Used to interface to Stan through Python.
+
+## Authors
+
+All correspondence should be directed to [Daniel Kaiser](mailto:daniel.kaiser@virginia.edu) or [Katerina Tang](mailto:kbt28@cornell.edu).
+
+- Katerina Tang
+- Daniel Kaiser
+- William Thompson
+- Jean-Gabriel Young
+- Laurent Hebert-Dufresne
+- Nicholas W. Landry
+
+## License
+
+This project is licensed under the [BSD-3 License](LICENSE) - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+- **Billie Thompson** - *Provided original README* - [PurpleBooth](https://github.com/PurpleBooth)
+- **George Datseris** - *Published workshop on scientific code; inspired organization for reproducibility* - [GoodScientificCodeWorkshop](https://github.com/JuliaDynamics/GoodScientificCodeWorkshop)
+- **Nicolò Ruggeri** - *Inspired shield use in README* - [Nicolò Ruggeri's GitHub](https://github.com/nickruggeri)
+
