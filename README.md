@@ -1,15 +1,7 @@
-<h1 align="center">
-Emergent contagion complexity <br/>  
-<i>Disentagling mechanistic complexity from correlated heterogeneity</i>
-</h1>
+<p align="left">
 
-<p align="center">
-<i>Quantification of contagion complexity and inference of unobserved infection kernels</i>
-</p>
-
-<p align="center">
 <a href="https://github.com/kaiser-dan/heterogeneous-infection-kernels/blob/main/LICENSE" target="_blank">
-<img alt="License: MIT" src="https://img.shields.io/github/license/kaiser-dan/heterogeneous-infection-kernels">
+<img alt="License: BSD-3" src="https://img.shields.io/github/license/kaiser-dan/heterogeneous-infection-kernels">
 </a>
 
 <a href="https://www.python.org/" target="_blank">
@@ -26,11 +18,9 @@ Emergent contagion complexity <br/>
 
 </p>
 
-Research project exploring emergent contagion complexity.
+# Emergent contagion complexity: Disentagling mechanistic complexity from correlated heterogeneity
 
-The repository contains the original scientific analyses developed by the Authors (see below) for the paper
-
-- **(In preparation)** Tang, K. _et al_. 2026. [Emergent contagion complexity: Disentagling mechanistic complexity from correlated heterogeneity](https://arxiv.org/abs/ARXIVID).
+The repository contains code accompanying the following paper (in preparation): Tang, K. _et al_. 2026. [Emergent contagion complexity: Disentagling mechanistic complexity from correlated heterogeneity](https://arxiv.org/abs/ARXIVID).
 
 If you use this repository in any fashion in your own work, please cite our work according to the `CITATION.cff`.
 
@@ -54,7 +44,7 @@ If you use this repository in any fashion in your own work, please cite our work
 
 There are two ways to use this repo:
 
-- **As a library** (`src/`) — simulate a DGP and fit a model in a notebook or script, no
+- **As a library** (`src/`) — simulate a data-generating process (DGP) and fit a model in a notebook or script, no
   Snakemake required.
 - **As a pipeline** (`workflow/`, driven by `config/`) — run the full set of experiments
   (parameter sweeps, cross-validation, posterior-predictive check) via Snakemake, with results
@@ -64,14 +54,14 @@ There are two ways to use this repo:
 
 | Path | Role |
 |---|---|
-| `src/simulation/` | Build a graph, a bank of kernels, assign kernels to nodes, run the contagion process, extract activation counts |
+| `src/simulation/` | Build a graph, a bank of kernels; assign kernels to nodes; run the contagion process; extract activation counts |
 | `src/inference/` | Fit the Stan mixture model (`fit_stan`) and run cross-validation folds (`run_cv`) |
-| `src/analysis/` | Complexity scoring (Mahalanobis distance in logit space) and posterior-predictive p-values |
-| `src/models/` | Stan model source (`.stan`) and compiled binaries |
+| `src/analysis/` | Complexity scoring and posterior-predictive p-values |
+| `src/models/` | Stan model source (`.stan`) |
 | `config/config.yaml` | Snakemake config file (currently just `results_root`) |
 | `config/gen_params_*.py` | One generator per experiment; each defines that experiment's full parameter grid |
 | `config/gen_all_params.py` | Runs every generator, writing `config/params/*.tsv` |
-| `config/params/*.tsv` | Committed, generated parameter frames — the actual experiment definitions Snakemake reads |
+| `config/params/*.tsv` | Committed, generated parameter frames — the actual experiment definitions that Snakemake reads |
 | `config/models/*.yaml` | Default Stan model hyperparameters (`nonparametric_eb.yaml`, `simple.yaml`) |
 | `workflow/Snakefile` | Top-level orchestration: includes the rule files, defines `rule all` |
 | `workflow/rules/*.smk` | Rule definitions for the three experiment families (sweeps, CV, PPC) |
@@ -100,7 +90,7 @@ once, if you've never used CmdStanPy before).
 ## Using `src/` directly
 
 Nothing in `src/` depends on Snakemake; `src/` is a plain importable package, so from the repo root 
-(or with the repo root on `sys.path`, e.g. run `uv run jupyter` from there) you can import it straight into 
+(or with the repo root on `sys.path`, e.g., run `uv run jupyter` from there) you can import it straight into 
 a notebook:
 
 ```python
@@ -128,7 +118,7 @@ M, N = get_activations(x.T, adj, kmax)
 result = fit_stan(M, N, "config/models/nonparametric_eb.yaml", {"K": 1})
 mu_draws = get_posterior_draws(result, "mu")[:, 0, :]          # (S, kmax), K=1
 ref = simple_reference_logit(beta=0.01, kmax=kmax)             # simple-contagion reference
-scores = compute_complexity_scores(mu_draws, ref)              # {complexity, mean_distance, erank, ...}
+scores = compute_complexity_score(mu_draws, ref)               # {complexity, ...}
 ```
 
 `workflow/dgp.py::simulate_MN` wraps steps 1–2 above into one call given a DGP dict (see next
@@ -148,8 +138,8 @@ M, N = simulate_MN({
 Every randomness source inside `simulate_MN` (graph draw, kernel-label assignment, initial
 state, contagion trajectory) is seeded from `dgp["rep"]` for reproducibility.
 
-For cross-validation on data you already have, `src.inference.cv.run_cv(M, N, n_folds, config_path)`
-runs all folds and returns one `FoldResult` (fold-level and per-node held-out log-predictive
+For cross-validation on activation data you already have, `src.inference.cv.run_cv(M, N, n_folds, model_config_path)`
+runs all folds and returns one `FoldResult` (fold-level and per-node held-out log predictive
 density) per fold; `run_one_fold` runs a single fold, which is what the pipeline parallelizes over.
 
 ### DGP schema reference
@@ -169,10 +159,10 @@ A DGP dict has four top-level keys: `graph`, `kernels`, `assignment` (only meani
 **`kernels`** — a list of `{"type": ..., ...}` dicts, one per kernel mode. A one-element list
 means homogeneous contagion (`assignment` is then ignored):
 
-| `type` | Required params | Notes |
+| `type` | Required params (in addition to `kmax`) | Notes |
 |---|---|---|
 | `simple` | `beta` | Independent cascade: c(ν) = 1 − (1−β)^ν |
-| `hill` | `p`, `h`, `tau` | Sigmoidal saturation: c(ν) = pνʰ / (τʰ + νʰ) |
+| `sigmoid` | `rho_l`, `rho_h`, `w`, `k0` | Sigmoidal kernel |
 | `power` | `lam`, `alpha` | c(ν) = 1 − exp(−λν^α); sublinear for α<1, superlinear for α>1 |
 | `nonparametric` | `values` (or `values_file` in `workflow/dgp.py`) | Explicit list of probabilities, one per exposure level |
 
@@ -208,7 +198,7 @@ The pipeline is three independent experiment families, each with its own rule fi
 | Experiment | Rules (`workflow/rules/`) | What it produces |
 |---|---|---|
 | `beta_delta_sweep`, `epsilon_omega_sweep` | `sweep2d.smk`: `fit_model` → `measure_complexity` | Per-DGP and per-setting complexity scores across a 2D grid |
-| `cv_basic` | `cv.smk`: `run_cv_task` → `aggregate_cv` | Cross-validated log-predictive density and 1-SE-rule model selection across candidate `K` |
+| `cv_basic` | `cv.smk`: `run_cv_task` → `aggregate_cv` | Cross-validated log predictive density and 1-SE-rule model selection across candidate `K` |
 | `ppc` | `ppc.smk`: `ppc_observed` → `ppc_null` (×N) → `ppc_summary` | A posterior-predictive p-value for excess complexity, against a simple-contagion null |
 
 ### How an experiment's parameters flow to a job
@@ -227,7 +217,7 @@ plus an `ExperimentFrame` that resolves a job's wildcards back to its one full r
 columns merged). `workflow/scripts/dgp_shapes.py` then turns that row into a DGP dict
 (`build_sweep_sbm_dgp`, `build_cv_dgp`) for `simulate_MN`.
 
-Rule output paths are literally the `Paramspace` instance patterns, so e.g. one `beta_delta_sweep`
+Rule output paths are literally the `Paramspace` instance patterns, e.g., one `beta_delta_sweep`
 fit lands at `results/fits/beta_delta_sweep/model~np_rep~0_beta2~0.03_delta~-0.575.npz`, and one
 CV fold at `results/cv/cv_basic/dgp_label~one_simple_K~1_rep~3_fold~2.parquet`.
 
@@ -256,33 +246,26 @@ results/
   cv/cv_basic/
     dgp_label~<label>_K~<k>_rep~<rep>_fold~<fold>.parquet   # one row per held-out node
     _cv_curve.parquet       # mean/SE lppd per (dgp_label, rep, K), pooled across folds
-    _cv_selection.parquet   # 1-SE-rule selected K per (dgp_label, rep)
+    _cv_selection.parquet   # K selected by 1-SE rule per (dgp_label, rep)
   ppc/
     observed.npz, nulls/r~<r>.npz, ppc_result.json, ppc_null_distribution.npz
 ```
-
-## Gotchas
-
-- **The DGP schema is shared** between the `gen_params_*.py` generators, `dgp_shapes.py`, and
-  `workflow/dgp.py::simulate_MN`. If you rename or add a DGP field, update all three.
-- `rep` is the random seed throughout: the same `rep` yields the same graph, kernel labels, and
-  contagion trajectory regardless of which model or fold triggers the simulation.
 
 
 # Other Information
 
 ## Built With
 
-- [ChooseALicense](https://choosealicense.com/) - Used to choose the license.
-- [Snakemake](https://snakemake.readthedocs.io/en/stable/) - Used for organizing and running research pipeline.
-- [Stan](https://mc-stan.org/) - Used for writing inference models.
-- [cmdstanpy](https://mc-stan.org/cmdstanpy/) - Used to interface to Stan through Python.
+- [ChooseALicense](https://choosealicense.com/) - used to choose the license.
+- [Snakemake](https://snakemake.readthedocs.io/en/stable/) - used for organizing and running research pipeline.
+- [Stan](https://mc-stan.org/) - used for writing inference models.
+- [cmdstanpy](https://mc-stan.org/cmdstanpy/) - used to interface to Stan through Python.
 
 ## Authors
 
 All correspondence should be directed to [Daniel Kaiser](mailto:daniel.kaiser@virginia.edu) or [Katerina Tang](mailto:kbt28@cornell.edu).
 
-- Katerina Tang
+- [Katerina Tang](https://kbtang28.github.io)
 - Daniel Kaiser
 - William Thompson
 - Jean-Gabriel Young
