@@ -5,7 +5,7 @@ from .dynamics import (
 )
 from .kernels import (
     simple_kernel,
-    hill_kernel,
+    sigmoid_kernel,
     nonparametric_kernel,
     power_kernel,
     load_kernel,

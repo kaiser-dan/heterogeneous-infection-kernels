@@ -3,8 +3,6 @@ import sys
 import numpy as np
 from numpy import ndarray
 
-from .._logger import logger
-
 __all__ = ["heterogeneous_contagion_process", "get_activations", "build_initial_state"]
 
 # heterogeneous_contagion_process and get_activations shamelessly stolen from Nick at:
@@ -111,12 +109,10 @@ def get_activations(states: ndarray, adjacency: ndarray, kmax: int):
             # Infection DOES NOT occur if S at t and at t+1
             if t+1 in possible_infection_events_individual:  
                 noninfection_events[i][nu_i_t] += 1
-                logger.trace(f"Failed iInfection event for node {i} at time {t} with {nu_i_t} neighbors")
 
             # Infection DOES occur if S at t but not at t+1
             else:
                 infection_events[i][nu_i_t] += 1
-                logger.trace(f"Infection event for node {i} at time {t} with {nu_i_t} neighbors")
 
     # Ensure integer type
     infection_events = np.array(infection_events, dtype=int)

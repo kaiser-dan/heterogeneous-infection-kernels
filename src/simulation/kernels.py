@@ -147,7 +147,7 @@ def build_kernel_bank(kernels_cfg: list[dict], kmax: int) -> list[np.ndarray]:
         if ktype == "simple":
             bank.append(simple_kernel(beta=float(cfg["beta"]), kmax=kmax))
 
-        if ktype == "sigmoid":
+        elif ktype == "sigmoid":
             bank.append(sigmoid_kernel(
                 rho_l=float(cfg["rho_l"]),
                 rho_h=float(cfg["rho_h"]),
@@ -168,7 +168,7 @@ def build_kernel_bank(kernels_cfg: list[dict], kmax: int) -> list[np.ndarray]:
             
         else:
             raise ValueError(
-                f"Unsupported kernel type: '{ktype}'. Expected simple, hill, nonparametric."
+                f"Unsupported kernel type: '{ktype}'. Expected simple, sigmoid, power, nonparametric."
             )
             
     return bank
