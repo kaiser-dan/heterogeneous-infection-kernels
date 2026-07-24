@@ -266,11 +266,11 @@ results/
 All correspondence should be directed to [Daniel Kaiser](mailto:daniel.kaiser@virginia.edu) or [Katerina Tang](mailto:kbt28@cornell.edu).
 
 - [Katerina Tang](https://kbtang28.github.io)
-- Daniel Kaiser
-- William Thompson
-- Jean-Gabriel Young
-- Laurent Hebert-Dufresne
-- Nicholas W. Landry
+- [Daniel Kaiser](https://kaiser-dan.github.io)
+- [William Thompson](https://www.willhwthompson.com/)
+- [Jean-Gabriel Young](https://jgyoung.ca/)
+- [Laurent Hébert-Dufresne](https://laurenthebertdufresne.github.io/)
+- [Nicholas W. Landry](https://nwlandry.com/)
 
 ## License
 
