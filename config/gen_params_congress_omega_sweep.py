@@ -13,8 +13,8 @@ EXP = "congress_omega_sweep"
 WILDCARD_COLUMNS = ["model", "rep", "omega"] # swept param listed last
 
 # ---- fixed, global (identical every row) -----------------------------------
-GRAPH_FPATH = "data/congress.edgelist"
-COMMUNITIES_FPATH = "data/congress_communities.txt"
+GRAPH_FPATH = "data/congress/processed/congress.edgelist"
+COMMUNITIES_FPATH = "data/congress/processed/communities.txt"
 BETA1 = 0.01
 BETA2 = 0.04
 GAMMA = 0.1
