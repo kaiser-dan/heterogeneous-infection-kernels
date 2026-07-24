@@ -1,13 +1,11 @@
 [project]
-name = "het-ker"
-version = "0.1.0"
-description = "Add your description here"
+name = "HETKER"
+version = "1.0.0"
+description = "Source code to reproduce research in 'Emergent contagion complexity: Disentangling mechanistic complexity from correlated heterogeneity.'"
 readme = "README.md"
 requires-python = ">=3.11, <3.14"
 dependencies = [
-    "arviz>=0.23.4",
     "cmdstanpy>=1.3.0",
-    "loguru>=0.7.3",
     "matplotlib>=3.11.0",
     "networkx>=3.6.1",
     "numpy>=2.4.6",
@@ -22,11 +20,8 @@ dependencies = [
 
 [dependency-groups]
 dev = ["isort>=6.0.1", "pytest>=8.4.2", "ruff>=0.13.2"]
-viz = ["matplotlib>=3.10.6", "netgraph>=4.13.2", "seaborn>=0.13.2"]
+viz = ["netgraph>=4.13.2", "seaborn>=0.13.2"]
 notebooks = ["ipykernel>=6.30.1", "jupyter-cache>=1.0.1", "quarto>=0.1.0"]
-
-[tool.pytest.ini_options]
-testpaths = ["test"]
 
 [tool.commitizen]
 name = "cz_conventional_commits"
