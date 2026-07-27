@@ -8,9 +8,9 @@
 <img alt="Made with Python" src="https://img.shields.io/badge/made%20with-python-1f425f.svg">
 </a>
 
-<!--<a href="[https://github.com/psf/black](https://github.com/astral-sh/ruff)" target="_blank">
-<img alt="Code style: ruff" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json")>
-</a> -->
+<a href="https://doi.org/10.5281/zenodo.21632560">
+<img src="https://zenodo.org/badge/1070949785.svg" alt="DOI">
+</a>
 
 <a href="https://arxiv.org/abs/ARXIVID" target="_blank">
 <img alt="arXiv: ARXIVID" src="https://img.shields.io/badge/arXiv-ARXIVID-red.svg">
