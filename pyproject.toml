@@ -1,7 +1,7 @@
 [project]
 name = "het-ker"
 version = "0.1.0"
-description = "Add your description here"
+description = "Source code for distinguishing complex contagions from heterogeneous simple contagions"
 readme = "README.md"
 requires-python = ">=3.11, <3.14"
 dependencies = [

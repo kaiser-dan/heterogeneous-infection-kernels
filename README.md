@@ -16,12 +16,8 @@ Emergent contagion complexity <br/>
 <img alt="Made with Python" src="https://img.shields.io/badge/made%20with-python-1f425f.svg">
 </a>
 
-<!--<a href="[https://github.com/psf/black](https://github.com/astral-sh/ruff)" target="_blank">
-<img alt="Code style: ruff" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json")>
-</a> -->
-
-<a href="https://arxiv.org/abs/ARXIVID" target="_blank">
-<img alt="arXiv: ARXIVID" src="https://img.shields.io/badge/arXiv-ARXIVID-red.svg">
+<a href="https://arxiv.org/abs/2607.25139" target="_blank">
+<img alt="arXiv:2607.25139" src="https://img.shields.io/badge/arXiv-ARXIVID-red.svg">
 </a>
 
 </p>
@@ -30,7 +26,7 @@ Research project exploring emergent contagion complexity.
 
 The repository contains the original scientific analyses developed by the Authors (see below) for the paper
 
-- **(In preparation)** Tang, K. _et al_. 2026. [Emergent contagion complexity: Disentagling mechanistic complexity from correlated heterogeneity](https://arxiv.org/abs/ARXIVID).
+- **(In preparation)** Tang, K. _et al_. 2026. [Emergent contagion complexity: Disentangling mechanistic complexity from correlated heterogeneity](https://arxiv.org/abs/2607.25139).
 
 If you use this repository in any fashion in your own work, please cite our work according to the `CITATION.cff`.
 
