@@ -12,15 +12,15 @@
 <img src="https://zenodo.org/badge/1070949785.svg" alt="DOI">
 </a>
 
-<a href="https://arxiv.org/abs/ARXIVID" target="_blank">
-<img alt="arXiv: ARXIVID" src="https://img.shields.io/badge/arXiv-ARXIVID-red.svg">
+<a href="https://arxiv.org/abs/2607.25139" target="_blank">
+<img alt="arXiv: ARXIVID" src="https://img.shields.io/badge/arXiv-2607.25139-red.svg">
 </a>
 
 </p>
 
-# Emergent contagion complexity: Disentagling mechanistic complexity from correlated heterogeneity
+# Emergent contagion complexity: Disentangling mechanistic complexity from correlated heterogeneity
 
-The repository contains code accompanying the following paper (in preparation): Tang, K. _et al_. 2026. [Emergent contagion complexity: Disentagling mechanistic complexity from correlated heterogeneity](https://arxiv.org/abs/ARXIVID).
+The repository contains code accompanying the following paper (in preparation): Tang, K. _et al_. 2026. [Emergent contagion complexity: Disentangling mechanistic complexity from correlated heterogeneity](https://arxiv.org/abs/2607.25139).
 
 If you use this repository in any fashion in your own work, please cite our work according to the `CITATION.cff`.
 
