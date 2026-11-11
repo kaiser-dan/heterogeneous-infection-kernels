@@ -88,6 +88,17 @@ def _resolve_logit_param(value, empirical_logits, default):
 def _build_stan_data(stan_code, config_model, empirical_logits, K, M, N, kmax):
     stan_data = {"kmax": kmax, "V": M.shape[0], "K": K, "M": M, "N": N}
 
+    # cell-format models (e.g. mixture_nonparametric_eb_cells.stan) take only (node, nu) cells with data
+    if "cell_node" in stan_code:
+        node, nu = np.nonzero(M + N)
+        stan_data.update({
+            "n_cells":   len(node),
+            "cell_node": node + 1,
+            "cell_nu":   nu + 1,
+            "cell_M":    M[node, nu],
+            "cell_N":    N[node, nu],
+        })
+
     # (stan_token, config_key, default, logit_resolved)
     TOKENS = [
         ("LOGIT_BETA_LOCATION",  "logit_beta_location",   -10.0, True),

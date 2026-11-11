@@ -15,6 +15,9 @@ notes/
 # Results
 results/
 
+# Downloaded data
+data/wechat/
+
 # VS Code settings
 .vscode
 

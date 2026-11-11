@@ -72,6 +72,14 @@ ppc cores="1":
     uv run snakemake --snakefile workflow/Snakefile --cores {{cores}} \
         results/ppc/ppc_result.json
 
+# Run the WeChat Moments analysis: CV, full fits, complexity, SBM communities (needs conda for graph-tool)
+[group('research')]
+wechat cores="1":
+    uv run snakemake --snakefile workflow/Snakefile --cores {{cores}} --use-conda \
+        results/cv/wechat/_cv_curve.parquet \
+        results/complexity/wechat/complexity.parquet \
+        results/communities/wechat/sbm.npz
+
 # Render the DAG to SVG (requires graphviz's `dot`)
 [group('research')]
 dag:

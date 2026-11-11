@@ -10,6 +10,7 @@ import gen_params_congress_omega_sweep as gen_params_congress_omega_sweep
 import gen_params_cv_basic as gen_params_cv_basic
 import gen_params_epsilon_omega_sweep as gen_params_epsilon_omega_sweep
 import gen_params_ppc as gen_params_ppc
+import gen_params_wechat as gen_params_wechat
 
 GENERATORS = [
     gen_params_beta_delta_sweep,
@@ -17,6 +18,7 @@ GENERATORS = [
     gen_params_congress_omega_sweep,
     gen_params_cv_basic,
     gen_params_ppc,
+    gen_params_wechat,
 ]
 
 

@@ -1,0 +1,17 @@
+model:
+  stan_file: src/models/mixture_nonparametric_eb_cells.stan
+  K: 1
+
+  # model-specific hyperparameters
+  logit_p_location: "empirical"
+  logit_p_scale: 2.0
+  delta_concentration: 1.0
+  sigma_scale: 1.0
+  pi_concentration: 1.0
+
+  # sampling
+  sampling:
+    iter_warmup: 1000
+    iter_sampling: 1000
+    chains: 4
+    adapt_delta: 0.95

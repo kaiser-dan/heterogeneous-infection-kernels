@@ -57,6 +57,7 @@ There are two ways to use this repo:
 | `src/simulation/` | Build a graph, a bank of kernels; assign kernels to nodes; run the contagion process; extract activation counts |
 | `src/inference/` | Fit the Stan mixture model (`fit_stan`) and run cross-validation folds (`run_cv`) |
 | `src/analysis/` | Complexity scoring and posterior-predictive p-values |
+| `src/empirical/` | Empirical data to activation counts `(M, N)` (WeChat Moments) |
 | `src/models/` | Stan model source (`.stan`) |
 | `config/config.yaml` | Snakemake config file (currently just `results_root`) |
 | `config/gen_params_*.py` | One generator per experiment; each defines that experiment's full parameter grid |
@@ -200,6 +201,7 @@ The pipeline is three independent experiment families, each with its own rule fi
 | `beta_delta_sweep`, `epsilon_omega_sweep` | `sweep2d.smk`: `fit_model` → `measure_complexity` | Per-DGP and per-setting complexity scores across a 2D grid |
 | `cv_basic` | `cv.smk`: `run_cv_task` → `aggregate_cv` | Cross-validated log predictive density and 1-SE-rule model selection across candidate `K` |
 | `ppc` | `ppc.smk`: `ppc_observed` → `ppc_null` (×N) → `ppc_summary` | A posterior-predictive p-value for excess complexity, against a simple-contagion null |
+| `wechat` | `wechat.smk`: `wechat_counts` → `wechat_cv_task` (×K×fold), `wechat_fit` (×K) → `wechat_complexity`, `wechat_sbm` | WeChat Moments data: held-out lppd per K, kernel complexity per mode, and kernel membership by degree-corrected SBM block (`just wechat`; the SBM rule needs `--use-conda` for graph-tool) |
 
 ### How an experiment's parameters flow to a job
 

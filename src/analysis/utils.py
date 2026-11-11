@@ -161,6 +161,17 @@ def simple_reference_logit(beta: float, kmax: int, eps: float = 1e-8) -> np.ndar
     return logit(np.clip(curve, eps, 1.0 - eps))
 
 
+def offset_reference_logit(beta0: float, beta: float, kmax: int, eps: float = 1e-8) -> np.ndarray:
+    """Logit-scale simple contagion reference with a baseline adoption probability.
+
+    mu(nu) = 1 - (1 - beta0)(1 - beta)^nu, nu = 1..kmax: adoption independent of friends with
+    probability beta0, and each exposure an independent extra chance beta.
+    """
+    nu = np.arange(1, int(kmax) + 1, dtype=float)
+    curve = 1.0 - (1.0 - float(beta0)) * (1.0 - float(beta)) ** nu
+    return logit(np.clip(curve, eps, 1.0 - eps))
+
+
 def mahalanobis_complexity_logit(
     mu_post: np.ndarray,
     ref: np.ndarray,

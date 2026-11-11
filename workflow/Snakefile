@@ -24,10 +24,12 @@ from dgp_shapes import (
 include: "rules/sweep.smk"
 include: "rules/cv.smk"
 include: "rules/ppc.smk"
+include: "rules/wechat.smk"
 
 # SWEEP_NAMES comes from rules/sweep.smk
 # CV_EXPERIMENT comes from rules/cv.smk
 # PPC_OMEGAS comes from rules/ppc.smk
+# WECHAT_EXPERIMENT comes from rules/wechat.smk
 
 ruleorder: measure_complexity_1d > measure_complexity_2d
 
@@ -38,3 +40,6 @@ rule all:
         f"{RESULTS}/cv/{CV_EXPERIMENT}/_cv_curve.parquet",
         f"{RESULTS}/cv/{CV_EXPERIMENT}/_cv_selection.parquet",
         expand(f"{RESULTS}/ppc/omega~{{omega}}/ppc_result.json", omega=PPC_OMEGAS),
+        f"{RESULTS}/cv/{WECHAT_EXPERIMENT}/_cv_curve.parquet",
+        f"{RESULTS}/complexity/{WECHAT_EXPERIMENT}/complexity.parquet",
+        f"{RESULTS}/communities/{WECHAT_EXPERIMENT}/sbm.npz",
