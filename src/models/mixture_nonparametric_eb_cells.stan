@@ -66,15 +66,6 @@ transformed parameters {
         vector[kmax] arg = p[k] * cumulative_sum(Delta[k]);
         logit_mu[k] = logit( fmin(fmax(arg, 1e-12), 1 - 1e-12) );
     }
-
-    // per-node log-likelihood under each kernel mode
-    array[V] vector[K] ll = rep_array(rep_vector(0, K), V);
-    for (j in 1:n_cells){
-        for (k in 1:K){
-            real alpha = logit_mu[k][cell_nu[j]] + sigma * z_alpha[j][k];
-            ll[cell_node[j]][k] += cell_M[j] * log_inv_logit(alpha) + cell_N[j] * log1m_inv_logit(alpha);
-        }
-    }
 }
 
 model {
@@ -89,6 +80,15 @@ model {
 
     for (j in 1:n_cells){
         z_alpha[j] ~ normal(0, 1);
+    }
+
+    // per-node log-likelihood under each kernel mode
+    array[V] vector[K] ll = rep_array(rep_vector(0, K), V);
+    for (j in 1:n_cells){
+        for (k in 1:K){
+            real alpha = logit_mu[k][cell_nu[j]] + sigma * z_alpha[j][k];
+            ll[cell_node[j]][k] += cell_M[j] * log_inv_logit(alpha) + cell_N[j] * log1m_inv_logit(alpha);
+        }
     }
 
     // Marginalized mixture likelihood
@@ -106,8 +106,16 @@ generated quantities {
 
     // posterior mixture assignment
     array[V, K] real<lower=0, upper=1> post_prob;
-    for (i in 1:V){
-        vector[K] lps = log(pi) + ll[i];
-        post_prob[i] = to_array_1d(softmax(lps));
+    {
+        array[V] vector[K] ll = rep_array(rep_vector(0, K), V);
+        for (j in 1:n_cells){
+            for (k in 1:K){
+                real alpha = logit_mu[k][cell_nu[j]] + sigma * z_alpha[j][k];
+                ll[cell_node[j]][k] += cell_M[j] * log_inv_logit(alpha) + cell_N[j] * log1m_inv_logit(alpha);
+            }
+        }
+        for (i in 1:V){
+            post_prob[i] = to_array_1d(softmax(log(pi) + ll[i]));
+        }
     }
 }
