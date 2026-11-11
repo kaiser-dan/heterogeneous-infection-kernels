@@ -26,7 +26,7 @@ for i in range(int(snakemake.params.inits)):
     gt.seed_rng(seed + i)
     np.random.seed(seed + i)
     state = gt.minimize_blockmodel_dl(g, state_args={"deg_corr": True})
-    fits.append((state.entropy(), np.asarray(state.get_blocks().a)))
+    fits.append((state.entropy(), np.array(state.get_blocks().a)))  # copy: .a is a view into graph-tool memory
 dl, block = min(fits, key=lambda f: f[0])
 
 _, block = np.unique(block, return_inverse=True)
