@@ -66,6 +66,14 @@ cv cores="1":
         results/cv/cv_basic/_cv_curve.parquet \
         results/cv/cv_basic/_cv_selection.parquet
 
+# Run one CV sweep (cv_epsilon_omega_sweep or cv_beta_sweep) through to aggregation
+[group('research')]
+cv-sweep name cores="1":
+    uv run snakemake --snakefile workflow/Snakefile --cores {{cores}} \
+        results/cv/{{name}}/_cv_curve.parquet \
+        results/cv/{{name}}/_cv_selection.parquet \
+        results/cv/{{name}}/_cv_by_cell.parquet
+
 # Run the PPC experiment through to its summary
 [group('research')]
 ppc cores="1":

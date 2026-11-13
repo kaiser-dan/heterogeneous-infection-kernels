@@ -23,10 +23,12 @@ from dgp_shapes import (
 
 include: "rules/sweep.smk"
 include: "rules/cv.smk"
+include: "rules/cv_sweep.smk"
 include: "rules/ppc.smk"
 
 # SWEEP_NAMES comes from rules/sweep.smk
 # CV_EXPERIMENT comes from rules/cv.smk
+# CV_SWEEP_NAMES comes from rules/cv_sweep.smk
 # PPC_OMEGAS comes from rules/ppc.smk
 
 ruleorder: measure_complexity_1d > measure_complexity_2d
@@ -37,4 +39,5 @@ rule all:
         expand(f"{RESULTS}/complexity/{{sweep}}/complexity_by_setting.parquet", sweep=SWEEP_NAMES),
         f"{RESULTS}/cv/{CV_EXPERIMENT}/_cv_curve.parquet",
         f"{RESULTS}/cv/{CV_EXPERIMENT}/_cv_selection.parquet",
+        expand(f"{RESULTS}/cv/{{cv_sweep}}/_cv_by_cell.parquet", cv_sweep=CV_SWEEP_NAMES),
         expand(f"{RESULTS}/ppc/omega~{{omega}}/ppc_result.json", omega=PPC_OMEGAS),
