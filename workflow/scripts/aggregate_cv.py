@@ -120,7 +120,7 @@ def main():
     results_root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("results")
     experiment   = sys.argv[2] if len(sys.argv) > 2 else "cv_basic"
 
-    out_dir = results_root / experiment
+    out_dir = results_root / "cv" / experiment
     files = sorted(out_dir.glob("*_fold~*.parquet"))
 
     root = Path(__file__).resolve().parent.parent.parent
