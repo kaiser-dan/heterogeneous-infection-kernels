@@ -5,7 +5,7 @@ and pools them across folds.
 As a Snakemake `script:` (rule aggregate_cv), the fold-file list comes straight from
 `snakemake.input`..
 
-Run standalone (globs `*_fold~*.parquet` under the experiment dir, for ad-hoc reruns
+Run standalone (globs `*_fold~*.parquet` under results/cv/<experiment>/, for ad-hoc reruns
 outside Snakemake:
     uv run python workflow/scripts/aggregate_cv.py results cv_basic
 """
@@ -120,7 +120,7 @@ def main():
     results_root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("results")
     experiment   = sys.argv[2] if len(sys.argv) > 2 else "cv_basic"
 
-    out_dir = results_root / experiment
+    out_dir = results_root / "cv" / experiment
     files = sorted(out_dir.glob("*_fold~*.parquet"))
 
     root = Path(__file__).resolve().parent.parent.parent
