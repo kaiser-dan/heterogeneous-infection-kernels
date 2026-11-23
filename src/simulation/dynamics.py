@@ -61,62 +61,54 @@ def heterogeneous_contagion_process(
     x = np.zeros((T, n), dtype=int)
     x[0] = x0.copy()
 
+    rows = np.arange(n)
     for t in range(T - 1):
         u = np.random.random(n)
         nu = A @ x[t]
-        for i in range(n):
-            if nu[i] > 0:
-                _a = (1 - x[t, i]) * (u[i] <= c[i, nu[i]-1] * dt) 
-                _b = x[t, i] * (u[i] > gamma * dt)
-            else:
-                _a, _b = 0, 0    
-            x[t + 1, i] = _a + _b
+        # Infection probability c_i(nu); column j of c holds nu = j + 1, and c(0) = 0
+        p_inf = np.where(nu > 0, c[rows, np.maximum(nu - 1, 0)], 0.0)
 
-            # x[t + 1, i] = (1 - x[t, i]) * (u[i] <= c[i, nu[i]] * dt) + x[t, i] * (
-            #     u[i] > gamma * dt
-            # )
+        # Susceptible node infected wp c_i(nu) * dt
+        infect = (x[t] == 0) & (u <= p_inf * dt)
+        # Infected node recovers wp gamma * dt
+        stay_infected = (x[t] == 1) & (u > gamma * dt)
+
+        x[t + 1] = (infect | stay_infected).astype(int)
     return x
 
 def get_activations(states: ndarray, adjacency: ndarray, kmax: int):
-    # Unpack number of individuals and epidemic time scale
-    N, _ = states.shape
+    """Count infection (M) and non-infection (N) events by node and exposure level.
 
-    # Get number of infected neighbors at each timestep
-    nu = np.array(adjacency @ states, dtype=int)
+    Parameters
+    ----------
+    states : (N, T) array of 0/1 node states (transpose of the process output).
+    adjacency : (N, N) adjacency matrix.
+    kmax : int
+        Number of exposure columns; column j counts events with nu = j + 1.
 
-    # Retrieve timesteps where infection events are possible
-    possible_infection_events = [
-        np.where(1-states[i, :])  # 1 minus because we want when succeptibility
-        for i in range(N)
-    ]
+    Only observed transitions t -> t+1 (t = 0, ..., T-2) are counted.
+    """
+    states = np.asarray(states, dtype=int)
+    n_nodes, T = states.shape
 
-    # Compute infection events
-    infection_events = np.zeros((N, kmax))
-    noninfection_events = np.zeros((N, kmax))
-    for i in range(N):
-        # Unpack times when this individual (i) is succeptible
-        possible_infection_events_individual = set(possible_infection_events[i][0])
+    # Number of infected neighbors at each time step
+    nu = np.asarray(adjacency @ states, dtype=int)
 
-        # Count what happens at each time this node is succeptible (infection event or not)
-        for t in possible_infection_events_individual:
-            # Adjust for 0-indexing, i.e., first column (index 0) represents 1 infected neighbor
-            nu_i_t = nu[i][t]-1
-            
-            # If no infected neighbors, index adjustment becomes negative and we have no update to event counts
-            if nu_i_t < 0:
-                continue
+    # Observation = susceptible at t (t <= T-2) with at least one infected neighbor
+    observed = (states[:, :-1] == 0) & (nu[:, :-1] >= 1)
+    infected_next = states[:, 1:] == 1
 
-            # Infection DOES NOT occur if S at t and at t+1
-            if t+1 in possible_infection_events_individual:  
-                noninfection_events[i][nu_i_t] += 1
+    if observed.any() and nu[:, :-1][observed].max() > kmax:
+        raise ValueError(f"Exposure level {nu[:, :-1][observed].max()} exceeds kmax={kmax}.")
 
-            # Infection DOES occur if S at t but not at t+1
-            else:
-                infection_events[i][nu_i_t] += 1
+    infection_events = np.zeros((n_nodes, kmax), dtype=int)
+    noninfection_events = np.zeros((n_nodes, kmax), dtype=int)
+    node_idx = np.broadcast_to(np.arange(n_nodes)[:, None], observed.shape)
 
-    # Ensure integer type
-    infection_events = np.array(infection_events, dtype=int)
-    noninfection_events = np.array(noninfection_events, dtype=int)
+    inf = observed & infected_next
+    non = observed & ~infected_next
+    np.add.at(infection_events, (node_idx[inf], nu[:, :-1][inf] - 1), 1)
+    np.add.at(noninfection_events, (node_idx[non], nu[:, :-1][non] - 1), 1)
 
     return infection_events, noninfection_events
 
