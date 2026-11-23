@@ -5,9 +5,6 @@ from numpy import ndarray
 
 __all__ = ["heterogeneous_contagion_process", "get_activations", "build_initial_state"]
 
-# heterogeneous_contagion_process and get_activations shamelessly stolen from Nick at:
-# https://github.com/nwlandry/heterogeneous-complex-network-reconstruction/blob/main/lcs/contagion.py
-
 def heterogeneous_contagion_process(
     A, gamma, c, x0, tmin=0, tmax=20, dt=1, random_seed=None
 ):
