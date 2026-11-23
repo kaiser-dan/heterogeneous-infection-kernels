@@ -11,8 +11,7 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.dynamics import get_activations, heterogeneous_contagion_process
-from src.networks import er, sbm, zkc
+from src.simulation import get_activations, heterogeneous_contagion_process, er, sbm, zkc
 
 
 def simple_kernel(beta: float, kmax: int) -> np.ndarray:
