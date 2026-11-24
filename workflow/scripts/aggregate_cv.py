@@ -26,15 +26,21 @@ def load_node_lppd(files) -> pd.DataFrame:
     return pd.concat((pd.read_parquet(f) for f in files), ignore_index=True)
 
 
+def case_keys(df: pd.DataFrame) -> list[str]:
+    """Columns that define one CV case: the DGP family and tobs, if present. 
+    lppd scales with tobs, so curves/selections should never pool across it."""
+    return ["dgp_label"] + (["tobs"] if "tobs" in df.columns else [])
+
+
 def cv_curve(nodes: pd.DataFrame) -> pd.DataFrame:
-    """One (dgp, rep, K) point per row -> node-weighted mean lppd and per-node SE.
+    """One (dgp, [tobs,] rep, K) point per row -> node-weighted mean lppd and per-node SE.
 
     Pools per-node lppd across folds, so:
       * mean_lppd = sum(log_pred) / V (node-weighted; still correct under unequal
         fold sizes)
       * se_lppd   = sd(log_pred) / sqrt(V) (per-node SE)
     """
-    keys = ["dgp_label", "rep", "K"]
+    keys = case_keys(nodes) + ["rep", "K"]
     curve = (
         nodes.groupby(keys, dropna=False)
              .agg(mean_lppd=("log_pred", "mean"),   # = sum / V
@@ -66,26 +72,22 @@ def select_k_1se(curve_one: pd.DataFrame) -> int:
 
 
 def selections(curve: pd.DataFrame) -> pd.DataFrame:
-    """Apply the 1-SE rule once per (dgp_label, rep)."""
-    keys = ["dgp_label", "rep"]
+    """Apply the 1-SE rule once per (dgp_label, [tobs,] rep)."""
+    keys = case_keys(curve) + ["rep"]
     rows = []
-    for (label, rep), g in curve.groupby(keys, dropna=False):
-        rows.append({
-            "dgp_label":  label,
-            "rep":        rep,
-            "selected_K": select_k_1se(g),
-        })
+    for key, g in curve.groupby(keys, dropna=False):
+        rows.append({**dict(zip(keys, key)), "selected_K": select_k_1se(g)})
 
     return pd.DataFrame(rows)
 
 
 def recovery_rates(sel: pd.DataFrame, true_k_by_label: dict) -> pd.DataFrame:
-    """Fraction of reps where selected_K matches the DGP family's true K."""
+    """Fraction of reps where selected_K matches the DGP family's true K, per case."""
     df = sel.copy()
     df["true_K"] = df["dgp_label"].map(true_k_by_label)
     df["correct"] = df["selected_K"] == df["true_K"]
     return (
-        df.groupby("dgp_label", as_index=False)
+        df.groupby(case_keys(df), as_index=False)
           .agg(true_K=("true_K", "first"),
                recovery_rate=("correct", "mean"),
                n_reps=("correct", "size"))
@@ -103,9 +105,9 @@ def run(files, out_dir: Path, true_k_by_label: dict | None = None) -> None:
     curve.to_parquet(out_dir / "_cv_curve.parquet", index=False)
     sel.to_parquet(out_dir / "_cv_selection.parquet", index=False)
 
-    print(f"pooled {len(nodes)} node-records into {len(curve)} (dgp, rep, K) points")
+    print(f"pooled {len(nodes)} node-records into {len(curve)} (case, rep, K) points")
     print("\nselected K per (case, rep):")
-    print(sel.sort_values(["dgp_label", "rep"]).to_string(index=False))
+    print(sel.sort_values(case_keys(sel) + ["rep"]).to_string(index=False))
 
     if true_k_by_label:
         rr = recovery_rates(sel, true_k_by_label)

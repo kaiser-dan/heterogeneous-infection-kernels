@@ -68,7 +68,7 @@ def build_cv_dgp(row: dict, root: str | Path = ".") -> dict:
         if k.get("type") == "nonparametric":
             k["values_file"] = str(Path(root) / k["values_file"])
 
-    return {
+    dgp = {
         "gamma": row["gamma"],
         "rho": row["rho"],
         "tmax": row["tmax"],
@@ -82,3 +82,6 @@ def build_cv_dgp(row: dict, root: str | Path = ".") -> dict:
         "kernels": kernels,
         "assignment": json.loads(row["assignment_json"]),
     }
+    if "tobs" in row:  # observe only a prefix of the tmax-step simulation
+        dgp["tobs"] = int(row["tobs"])
+    return dgp

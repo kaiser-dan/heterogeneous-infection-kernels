@@ -9,6 +9,10 @@ Example:
     }
 
 A single-kernel DGP uses a one-element `kernels` list; `assignment` is then ignored.
+
+Optional "tobs": simulate out to `tmax` but build (M, N) from only the first `tobs`
+time steps. Different tobs values for the same rep are then exact prefixes of one
+trajectory (by construction).
 """
 
 import sys
@@ -60,5 +64,11 @@ def simulate_MN(dgp: dict):
         tmin=0, tmax=dgp["tmax"],
         random_seed=rep,        # deterministic given rep
     )
+    tobs = dgp.get("tobs")
+    if tobs is not None:
+        tobs = int(tobs)
+        if not 2 <= tobs <= x.shape[0]:
+            raise ValueError(f"tobs must be in [2, {x.shape[0]}] (the simulated length), got {tobs}.")
+        x = x[:tobs]
     M, N = get_activations(np.transpose(x), A, kmax)
     return M, N

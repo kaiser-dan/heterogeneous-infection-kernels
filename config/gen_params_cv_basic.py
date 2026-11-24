@@ -1,4 +1,9 @@
-"""Generator for config/params/cv.tsv. Grid: dgp_label x K x rep x fold."""
+"""Generator for config/params/cv_basic.tsv. Grid: dgp_label x tobs x K x rep x fold.
+
+Each (dgp_label, rep) is simulated once out to TMAX; every tobs value fits the first
+`tobs` steps of that same trajectory (see workflow/dgp.py:simulate_MN), so the series
+lengths are nested and only the amount of observed data changes across tobs.
+"""
 
 import itertools
 import sys
@@ -10,12 +15,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gen_params_utils import json_col, write_frame
 
 EXP = "cv_basic"
-WILDCARD_COLUMNS = ["dgp_label", "K", "rep", "fold"]
+WILDCARD_COLUMNS = ["dgp_label", "tobs", "K", "rep", "fold"]
 
 # ---- fixed, global (identical every row) -----------------------------------
 GAMMA = 0.1
 RHO = 0.25
-TMAX = 1000
+TOBS_VALUES = [50, 100, 200, 500, 1000, 2000]
+TMAX = max(TOBS_VALUES)  # simulation horizon; shorter series are prefixes of this one
 N_FOLDS = 5
 REPS = 20
 
@@ -53,8 +59,8 @@ DGP_FAMILIES = {
 
 
 def build_frame() -> pd.DataFrame:
-    rows = itertools.product(DGP_FAMILIES.keys(), K_VALUES, range(REPS), range(N_FOLDS))
-    df = pd.DataFrame(rows, columns=["dgp_label", "K", "rep", "fold"])
+    rows = itertools.product(DGP_FAMILIES.keys(), TOBS_VALUES, K_VALUES, range(REPS), range(N_FOLDS))
+    df = pd.DataFrame(rows, columns=WILDCARD_COLUMNS)
 
     df["gamma"] = GAMMA
     df["rho"] = RHO

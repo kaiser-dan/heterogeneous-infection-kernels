@@ -1,7 +1,7 @@
 """Snakemake script: simulate one CV DGP inline, then fit + score one fold
 (rule run_cv_task).
 
-Writes one row PER HELD-OUT NODE; columns: dgp_label, rep, K,
+Writes one row PER HELD-OUT NODE; columns: dgp_label, tobs, rep, K,
 log_pred, plus node_idx/fold_idx for provenance.
 """
 
@@ -23,6 +23,7 @@ from src.inference.cv import run_one_fold
 fixed = dict(snakemake.params.fixed)
 
 K = int(fixed["K"])
+tobs = int(fixed["tobs"])
 rep = int(fixed["rep"])
 fold = int(fixed["fold"])
 n_folds = int(fixed["n_folds"])
@@ -47,6 +48,7 @@ fr = run_one_fold(
 # one row per held-out node
 rec = pd.DataFrame({
     "dgp_label": fixed["dgp_label"],
+    "tobs":      tobs,
     "rep":       rep,
     "K":         K,
     "fold_idx":  fr.fold_idx,

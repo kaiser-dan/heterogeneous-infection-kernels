@@ -1,4 +1,4 @@
-"""CV rules. Paramspace-driven fan-out over (dgp_label, K, rep, fold)."""
+"""CV rules. Paramspace-driven fan-out over (dgp_label, tobs, K, rep, fold)."""
 
 import json
 
@@ -12,6 +12,7 @@ DGP_LABELS = sorted(CV.frame["dgp_label"].unique())
 
 wildcard_constraints:
     dgp_label = "|".join(DGP_LABELS),
+    tobs = r"\d+",
     K = r"\d+",
     rep = r"\d+",
     fold = r"\d+",
