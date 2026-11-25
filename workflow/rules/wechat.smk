@@ -4,6 +4,7 @@ import json
 
 from params_io import load_experiment
 
+PARAMS_DIR = ROOT / "config" / "params"
 WECHAT_EXPERIMENT = "wechat"
 WECHAT = load_experiment(WECHAT_EXPERIMENT, PARAMS_DIR, filename_params="*")
 WECHAT_FIXED = WECHAT.frame.iloc[0].to_dict()

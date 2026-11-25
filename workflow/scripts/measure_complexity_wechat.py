@@ -22,20 +22,25 @@ if str(ROOT) not in sys.path:
 
 from src.analysis import (
     compute_complexity_score,
-    offset_reference_logit,
+    simple_reference_logit,
     effective_ledoit_wolf_shrinkage,
 )
 
 GRID = np.linspace(-8, 4, 13)  # logit beta0, logit beta starting points
 
 
+def reference(x, kmax):
+    beta0, beta = expit(x)
+    return simple_reference_logit(beta, kmax, beta0=beta0)
+
+
 def closest_offset(mu, reg):
     """Minimise complexity over (beta0, beta), from the best point of a coarse grid."""
     kmax = mu.shape[1]
-    score = lambda x: compute_complexity_score(mu, offset_reference_logit(*expit(x), kmax), reg=reg)["complexity"]
+    score = lambda x: compute_complexity_score(mu, reference(x, kmax), reg=reg)["complexity"]
     x0 = min(product(GRID, GRID), key=score)
     x = minimize(score, x0, method="Nelder-Mead").x
-    return expit(x), compute_complexity_score(mu, offset_reference_logit(*expit(x), kmax), reg=reg)
+    return expit(x), compute_complexity_score(mu, reference(x, kmax), reg=reg)
 
 
 modes = []

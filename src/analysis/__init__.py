@@ -3,7 +3,6 @@ from .utils import (
     effective_rank,
     effective_ledoit_wolf_shrinkage,
     simple_reference_logit,
-    offset_reference_logit,
 )
 from .complexity_analysis import (
     compute_complexity_score,

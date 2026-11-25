@@ -24,8 +24,7 @@ def read_events(paths) -> pd.DataFrame:
         d = d[d["type"].isin(["view", "share"])]
         d["t"] = pd.to_numeric(d["t"], errors="coerce") / 1000.0
         frames.append(d.dropna())
-    ev = pd.concat(frames, ignore_index=True).sort_values("t", kind="stable")
-    return ev.astype({"page": int, "pub": int, "viewer": int, "type": str})
+    return pd.concat(frames, ignore_index=True).astype({"page": int, "pub": int, "viewer": int, "type": str})
 
 
 def friend_edges(ev: pd.DataFrame) -> pd.DataFrame:
@@ -44,9 +43,9 @@ def share_times(ev: pd.DataFrame) -> pd.DataFrame:
 
 def view_trials(ev: pd.DataFrame, edges: pd.DataFrame) -> pd.DataFrame:
     """One row per (user, page) trial: nu and whether the user adopted."""
-    both = pd.concat([edges, edges.rename(columns={"u": "v", "v": "u"})])
+    both = pd.concat([edges, edges.rename(columns={"u": "v", "v": "u"})])  # u = user, v = friend
     st = share_times(ev)
-    expo = st.rename(columns={"user": "v", "t": "t_friend"}).merge(both, on="v")
+    expo = st.rename(columns={"user": "v", "t": "t_friend"}).merge(both, on="v")  # (page, friend v, user u)
     views = ev[ev["type"] == "view"].groupby(["viewer", "page"], as_index=False)["t"].min()
     views = views.rename(columns={"viewer": "u", "t": "t_view"})
 
@@ -55,7 +54,7 @@ def view_trials(ev: pd.DataFrame, edges: pd.DataFrame) -> pd.DataFrame:
     tr = g.groupby(["u", "page"], as_index=False).agg(nu=("t_friend", "size"), t_view=("t_view", "first"))
     own = st.rename(columns={"user": "u", "t": "t_own"})
     tr = tr.merge(own, on=["page", "u"], how="left").fillna({"t_own": np.inf})
-    tr = tr[tr["t_own"] >= tr["t_view"]]  # share recorded before the view
+    tr = tr[tr["t_own"] >= tr["t_view"]]  # drop users whose share precedes their recorded view
     tr["adopt"] = np.isfinite(tr["t_own"])
     return tr.rename(columns={"u": "user"})[["user", "page", "nu", "adopt"]]
 

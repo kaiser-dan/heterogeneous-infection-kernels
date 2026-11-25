@@ -150,22 +150,12 @@ def effective_ledoit_wolf_shrinkage(
     }
 
 
-def simple_reference_logit(beta: float, kmax: int, eps: float = 1e-8) -> np.ndarray:
+def simple_reference_logit(beta: float, kmax: int, eps: float = 1e-8, beta0: float = 0.0) -> np.ndarray:
     """Logit-scale simple contagion reference kernel.
 
-    mu_sc(nu) = 1 - (1 - beta)^nu, nu = 1..kmax, returned on the logit scale.
-    This is the best-fitting simple kernel reference once beta = beta_hat.
-    """
-    nu = np.arange(1, int(kmax) + 1, dtype=float)
-    curve = 1.0 - (1.0 - float(beta)) ** nu
-    return logit(np.clip(curve, eps, 1.0 - eps))
-
-
-def offset_reference_logit(beta0: float, beta: float, kmax: int, eps: float = 1e-8) -> np.ndarray:
-    """Logit-scale simple contagion reference with a baseline adoption probability.
-
-    mu(nu) = 1 - (1 - beta0)(1 - beta)^nu, nu = 1..kmax: adoption independent of friends with
-    probability beta0, and each exposure an independent extra chance beta.
+    mu_sc(nu) = 1 - (1 - beta0)(1 - beta)^nu, nu = 1..kmax, returned on the logit scale.
+    This is the best-fitting simple kernel reference once beta = beta_hat. beta0 is an optional
+    baseline: adoption independent of friends (0 for the paper's simple contagion).
     """
     nu = np.arange(1, int(kmax) + 1, dtype=float)
     curve = 1.0 - (1.0 - float(beta0)) * (1.0 - float(beta)) ** nu

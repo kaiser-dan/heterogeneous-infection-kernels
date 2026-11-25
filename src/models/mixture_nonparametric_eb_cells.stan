@@ -6,12 +6,28 @@
  * For large empirical networks (e.g. WeChat) where most cells are empty.
  */
 
+functions {
+    // per-node log-likelihood under each kernel mode, summed over the node's observed cells
+    array[] vector node_loglik(int V, array[] vector logit_mu, real sigma, array[] vector z_alpha,
+                               array[] int cell_node, array[] int cell_nu, array[] real cell_M, array[] real cell_N) {
+        int K = size(logit_mu);
+        array[V] vector[K] ll = rep_array(rep_vector(0, K), V);
+        for (j in 1:size(cell_node)){
+            for (k in 1:K){
+                real alpha = logit_mu[k][cell_nu[j]] + sigma * z_alpha[j][k];
+                ll[cell_node[j]][k] += cell_M[j] * log_inv_logit(alpha) + cell_N[j] * log1m_inv_logit(alpha);
+            }
+        }
+        return ll;
+    }
+}
+
 data {
-	// number of individuals in population
+    // number of individuals in population
     int<lower=2> V;
 
     // max number of neighbors
-	int<lower=1> kmax;
+    int<lower=1> kmax;
 
     // number of kernel modes (mixture components)
     int<lower=1, upper=V> K;
@@ -82,16 +98,8 @@ model {
         z_alpha[j] ~ normal(0, 1);
     }
 
-    // per-node log-likelihood under each kernel mode
-    array[V] vector[K] ll = rep_array(rep_vector(0, K), V);
-    for (j in 1:n_cells){
-        for (k in 1:K){
-            real alpha = logit_mu[k][cell_nu[j]] + sigma * z_alpha[j][k];
-            ll[cell_node[j]][k] += cell_M[j] * log_inv_logit(alpha) + cell_N[j] * log1m_inv_logit(alpha);
-        }
-    }
-
     // Marginalized mixture likelihood
+    array[V] vector[K] ll = node_loglik(V, logit_mu, sigma, z_alpha, cell_node, cell_nu, cell_M, cell_N);
     for (i in 1:V){
         target += log_sum_exp(log(pi) + ll[i]);
     }
@@ -107,13 +115,7 @@ generated quantities {
     // posterior mixture assignment
     array[V, K] real<lower=0, upper=1> post_prob;
     {
-        array[V] vector[K] ll = rep_array(rep_vector(0, K), V);
-        for (j in 1:n_cells){
-            for (k in 1:K){
-                real alpha = logit_mu[k][cell_nu[j]] + sigma * z_alpha[j][k];
-                ll[cell_node[j]][k] += cell_M[j] * log_inv_logit(alpha) + cell_N[j] * log1m_inv_logit(alpha);
-            }
-        }
+        array[V] vector[K] ll = node_loglik(V, logit_mu, sigma, z_alpha, cell_node, cell_nu, cell_M, cell_N);
         for (i in 1:V){
             post_prob[i] = to_array_1d(softmax(log(pi) + ll[i]));
         }
